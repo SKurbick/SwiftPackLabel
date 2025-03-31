@@ -5,22 +5,3 @@ services:
     build: .
     ports:
       - "8001:8001"
-    depends_on:
-      - postgres
-
-  postgres:
-    image: postgres:17
-    container_name: postgres_db
-    environment:
-      POSTGRES_USER: 'avia'
-      POSTGRES_PASSWORD: 'avia'
-      POSTGRES_DB: 'avia'
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: always
-
-volumes:
-  postgres_data:
-    driver: local
