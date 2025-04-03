@@ -116,6 +116,11 @@ class PDFService:
             pdf.set_xy(25, 27)
             pdf.cell(8, 5, str(len(orders)), align='C')
 
+
+            pdf.set_font("DejaVu", size=12)
+            pdf.set_xy(25, 32)
+            pdf.cell(8, 5, "▼", align='C')
+
             pdf.image(qr_filename_right, x=32, y=15, w=26, h=26)
 
             os.remove(qr_filename_left)
@@ -156,16 +161,16 @@ class PDFService:
         """Создает PDF с таблицей данных"""
         await self._load_photos(data_list)
 
-        pdf = FPDF(orientation='P', unit='mm', format='A4')
+        pdf = FPDF(orientation='L', unit='mm', format='A4')
         pdf.add_font('DejaVu', '', self.dejavu_regular_path)
         pdf.add_font('DejaVu', 'B', self.dejavu_bold_path)
         pdf.set_font("DejaVu", size=8)
 
         col_headers = [
-            "№ сборки", "Наименование", "Фото", "Артикул",
-            "Идентификатор поставщика", "Стикер"
+            "№ Сборки", "Наименование", "Фото", "Артикул Поставщика", "Артикул",
+            "№ Поставки", "Кабинет", "Стикер"
         ]
-        col_widths = [20, 50, 30, 15, 40, 30]
+        col_widths = [30, 60, 30, 30, 30, 30, 20, 30]
         row_height = 30
 
         total = sum(len(orders) for orders in data_list.values())
@@ -227,11 +232,13 @@ class PDFService:
         self._insert_image_in_cell(pdf, order.get("photo_img", ""), cell_x, cell_y, col_widths[2], row_height)
 
         pdf.cell(col_widths[3], row_height, str(order.get("article", "")), border=1, align='C')
-        pdf.cell(col_widths[4], row_height, str(order.get("supply_id", "")), border=1, align='C')
+        pdf.cell(col_widths[4], row_height, str(order.get("nm_id", "")), border=1, align='C')
+        pdf.cell(col_widths[5], row_height, str(order.get("supply_id", "")), border=1, align='C')
+        pdf.cell(col_widths[6], row_height, str(order.get("account", "")), border=1, align='C')
 
         x = pdf.get_x()
         y = pdf.get_y()
-        pdf.cell(col_widths[5], row_height, "", border=1)
+        pdf.cell(col_widths[7], row_height, "", border=1)
 
         pdf.set_xy(x, y)
         partA = str(order.get('partA', ''))

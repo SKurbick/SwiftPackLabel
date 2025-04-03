@@ -24,22 +24,36 @@ class SuppliesService:
     def format_data_to_result(supply: SupplyId, order: StickerSchema, name_and_photo: Dict[int, Dict[str, Any]]) -> \
             Dict[str, Any]:
         return {"order_id": order.order_id,
+                "account": supply.account,
                 "article": order.local_vendor_code,
                 "supply_id": supply.supply_id,
                 "nm_id": order.nm_id,
                 "file": order.file,
                 "partA": order.partA,
                 "partB": order.partB,
+                "category": name_and_photo.get(order.nm_id, {"category": "НЕТ Категории"})["category"],
                 "subject_name": name_and_photo.get(order.nm_id, {"subject_name": "НЕТ Наименования"})["subject_name"],
                 "photo_link": name_and_photo.get(order.nm_id, {"photo_link": "НЕТ ФОТО"})["photo_link"]}
+
+    @staticmethod
+    def _change_category_name(result: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+        logger.info("Изменение наименования категории если есть различия")
+        for items in result.values():
+            if categories := {item['subject_name'] for item in items}:
+                if len(categories) > 1:
+                    max_category = min(categories)
+                    for item in items:
+                        item['subject_name'] = max_category
+        return result
 
     async def group_orders_to_wild(self, supply_ids: SupplyIdBodySchema) -> Dict[str, List[Dict[str, Any]]]:
         logger.info("Получение недостающих данных о заказе и группировка с сортировкой всех данных по wild")
         result = {}
-        name_and_photo = await CardData(self.db).get_subject_name_and_photo_to_article(
+        name_and_photo = await CardData(self.db).get_subject_name_category_and_photo_to_article(
             [order.nm_id for orders in supply_ids.supplies for order in orders.orders])
         name_and_photo: Dict[int, Dict[str, Any]] = \
-            {data["article_id"]: {"subject_name": data["subject_name"], "photo_link": data["photo_link"]}
+                {data["article_id"]: {"subject_name": data["subject_name"], "photo_link": data["photo_link"],
+                                  "category": data["parent_name"]}
              for data in name_and_photo}
         order: StickerSchema
         for supply in supply_ids.supplies:
@@ -48,7 +62,8 @@ class SuppliesService:
                     result[order.local_vendor_code] = [self.format_data_to_result(supply, order, name_and_photo)]
                 else:
                     result[order.local_vendor_code].append(self.format_data_to_result(supply, order, name_and_photo))
-        return dict(sorted(result.items()))
+        # self._change_category_name(result)
+        return dict(sorted(result.items(),key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]),))
 
     @staticmethod
     async def get_information_to_supplies() -> List[Dict]:

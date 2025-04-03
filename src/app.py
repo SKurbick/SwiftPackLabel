@@ -1,10 +1,8 @@
-import logging
-
 from starlette.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, status
-from src.routes import router
 from src.settings import settings
 from src.db import check_db_connected, check_db_disconnected
+from src.routers import router
 
 
 def include_router(application: FastAPI) -> None:
