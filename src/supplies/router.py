@@ -5,7 +5,7 @@ from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
 from src.service.zip_service import create_zip_archive
-
+from src.archives.archives import Archives
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
@@ -49,6 +49,7 @@ async def upload_stickers_to_orders(
         "stickers.pdf": pdf_sticker.getvalue(),
         "selection_sheet.pdf": selection_sheet_content.getvalue()
     })
+    await Archives(db).save_archive(zip_buffer)
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
