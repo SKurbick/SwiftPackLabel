@@ -1,16 +1,20 @@
 from starlette.responses import StreamingResponse
 from fastapi import APIRouter, Depends, Body, status
+
+
+from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
+
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-async def get_supplies() -> SupplyIdResponseSchema:
+async def get_supplies(user: dict = Depends(get_current_user)) -> SupplyIdResponseSchema:
     """
     Получить список всех поставок.
     Returns:
@@ -27,7 +31,8 @@ async def get_supplies() -> SupplyIdResponseSchema:
                         422: {"description": "Ошибка валидации входных данных"}})
 async def upload_stickers_to_orders(
         supply_ids: SupplyIdBodySchema = Body(),
-        db: AsyncGenerator = Depends(get_db_connection)
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
 ) -> StreamingResponse:
     """
     Генерирует и возвращает ZIP-архив, содержащий PDF со стикерами и лист подбора
@@ -49,7 +54,7 @@ async def upload_stickers_to_orders(
         "stickers.pdf": pdf_sticker.getvalue(),
         "selection_sheet.pdf": selection_sheet_content.getvalue()
     })
-    await Archives(db).save_archive(zip_buffer)
+    await Archives(db).save_archive(zip_buffer, account_name=user.get('username'))
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",

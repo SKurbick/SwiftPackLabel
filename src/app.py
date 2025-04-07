@@ -3,6 +3,7 @@ from fastapi import FastAPI, status
 from src.settings import settings
 from src.db import check_db_connected, check_db_disconnected
 from src.routes import router
+from src.auth.init_superuser import create_initial_superuser
 
 
 def include_router(application: FastAPI) -> None:
@@ -35,6 +36,7 @@ app = start_application()
 @app.on_event('startup')
 async def startup() -> None:
     await check_db_connected()
+    await create_initial_superuser()
 
 
 @app.on_event('shutdown')

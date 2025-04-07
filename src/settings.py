@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     max_connection_lifetime: float = 3600.0  # 1 hour
     max_connection_idle_time: float = 600.0
 
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "your_secret_key_here")
+    ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30)
+
+    INIT_SUPERUSER_USERNAME: str = os.getenv("INIT_SUPERUSER_USERNAME", "admin")
+    INIT_SUPERUSER_PASSWORD: str = os.getenv("INIT_SUPERUSER_PASSWORD", "adminpassword")
+    INIT_SUPERUSER_EMAIL: str = os.getenv("INIT_SUPERUSER_EMAIL", "admin@example.com")
+
 
 @lru_cache()
 def get_settings() -> Settings:
