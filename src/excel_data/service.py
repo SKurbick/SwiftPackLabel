@@ -4,6 +4,7 @@ from typing import List, Dict, Tuple, Optional
 import pandas as pd
 from io import BytesIO
 from fastapi import HTTPException, status
+from pathlib import Path
 
 from src.excel_data.schema import WildModelPair
 from src.logger import app_logger as logger
@@ -12,21 +13,22 @@ from src.logger import app_logger as logger
 class ExcelDataService:
     """Сервис для работы с Excel-данными."""
 
-    def __init__(self, storage_path: str = "src/excel_data/data.json"):
+    def __init__(self, storage_path: str = None):
         """
         Инициализирует сервис для работы с Excel-данными.
-        
         Args:
             storage_path: Путь к файлу для хранения данных в формате JSON
         """
-        self.storage_path = storage_path
+        if storage_path is None:
+            project_root = Path(__file__).parent.parent.parent
+            self.storage_path = os.path.join(project_root, "src", "excel_data", "data", "data.json")
+        else:
+            self.storage_path = storage_path
         self._ensure_storage_exists()
 
     def _ensure_storage_exists(self) -> None:
         """Убеждается, что директория для хранения существует."""
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-        
-        # Создаем пустой JSON-файл, если он не существует
         if not os.path.exists(self.storage_path):
             with open(self.storage_path, 'w', encoding='utf-8') as f:
                 json.dump({"data": []}, f, ensure_ascii=False, indent=2)

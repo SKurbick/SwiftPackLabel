@@ -33,8 +33,12 @@ class ImageService:
     """Сервис для работы с изображениями"""
 
     @staticmethod
-    def create_temp_dir(path="src/service/temp"):
+    def create_temp_dir(path=None):
         """Создает временную директорию, если она не существует"""
+        if path is None:
+            # Определяем корень проекта и используем относительный путь от него
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            path = os.path.join(project_root, "src", "service", "temp")
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -94,6 +98,7 @@ class PDFService:
             if not isinstance(orders, list):
                 continue
             pdf.add_font('DejaVu', '', self.dejavu_regular_path)
+            pdf.add_font('DejaVu', 'B', self.dejavu_bold_path)
             pdf.set_font("DejaVu", size=8)
             pdf.add_page()
 
@@ -104,15 +109,35 @@ class PDFService:
             qr_filename_left = image_service.generate_qr_code(qr_data_left)
             qr_filename_right = image_service.generate_qr_code(qr_data_right)
 
-            pdf.set_font("DejaVu", size=12)
-            pdf.cell(58, 5, orders[0]["subject_name"], ln=True, align='C')
-
-            pdf.set_font("DejaVu", size=4)
-            pdf.cell(58, 4, wild_data.get(key, ''), ln=True, align='C')
+            subject_name = orders[0]["subject_name"]
+            if len(subject_name) > 20:
+                font_size = min(12, 12 - (len(subject_name) - 15) // 5)
+                pdf.set_font("DejaVu", size=font_size)
+            else:
+                pdf.set_font("DejaVu", size=12)
+            pdf.cell(58, 4, subject_name, ln=True, align='C')
+            wild_text = wild_data.get(key, '')
+            pdf.set_font("DejaVu", 'B', 8)
+            if len(wild_text) > 30:
+                split_pos = 20
+                if ' ' in wild_text[20:]:
+                    space_pos = wild_text.find(' ', 20)
+                    split_pos = space_pos
+                elif ' ' in wild_text[:20]:
+                    space_pos = wild_text[:20].rfind(' ')
+                    split_pos = space_pos
+                
+                first_line = wild_text[:split_pos]
+                second_line = wild_text[split_pos:].lstrip()  # Удаляем начальные пробелы
+                pdf.cell(58, 3, first_line, ln=True, align='C')
+                pdf.cell(58, 3, second_line, ln=True, align='C')
+            else:
+                pdf.cell(58, 5, wild_text, ln=True, align='C')
+            pdf.set_font("DejaVu", '', 16)
 
             pdf.set_font("DejaVu", size=16)
             pdf.set_x((58 - pdf.get_string_width(f"{key}")) / 2)
-            pdf.cell(pdf.get_string_width(f"{key}"), 6, f"{key}", ln=True)
+            pdf.cell(pdf.get_string_width(f"{key}"), 5, f"{key}", ln=True)
 
             pdf.image(qr_filename_left, x=1, y=15, w=26, h=26)
 

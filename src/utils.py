@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from src.logger import app_logger as logger
+from src.excel_data.service import ExcelDataService
 import json
 import os
 
@@ -32,16 +33,5 @@ def format_date(iso_date: str) -> str:
 
 
 def get_information_to_data():
-    try:
-        data_json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                      "src","src", "excel_data", "data.json")
-
-        with open(data_json_path, 'r', encoding='utf-8') as f:
-            wild_data = json.load(f)
-
-        wild_dict = {item["wild"]: item['модель'] for item in wild_data.get("data", [])}
-
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке data.json: {e}")
-        wild_dict = {}
-    return wild_dict
+    wild_data = ExcelDataService()._read_data()
+    return {item["wild"]: item['модель'] for item in wild_data}
