@@ -34,4 +34,4 @@ def format_date(iso_date: str) -> str:
 
 def get_information_to_data():
     wild_data = ExcelDataService()._read_data()
-    return {item["wild"]: item['модель'] for item in wild_data}
+    return {item["Вилд"]: item['Модель'] for item in wild_data}

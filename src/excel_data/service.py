@@ -62,11 +62,11 @@ class ExcelDataService:
         """
         try:
             df = pd.read_excel(BytesIO(file_content))
-            required_columns = ['wild', 'модель']
+            required_columns = ['Вилд', 'Модель']
             if any(col not in df.columns for col in required_columns):
-                return False, "Excel-файл должен содержать столбцы 'wild' и 'модель'", []
+                return False, "Excel-файл должен содержать столбцы 'Вилд' и 'модель'", []
             if len(df.columns) != 2:
-                return False, "Excel-файл должен содержать только два столбца: 'wild' и 'модель'", []
+                return False, "Excel-файл должен содержать только два столбца: 'Вилд' и 'модель'", []
             for col in required_columns:
                 df[col] = df[col].fillna('').astype(str)
                 if df[col].str.strip().eq('').any():
