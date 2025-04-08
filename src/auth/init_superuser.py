@@ -28,5 +28,4 @@ async def create_initial_superuser():
 
 
 if __name__ == "__main__":
-    # Run this script directly to create a superuser
     asyncio.run(create_initial_superuser())

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from src.logger import app_logger as logger
 
 from src.response import AsyncHttpClient
+from src.utils import get_information_to_data
 
 
 class OrderItem(BaseModel):
@@ -87,6 +88,7 @@ class PDFService:
         pdf = FPDF(unit="mm", format=(58, 40))
         pdf.set_margins(0, 0, 0)
         pdf.set_auto_page_break(auto=False)
+        wild_data = get_information_to_data()
 
         for key, orders in stickers.items():
             if not isinstance(orders, list):
@@ -103,11 +105,14 @@ class PDFService:
             qr_filename_right = image_service.generate_qr_code(qr_data_right)
 
             pdf.set_font("DejaVu", size=12)
-            pdf.cell(58, 7, orders[0]["subject_name"], ln=True, align='C')
+            pdf.cell(58, 5, orders[0]["subject_name"], ln=True, align='C')
+
+            pdf.set_font("DejaVu", size=4)
+            pdf.cell(58, 4, wild_data.get(key, ''), ln=True, align='C')
 
             pdf.set_font("DejaVu", size=16)
             pdf.set_x((58 - pdf.get_string_width(f"{key}")) / 2)
-            pdf.cell(pdf.get_string_width(f"{key}"), 8, f"{key}", ln=True)
+            pdf.cell(pdf.get_string_width(f"{key}"), 6, f"{key}", ln=True)
 
             pdf.image(qr_filename_left, x=1, y=15, w=26, h=26)
 
@@ -115,7 +120,6 @@ class PDFService:
 
             pdf.set_xy(25, 27)
             pdf.cell(8, 5, str(len(orders)), align='C')
-
 
             pdf.set_font("DejaVu", size=12)
             pdf.set_xy(25, 32)

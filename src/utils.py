@@ -1,7 +1,9 @@
-import json
 import re
 from datetime import datetime
 from pathlib import Path
+from src.logger import app_logger as logger
+import json
+import os
 
 
 def get_wb_tokens() -> dict:
@@ -9,7 +11,6 @@ def get_wb_tokens() -> dict:
 
     with tokens_path.open("r", encoding="utf-8") as file:
         return json.load(file)
-
 
 
 def process_local_vendor_code(s):
@@ -28,3 +29,19 @@ def process_local_vendor_code(s):
 def format_date(iso_date: str) -> str:
     dt = datetime.strptime(iso_date, "%Y-%m-%dT%H:%M:%SZ")
     return dt.strftime("%d.%m.%Y")
+
+
+def get_information_to_data():
+    try:
+        data_json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                      "src","src", "excel_data", "data.json")
+
+        with open(data_json_path, 'r', encoding='utf-8') as f:
+            wild_data = json.load(f)
+
+        wild_dict = {item["wild"]: item['модель'] for item in wild_data.get("data", [])}
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке data.json: {e}")
+        wild_dict = {}
+    return wild_dict
