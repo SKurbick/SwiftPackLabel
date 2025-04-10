@@ -1,9 +1,9 @@
-from typing import Annotated, List
+from typing import Annotated, List, Dict
 
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Response
 from fastapi.responses import StreamingResponse
 
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_current_user, get_current_superuser
 from src.db import get_db_connection, AsyncGenerator
 from src.archives.archives import Archives
 from src.archives.schema import ArchiveResponse, ArchiveIdsRequest
@@ -47,3 +47,26 @@ async def download_archives(
         )
 
     return create_archive_response(archives_list)
+    
+    
+@archive.delete(
+    "/{archive_id}",
+    summary="Delete archive",
+    description="Delete an archive by ID (superuser only)",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_archive(
+        archive_id: int,
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: Dict = Depends(get_current_superuser)) -> Response:
+    """Delete an archive by ID. Only superusers can perform this action."""
+    archives_service = Archives(db)
+    deleted = await archives_service.delete_archive(archive_id)
+    
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Архив с ID {archive_id} не найден"
+        )
+    
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
