@@ -102,64 +102,67 @@ class PDFService:
             pdf.set_font("DejaVu", size=8)
             pdf.add_page()
 
-            qr_data_right = f"{key}/{len(orders)}"
+            center_x = pdf.w / 2
+            center_y = pdf.h / 2
 
-            image_service = ImageService()
-            qr_filename_left = image_service.generate_qr_code(qr_data_right)
-            qr_filename_right = image_service.generate_qr_code(qr_data_right)
+            with pdf.rotation(180, x=center_x, y=center_y):
+                qr_data_right = f"{key}/{len(orders)}"
 
-            subject_name = orders[0]["subject_name"]
-            if len(subject_name) > 20:
-                font_size = min(12, 12 - (len(subject_name) - 15) // 5)
-                pdf.set_font("DejaVu", size=font_size)
-            else:
-                pdf.set_font("DejaVu", size=12)
-            pdf.cell(58, 4, subject_name, ln=True, align='C')
-            wild_text = wild_data.get(key, '')
+                image_service = ImageService()
+                qr_filename_left = image_service.generate_qr_code(qr_data_right)
+                qr_filename_right = image_service.generate_qr_code(qr_data_right)
 
-            pdf.set_font("DejaVu", 'B', 10)
-            max_line_length = 24
-
-            if len(wild_text) > max_line_length:
-                # Первый вариант: ищем пробел в пределах max_line_length
-                split_index = -1
-                for i in range(max_line_length, -1, -1):
-                    if wild_text[i] == ' ':
-                        split_index = i
-                        break
-                if split_index != -1:
-                    # Проверяем, не слишком ли длинная вторая часть
-                    first_candidate = wild_text[:split_index].rstrip()
-                    second_candidate = wild_text[split_index:].lstrip()
-                    if len(second_candidate) > max_line_length:
-                        # Если вторая часть длиннее, делим исходную строку ровно пополам
-                        split_index = len(wild_text) // 2
+                subject_name = orders[0]["subject_name"]
+                if len(subject_name) > 20:
+                    font_size = min(12, 12 - (len(subject_name) - 15) // 5)
+                    pdf.set_font("DejaVu", size=font_size)
                 else:
-                    split_index = max_line_length
+                    pdf.set_font("DejaVu", size=12)
+                pdf.cell(58, 4, subject_name, ln=True, align='C')
+                wild_text = wild_data.get(key, '')
 
-                first_line = wild_text[:split_index].rstrip()
-                second_line = wild_text[split_index:].lstrip()
+                pdf.set_font("DejaVu", 'B', 10)
+                max_line_length = 24
 
-                pdf.cell(58, 3, first_line, ln=True, align='C')
-                pdf.cell(58, 3, second_line, ln=True, align='C')
-            else:
-                pdf.cell(58, 5, wild_text, ln=True, align='C')
+                if len(wild_text) > max_line_length:
+                    split_index = -1
+                    for i in range(max_line_length, -1, -1):
+                        if wild_text[i] == ' ':
+                            split_index = i
+                            break
+                    if split_index != -1:
+                        first_candidate = wild_text[:split_index].rstrip()
+                        second_candidate = wild_text[split_index:].lstrip()
+                        if len(second_candidate) > max_line_length:
+                            split_index = len(wild_text) // 2
+                    else:
+                        split_index = max_line_length
 
-            pdf.set_font("DejaVu", '', 16)
-            pdf.set_font("DejaVu", size=12)
-            pdf.set_x((58 - pdf.get_string_width(f"{key}")) / 2)
-            pdf.cell(pdf.get_string_width(f"{key}"), 7, f"{key}", ln=True)
-            pdf.image(qr_filename_left, x=1, y=15, w=26, h=26)
-            pdf.set_font("DejaVu", size=10)
-            pdf.set_xy(25, 27)
-            pdf.cell(8, 5, str(len(orders)), align='C')
-            pdf.set_font("DejaVu", size=12)
-            pdf.set_xy(25, 32)
-            pdf.cell(8, 5, "▼", align='C')
-            pdf.image(qr_filename_right, x=32, y=15, w=26, h=26)
+                    first_line = wild_text[:split_index].rstrip()
+                    second_line = wild_text[split_index:].lstrip()
+
+                    pdf.cell(58, 3, first_line, ln=True, align='C')
+                    pdf.cell(58, 3, second_line, ln=True, align='C')
+                else:
+                    pdf.cell(58, 5, wild_text, ln=True, align='C')
+
+                pdf.set_font("DejaVu", '', 16)
+                pdf.set_font("DejaVu", size=12)
+                pdf.set_x((58 - pdf.get_string_width(f"{key}")) / 2)
+                pdf.cell(pdf.get_string_width(f"{key}"), 7, f"{key}", ln=True)
+                pdf.image(qr_filename_left, x=1, y=15, w=26, h=26)
+                pdf.set_font("DejaVu", size=10)
+                pdf.set_xy(25, 27)
+                pdf.cell(8, 5, str(len(orders)), align='C')
+                pdf.set_font("DejaVu", size=12)
+                pdf.set_xy(25, 32)
+                pdf.cell(8, 5, "▼", align='C')
+                pdf.image(qr_filename_right, x=32, y=15, w=26, h=26)
+
             os.remove(qr_filename_left)
             os.remove(qr_filename_right)
             self._process_sticker_images(pdf, orders)
+
         pdf_buffer.write(pdf.output(dest="S"))
         pdf_buffer.seek(0)
         return pdf_buffer
