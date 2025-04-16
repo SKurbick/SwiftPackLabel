@@ -1,7 +1,7 @@
 import asyncio
 import json
 import urllib.parse
-
+from src.logger import app_logger as logger
 from src.users.account import Account
 from src.response import parse_json
 
@@ -21,7 +21,6 @@ class Orders(Account):
         return parse_json(response)
 
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
-        query_params = {'type': 'svg', 'width': 58, 'height': 40}
         url_with_params = f"{self.url}/stickers?type=png&width=58&height=40"
         batches = [order_ids[i:i + 99] for i in range(0, len(order_ids), 99)]
 
@@ -36,10 +35,25 @@ class Orders(Account):
 
             response_json = parse_json(response)
 
-            # Обновляем существующий словарь результатов
             if not result:
                 result = {self.account: {supply: response_json}}
             else:
                 result[self.account][supply]['stickers'].extend(response_json['stickers'])
 
         return result
+
+
+    async def get_orders(self):
+        orders = []
+        next_value = 0
+        while True:
+            params = {"limit": 1000, "next": next_value}
+            response = await self.async_client.get(f"{self.url}/new", params=params, headers=self.headers)
+            data = parse_json(response)
+            orders.extend(data.get("orders", []))
+            next_value = data.get("next")
+            logger.info(f"Получены {len(orders)} поставок and next {next_value}, account {self.account}")
+            if not next_value:
+                break
+
+        return orders

@@ -5,3 +5,10 @@ services:
     build: .
     ports:
       - "8001:8001"
+    volumes:
+      - excel_data:/app/src/excel_data/data
+      - archives_data:/app/src/archives/data
+
+volumes:
+  excel_data:
+  archives_data:
