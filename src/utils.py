@@ -38,5 +38,5 @@ def get_information_to_data():
     wild_data = ExcelDataService()._read_data()
     if (wild_data and all(isinstance(item, dict) for item in wild_data) and
             (wild_data and "Вилд" in wild_data[0] and "Модель" in wild_data[0])):
-        return {item["Вилд"]: item['Модель'] for item in wild_data}
+        return {item["Вилд"].lower(): item['Модель'] for item in wild_data}
     return {}
