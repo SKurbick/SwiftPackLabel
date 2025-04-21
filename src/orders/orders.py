@@ -5,6 +5,7 @@ from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
+from datetime import timezone, timedelta
 
 
 class OrdersService:
@@ -19,7 +20,7 @@ class OrdersService:
         self.db = db
         self.article_db = ArticleDB(db) if db else None
 
-    async def get_all_orders(self) -> Dict[str, List[Dict[str, Any]]]:
+    async def get_all_new_orders(self) -> Dict[str, List[Dict[str, Any]]]:
         """
         Получает все заказы из всех кабинетов с информацией о товарах.
         Делает один запрос в базу данных для всех nm_id.
@@ -220,3 +221,50 @@ class OrdersService:
             except Exception as e:
                 logger.error(f"Ошибка при форматировании заказа {supply.get('id', 'Нет ID')}: {str(e)}")
         return formatted_orders
+
+    def filter_orders_by_time(self, orders: list, time_delta: float) -> list:
+        """
+        Фильтрует заказы по времени создания (оставляет только те, что созданы позже now - time_delta часов)
+        """
+        if time_delta is None:
+            return orders
+        now = datetime.datetime.now(datetime.timezone.utc)
+        min_created_at = now - timedelta(hours=time_delta)
+
+        def parse_created_at(order):
+            try:
+                dt = datetime.datetime.fromisoformat(order["created_at"].replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                return dt
+            except Exception:
+                return None
+
+        return [order for order in orders if (created := parse_created_at(order)) and created < min_created_at]
+
+    def filter_orders_by_article(self, orders: list, article: str) -> list:
+        """
+        Фильтрует заказы по артикулу (через process_local_vendor_code)
+        """
+        if not article:
+            return orders
+        article_processed = process_local_vendor_code(article)
+        return [order for order in orders if process_local_vendor_code(order["article"]) == article_processed]
+
+    def sort_orders(self, orders: list) -> list:
+        """
+        Сортирует заказы по времени создания (по убыванию)
+        """
+        return sorted(orders, key=lambda x: x["created_at"], reverse=True)
+
+    async def get_filtered_orders(self, time_delta: float = None, article: str = None) -> list:
+        """
+        Получает, фильтрует и сортирует заказы по заданным параметрам
+        """
+        all_orders = await self.get_all_new_orders()
+        formatted_orders = []
+        for orders_list in all_orders.values():
+            formatted_orders.extend(orders_list)
+        filtered = self.filter_orders_by_time(formatted_orders, time_delta)
+        filtered = self.filter_orders_by_article(filtered, article)
+        return self.sort_orders(filtered)
