@@ -1,5 +1,5 @@
-from typing import List
-from pydantic import BaseModel, ConfigDict
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BaseSchema(BaseModel):
@@ -23,6 +23,11 @@ class OrderDetail(BaseSchema):
     elapsed_time: str = "Н/Д"
 
 
-class OrdersResponse(BaseSchema):
-    """Модель ответа со списком заказов."""
-    orders: List[OrderDetail]
+class GroupedOrderInfo(BaseSchema):
+    """Модель сгруппированной информации о заказах по артикулу wild."""
+    wild: str
+    stock_quantity: int = 0
+    doc_name: str = "Нет наименования в документе"
+    api_name: str = "Нет наименования из API"
+    orders: List[Dict[str, Any]] = []
+    order_count: int = 0

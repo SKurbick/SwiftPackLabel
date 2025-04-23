@@ -32,3 +32,27 @@ class Supplies(Account):
         response = await self.async_client.get(f"{self.url}/{supply_id}/orders", headers=self.headers)
         response_json = parse_json(response)
         return {self.account: {supply_id: {"orders": response_json.get('orders', [])}}}
+
+
+    async def create_supply(self, name: str) -> dict:
+        """
+        Создаёт новую поставку в кабинете по наименованию.
+        :param name: Наименование поставки
+        :return: Ответ от WB API (id поставки или ошибка)
+        """
+        response = await self.async_client.post(self.url, json={"name": name}, headers=self.headers)
+        logger.info(f"Создана поставка с именем '{name}' для аккаунта {self.account}. Ответ: {response}")
+        return parse_json(response)
+
+
+    async def add_order_to_supply(self, supply_id: str, order_id: int) -> dict:
+        """
+        Добавляет сборочное задание (orderId) к поставке (supplyId) через PATCH-запрос к WB API.
+        :param supply_id: ID поставки (например, WB-GI-1234567)
+        :param order_id: ID сборочного задания (orderId)
+        :return: Ответ от WB API
+        """
+        url = f"{self.url}/{supply_id}/orders/{order_id}"
+        response = await self.async_client.patch(url, headers=self.headers)
+        logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
+        return parse_json(response)
