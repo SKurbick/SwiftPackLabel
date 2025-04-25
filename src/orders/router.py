@@ -4,10 +4,10 @@ from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
-from src.orders.schema import OrderDetail, GroupedOrderInfo
+from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut
 from typing import Dict, Any, Coroutine
 
-from fastapi import APIRouter, Depends, status, Request, HTTPException, Query
+from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body
 
 orders = APIRouter(prefix='/orders', tags=['Orders'])
 
@@ -19,7 +19,7 @@ async def get_orders(
         user: dict = Depends(get_current_user),
         time_delta: float = Query(1, description="Фильтрация по времени создания заказа (в часах)"),
         wild: str = Query(None, description="Фильтрация по wild")
-) -> dict[str, list[dict]]:
+) -> Dict[str, GroupedOrderInfo]:
     """
     Получить сгруппированные по wild заказы с расширенной информацией:
     Args:
@@ -48,3 +48,15 @@ async def get_orders(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Произошла ошибка при получении заказов",
         ) from e
+
+@orders.post("/with-supply-name", response_model=SupplyAccountWildOut, status_code=status.HTTP_201_CREATED)
+async def add_fact_orders_and_supply_name(
+    payload: OrdersWithSupplyNameIn = Body(...),
+    db: AsyncGenerator = Depends(get_db_connection),
+    user: dict = Depends(get_current_user)
+) -> SupplyAccountWildOut:
+    """
+    Принимает структуру Dict[str, GroupedOrderInfo] + name_supply,
+    возвращает wild (список всех wild) и supply_account (account:supply_id).
+    """
+    ...

@@ -31,3 +31,17 @@ class GroupedOrderInfo(BaseSchema):
     api_name: str = "Нет наименования из API"
     orders: List[Dict[str, Any]] = []
     order_count: int = 0
+
+
+class GroupedOrderInfoWithFact(GroupedOrderInfo):
+    fact_orders: int = 0
+
+
+class OrdersWithSupplyNameIn(BaseSchema):
+    orders: Dict[str, GroupedOrderInfoWithFact]
+    name_supply: str
+
+
+class SupplyAccountWildOut(BaseSchema):
+    wild: List[str]
+    supply_account: Dict[str, str]

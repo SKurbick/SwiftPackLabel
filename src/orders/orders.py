@@ -5,9 +5,10 @@ from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
+from src.models.stock import StockDB
 from datetime import timedelta
-from collections import defaultdict
 from src.orders.schema import GroupedOrderInfo
+from collections import defaultdict
 
 
 class OrdersService:
@@ -279,22 +280,37 @@ class OrdersService:
             order_list: Список заказов
             
         Returns:
-            Dict[str, List[Dict]]: Словарь, где ключ - wild, а значение - список заказов,
-                                  отсортированный по наименованию предмета и артикулу
+            Dict[str, GroupedOrderInfo]: Словарь с данными о заказах по артикулам
         """
-        from collections import defaultdict
-        
         logger.info("Группировка заказов по артикулу wild")
         
         wild_data = get_information_to_data()
-        grouped_orders = defaultdict(list)
+        stock_db = StockDB(self.db)
+        result = {}
 
+        temp_grouped_orders = defaultdict(list)
         for order in order_list:
             order_dict = order.model_dump()
             order_dict["wild_name"] = wild_data.get(order.article, "")
-            grouped_orders[order.article].append(order_dict)
+            temp_grouped_orders[order.article].append(order_dict)
+
+        for wild, orders in temp_grouped_orders.items():
+            stock_quantity = await stock_db.get_stock_by_wild(wild)
+            api_name = next((item.get('subject_name', 'Нет наименования из API') 
+                            for item in orders if item.get('subject_name')), 
+                           'Нет наименования из API')
+            doc_name = wild_data.get(wild, "Нет наименования в документе")
+
+            result[wild] = GroupedOrderInfo(
+                wild=wild,
+                stock_quantity=stock_quantity,
+                doc_name=doc_name,
+                api_name=api_name,
+                orders=orders,
+                order_count=len(orders)
+            )
 
         return dict(sorted(
-            grouped_orders.items(),
+            result.items(),
             key=lambda x: x[0]
         ))
