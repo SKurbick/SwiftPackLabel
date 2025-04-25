@@ -5,10 +5,9 @@ from src.orders.orders import OrdersService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo
-from typing import Dict
+from typing import Dict, Any, Coroutine
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query
-
 
 orders = APIRouter(prefix='/orders', tags=['Orders'])
 
@@ -18,9 +17,9 @@ async def get_orders(
         request: Request,
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user),
-        time_delta: float = Query(None, description="Фильтрация по времени создания заказа (в часах)"),
+        time_delta: float = Query(1, description="Фильтрация по времени создания заказа (в часах)"),
         wild: str = Query(None, description="Фильтрация по wild")
-) -> Dict[str, GroupedOrderInfo]:
+) -> dict[str, list[dict]]:
     """
     Получить сгруппированные по wild заказы с расширенной информацией:
     Args:
@@ -39,7 +38,7 @@ async def get_orders(
         filtered_orders = await orders_service.get_filtered_orders(time_delta=time_delta, article=wild)
         order_details = [OrderDetail(**order) for order in filtered_orders]
         grouped_orders = await orders_service.group_orders_by_wild(order_details)
-            
+
         elapsed_time = time.time() - start_time
         logger.info(f"Заказы сгруппированы успешно. Всего: {len(filtered_orders)}. Время: {elapsed_time:.2f} сек.")
         return grouped_orders

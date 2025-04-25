@@ -2,7 +2,6 @@ import asyncio
 import datetime
 from typing import List, Dict, Any, Set
 from src.logger import app_logger as logger
-from src.models.stock import StockDB
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
@@ -22,7 +21,6 @@ class OrdersService:
         """
         self.db = db
         self.article_db = ArticleDB(db) if db else None
-        self.stock_db = StockDB(db) if db else None
 
     async def get_all_new_orders(self) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -272,40 +270,31 @@ class OrdersService:
         filtered = self.filter_orders_by_time(formatted_orders, time_delta)
         filtered = self.filter_orders_by_article(filtered, article)
         return self.sort_orders(filtered)
-
-    async def group_orders_by_wild(self, order_list) -> Dict[str, GroupedOrderInfo]:
+        
+    async def group_orders_by_wild(self, order_list):
         """
-        Группирует заказы по артикулу wild с добавлением дополнительной информации
+        Группирует заказы по артикулу wild с добавлением информации из get_information_to_data
+        
         Args:
             order_list: Список заказов
+            
         Returns:
-            Dict[str, GroupedOrderInfo]: Словарь с расширенной информацией о группах заказов
+            Dict[str, List[Dict]]: Словарь, где ключ - wild, а значение - список заказов,
+                                  отсортированный по наименованию предмета и артикулу
         """
-        logger.info("Группировка заказов по артикулу wild с дополнительной информацией")
-
+        from collections import defaultdict
+        
+        logger.info("Группировка заказов по артикулу wild")
+        
         wild_data = get_information_to_data()
-        grouped_orders = {}
+        grouped_orders = defaultdict(list)
 
-        orders_by_article = defaultdict(list)
         for order in order_list:
             order_dict = order.model_dump()
-            order_dict["wild_name"] = wild_data.get(order.article, "Нет наименования из документа")
-            orders_by_article[order.article].append(order_dict)
+            order_dict["wild_name"] = wild_data.get(order.article, "")
+            grouped_orders[order.article].append(order_dict)
 
-        for wild, orders in orders_by_article.items():
-            stock_quantity = await self.stock_db.get_stock_by_wild(wild)
-
-            doc_name = wild_data.get(wild, "Нет наименования в документе")
-            api_name = next((item.get('subject_name', "Нет наименования из API") for item in orders),
-                            "Нет наименования из API")
-
-            grouped_orders[wild] = GroupedOrderInfo(
-                wild=wild,
-                stock_quantity=stock_quantity,
-                doc_name=doc_name,
-                api_name=api_name,
-                orders=orders,
-                order_count=len(orders)
-            ).model_dump()
-
-        return dict(sorted(grouped_orders.items(), key=lambda x: x[0]))
+        return dict(sorted(
+            grouped_orders.items(),
+            key=lambda x: x[0]
+        ))
