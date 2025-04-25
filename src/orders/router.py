@@ -49,14 +49,34 @@ async def get_orders(
             detail="Произошла ошибка при получении заказов",
         ) from e
 
+
 @orders.post("/with-supply-name", response_model=SupplyAccountWildOut, status_code=status.HTTP_201_CREATED)
 async def add_fact_orders_and_supply_name(
-    payload: OrdersWithSupplyNameIn = Body(...),
-    db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+        payload: OrdersWithSupplyNameIn = Body(...),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
 ) -> SupplyAccountWildOut:
     """
-    Принимает структуру Dict[str, GroupedOrderInfo] + name_supply,
-    возвращает wild (список всех wild) и supply_account (account:supply_id).
+    Создает поставки на основе фактического количества заказов для каждого wild.
+    Args:
+        payload: Данные о заказах и имя поставки
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+    Returns:
+        SupplyAccountWildOut: Результаты создания поставок
     """
-    ...
+    start_time = time.time()
+    logger.info(f"Запрос на создание поставок от {user.get('username', 'unknown')}")
+
+    try:
+        orders_service = OrdersService(db)
+        result = await orders_service.process_orders_with_fact_count(payload)
+        elapsed_time = time.time() - start_time
+        logger.info(f"Поставки созданы успешно. Время: {elapsed_time:.2f} сек.")
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка при создании поставок: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Произошла ошибка при создании поставок: {str(e)}",
+        )

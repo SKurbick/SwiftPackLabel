@@ -33,7 +33,6 @@ class Supplies(Account):
         response_json = parse_json(response)
         return {self.account: {supply_id: {"orders": response_json.get('orders', [])}}}
 
-
     async def create_supply(self, name: str) -> dict:
         """
         Создаёт новую поставку в кабинете по наименованию.
@@ -44,7 +43,6 @@ class Supplies(Account):
         logger.info(f"Создана поставка с именем '{name}' для аккаунта {self.account}. Ответ: {response}")
         return parse_json(response)
 
-
     async def add_order_to_supply(self, supply_id: str, order_id: int) -> dict:
         """
         Добавляет сборочное задание (orderId) к поставке (supplyId) через PATCH-запрос к WB API.
@@ -52,6 +50,8 @@ class Supplies(Account):
         :param order_id: ID сборочного задания (orderId)
         :return: Ответ от WB API
         """
+        self.async_client.retries = 3
+        self.async_client.delay = 60
         url = f"{self.url}/{supply_id}/orders/{order_id}"
         response = await self.async_client.patch(url, headers=self.headers)
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")

@@ -7,7 +7,9 @@ from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
 from src.models.stock import StockDB
 from datetime import timedelta
-from src.orders.schema import GroupedOrderInfo
+from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
+    OrderDetail
+from src.wildberries_api.supplies import Supplies
 from collections import defaultdict
 
 
@@ -271,7 +273,7 @@ class OrdersService:
         filtered = self.filter_orders_by_time(formatted_orders, time_delta)
         filtered = self.filter_orders_by_article(filtered, article)
         return self.sort_orders(filtered)
-        
+
     async def group_orders_by_wild(self, order_list):
         """
         Группирует заказы по артикулу wild с добавлением информации из get_information_to_data
@@ -283,7 +285,7 @@ class OrdersService:
             Dict[str, GroupedOrderInfo]: Словарь с данными о заказах по артикулам
         """
         logger.info("Группировка заказов по артикулу wild")
-        
+
         wild_data = get_information_to_data()
         stock_db = StockDB(self.db)
         result = {}
@@ -296,9 +298,9 @@ class OrdersService:
 
         for wild, orders in temp_grouped_orders.items():
             stock_quantity = await stock_db.get_stock_by_wild(wild)
-            api_name = next((item.get('subject_name', 'Нет наименования из API') 
-                            for item in orders if item.get('subject_name')), 
-                           'Нет наименования из API')
+            api_name = next((item.get('subject_name', 'Нет наименования из API')
+                             for item in orders if item.get('subject_name')),
+                            'Нет наименования из API')
             doc_name = wild_data.get(wild, "Нет наименования в документе")
 
             result[wild] = GroupedOrderInfo(
@@ -314,3 +316,175 @@ class OrdersService:
             result.items(),
             key=lambda x: x[0]
         ))
+
+    def _filter_orders_by_fact_count(self, orders_data: Dict[str, GroupedOrderInfoWithFact]) -> Dict[
+        str, List[OrderDetail]]:
+        """
+        Фильтрует заказы по каждому SKU согласно установленному количеству fact_orders.
+        Args:
+            orders_data: Словарь с данными о заказах по SKU
+        Returns:
+            Dict[str, List[OrderDetail]]: Отфильтрованные заказы по SKU
+        """
+        filtered_orders_by_sku = {}
+        for wild_key, info in orders_data.items():
+            if info.fact_orders == 0:
+                continue
+
+            sorted_orders = sorted(info.orders, key=lambda x: x.created_at)
+            if selected_orders := sorted_orders[:info.fact_orders]:
+                filtered_orders_by_sku[wild_key] = selected_orders
+
+        return filtered_orders_by_sku
+
+    @staticmethod
+    def _collect_unique_accounts(filtered_orders: Dict[str, List[OrderDetail]]) -> Set[str]:
+        """
+        Собирает все уникальные аккаунты из отфильтрованных заказов.
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+        Returns:
+            Set[str]: Множество уникальных аккаунтов
+        """
+        unique_accounts = set()
+        for orders in filtered_orders.values():
+            for order in orders:
+                unique_accounts.add(order.account)
+        return unique_accounts
+
+    @staticmethod
+    def _process_supply_creation_results(accounts: List[str], results: List[Any]) -> Dict[str, str]:
+        """
+        Обрабатывает результаты создания поставок.
+        Args:
+            accounts: Список аккаунтов, для которых создавались поставки
+            results: Список результатов выполнения задач
+        Returns:
+            Dict[str, str]: Словарь с маппингом аккаунта на ID поставки
+        """
+        supply_by_account = {}
+
+        for account, result in zip(accounts, results):
+            if isinstance(result, Exception):
+                logger.error(f"Исключение при создании поставки для аккаунта {account}: {str(result)}")
+            elif 'id' in result:
+                supply_by_account[account] = result['id']
+                logger.info(f"Создана поставка {result['id']} для аккаунта {account}")
+            else:
+                logger.error(f"Ошибка создания поставки для аккаунта {account}: {result}")
+
+        return supply_by_account
+
+    async def _create_supplies_for_accounts(self, accounts: Set[str], supply_name: str) -> Dict[str, str]:
+        """
+        Создает поставки для каждого уникального аккаунта параллельно.
+        Args:
+            accounts: Множество уникальных аккаунтов
+            supply_name: Название поставки
+        Returns:
+            Dict[str, str]: Словарь с маппингом аккаунта на ID поставки
+        """
+        tokens = get_wb_tokens()
+        account_tasks = []
+        valid_accounts = []
+
+        for account in accounts:
+            if token := tokens.get(account):
+                valid_accounts.append(account)
+                account_tasks.append(Supplies(account, token).create_supply(supply_name))
+            else:
+                logger.error(f"Не найден токен для аккаунта {account}")
+
+        if not account_tasks:
+            return {}
+
+        results = await asyncio.gather(*account_tasks, return_exceptions=True)
+        return self._process_supply_creation_results(valid_accounts, results)
+
+    @staticmethod
+    async def _add_orders_to_supplies(filtered_orders: Dict[str, List[OrderDetail]],
+                                      supply_by_account: Dict[str, str]) -> None:
+        """
+        Добавляет отфильтрованные заказы в созданные поставки.
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+        """
+        # Группируем заказы по аккаунту и поставке
+        orders_by_supply = defaultdict(list)
+
+        for orders in filtered_orders.values():
+            for order in orders:
+                account = order.account
+                if account not in supply_by_account:
+                    logger.warning(f"Пропуск заказа {order.id}: не создана поставка для аккаунта {account}")
+                    continue
+
+                supply_id = supply_by_account[account]
+                orders_by_supply[(account, supply_id)].append(order.id)
+
+        # Создаем список задач для параллельного выполнения
+        add_order_tasks = []
+        task_info = []  # Информация о задаче (account, supply_id, order_id)
+        tokens = get_wb_tokens()
+
+        for (account, supply_id), order_ids in orders_by_supply.items():
+            token = tokens.get(account)
+            if not token:
+                logger.error(f"Не найден токен для аккаунта {account}")
+                continue
+
+            supplies_service = Supplies(account, token)
+
+            for order_id in order_ids:
+                task = supplies_service.add_order_to_supply(supply_id, order_id)
+                add_order_tasks.append(task)
+                task_info.append((account, supply_id, order_id))
+
+        # Если нет задач, завершаем работу
+        if not add_order_tasks:
+            return
+
+        # Параллельно выполняем все задачи
+        results = await asyncio.gather(*add_order_tasks, return_exceptions=True)
+
+        # Обрабатываем результаты
+        for (account, supply_id, order_id), result in zip(task_info, results):
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
+                             f"для аккаунта {account}: {result}")
+            elif result and 'error' in result:
+                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
+                             f"для аккаунта {account}: {result['error']}")
+
+    @staticmethod
+    def _prepare_result(input_data: OrdersWithSupplyNameIn,
+                        supply_by_account: Dict[str, str]) -> SupplyAccountWildOut:
+        """
+        Формирует результат обработки заказов.
+        Args:
+            input_data: Исходные данные для обработки
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+        Returns:
+            SupplyAccountWildOut: Результат обработки заказов
+        """
+        return SupplyAccountWildOut(
+            wild=[wild_key for wild_key, info in input_data.orders.items() if info.fact_orders > 0],
+            supply_account=supply_by_account
+        )
+
+    async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:
+        """
+        Обрабатывает заказы с учетом установленного количества fact_orders.
+        
+        Args:
+            input_data: Объект с данными о заказах и названием поставки
+            
+        Returns:
+            SupplyAccountWildOut: Объект с результатами обработки
+        """
+        filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
+        unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
+        supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
+        await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account)
+        return self._prepare_result(input_data, supply_by_account)
