@@ -80,6 +80,15 @@ class OrdersWithSupplyNameIn(BaseSchema):
         return orders_dict
 
 
+class WildInfo(BaseSchema):
+    wild: str
+    count: int
+
+class SupplyInfo(BaseSchema):
+    supply_id: str
+    account: str
+    order_ids: List[int]
+
 class SupplyAccountWildOut(BaseSchema):
-    wild: List[str]
-    supply_account: Dict[str, str]
+    wilds: List[WildInfo]
+    supply_ids: List[SupplyInfo]

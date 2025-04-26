@@ -1,9 +1,8 @@
 from starlette.responses import StreamingResponse
 from fastapi import APIRouter, Depends, Body, status
 
-
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, SupplyDeleteBody, SupplyDeleteResponse
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -60,3 +59,15 @@ async def upload_stickers_to_orders(
         media_type="application/zip",
         headers={'Content-Disposition': 'attachment; filename=stickers_package.zip'}
     )
+
+
+@supply.post("/delete", response_model=SupplyDeleteResponse, status_code=status.HTTP_204_NO_CONTENT)
+async def delete_supplies(
+        body: SupplyDeleteBody = Body(...),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> SupplyDeleteResponse:
+    """
+    Удаляет поставки по списку {supply:[{account:..., supply_id:...}]}. Возвращает id успешно удалённых поставок.
+    """
+    return await SuppliesService(db=db).delete_supplies(body)

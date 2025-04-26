@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import uuid
-from typing import List, Dict, Any, Coroutine, Set
+from typing import List, Dict, Any, Coroutine, Set, Optional
 
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -12,7 +12,8 @@ from src.db import AsyncGenerator
 from src.models.card_data import CardData
 from fastapi import HTTPException
 
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId, \
+    SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem
 
 
 class SuppliesService:
@@ -52,7 +53,7 @@ class SuppliesService:
         name_and_photo = await CardData(self.db).get_subject_name_category_and_photo_to_article(
             [order.nm_id for orders in supply_ids.supplies for order in orders.orders])
         name_and_photo: Dict[int, Dict[str, Any]] = \
-                {data["article_id"]: {"subject_name": data["subject_name"], "photo_link": data["photo_link"],
+            {data["article_id"]: {"subject_name": data["subject_name"], "photo_link": data["photo_link"],
                                   "category": data["parent_name"]}
              for data in name_and_photo}
         order: StickerSchema
@@ -63,7 +64,7 @@ class SuppliesService:
                 else:
                     result[order.local_vendor_code].append(self.format_data_to_result(supply, order, name_and_photo))
         # self._change_category_name(result)
-        return dict(sorted(result.items(),key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]),))
+        return dict(sorted(result.items(), key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]), ))
 
     @staticmethod
     async def get_information_to_supplies() -> List[Dict]:
@@ -166,3 +167,33 @@ class SuppliesService:
         stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids))
         self.union_results_stickers(supply_ids, stickers)
         return await self.group_orders_to_wild(supply_ids)
+
+    @staticmethod
+    async def delete_single_supply(account: str, supply_id: str, token: str) -> Optional[SupplyDeleteItem]:
+        """Удаляет одну поставку и возвращает информацию об удалённой поставке или None в случае ошибки"""
+        try:
+            supply = Supplies(account, token)
+            resp = await supply.delete_supply(supply_id)
+            if resp.get("errors"):
+                logger.error(f"Ошибка при удалении {supply_id} для {account}: {resp['errors']}")
+                return
+            logger.info(f"Поставка {supply_id} для {account} успешно удалена")
+            return SupplyDeleteItem(account=account, supply_id=supply_id)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении {supply_id} для {account}: {str(e)}")
+            return
+
+
+    async def delete_supplies(self,body: SupplyDeleteBody) -> SupplyDeleteResponse:
+        """Удаляет несколько поставок и возвращает список успешно удалённых"""
+        logger.info(f"Удаление поставок: {body.supply}")
+        tokens = get_wb_tokens()
+        tasks = []
+        for item in body.supply:
+            token = tokens.get(item.account)
+            tasks.append(self.delete_single_supply(item.account, item.supply_id, token))
+
+        results = await asyncio.gather(*tasks)
+        deleted_ids = [item for item in results if item is not None]
+
+        return SupplyDeleteResponse(deleted=deleted_ids)

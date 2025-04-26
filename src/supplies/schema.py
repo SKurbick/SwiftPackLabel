@@ -65,3 +65,16 @@ class SupplyIdResponseSchema(BaseSchema):
     """Схема для ответа с списком обработанных поставок."""
 
     supplies: List[SupplyIdResult]
+
+
+class SupplyDeleteItem(BaseModel):
+    account: str
+    supply_id: str
+
+
+class SupplyDeleteBody(BaseModel):
+    supply: list[SupplyDeleteItem]
+
+
+class SupplyDeleteResponse(BaseModel):
+    deleted: list[SupplyDeleteItem]

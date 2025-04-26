@@ -56,3 +56,15 @@ class Supplies(Account):
         response = await self.async_client.patch(url, headers=self.headers)
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return parse_json(response)
+
+    async def delete_supply(self, supply_id: str) -> dict:
+        """
+        Удаляет поставку, если она активна и за ней не закреплено ни одно сборочное задание.
+        :param supply_id: ID поставки (например, WB-GI-1234567)
+        :return: Ответ от WB API
+        Метод удаляет поставку через DELETE запрос к WB API.
+        Поставка может быть удалена только если она активна и за ней не закреплено ни одно сборочное задание.
+        """
+        response = await self.async_client.delete(f"{self.url}/{supply_id}", headers=self.headers)
+        logger.info(f"Удаление поставки {supply_id} для аккаунта {self.account}. Ответ: {response}")
+        return parse_json(response)
