@@ -78,3 +78,21 @@ class SupplyDeleteBody(BaseModel):
 
 class SupplyDeleteResponse(BaseModel):
     deleted: list[SupplyDeleteItem]
+
+
+class WildOrderItem(BaseModel):
+    """Схема для представления заказа при фильтрации по wild."""
+    order_id: int
+
+
+class WildSupplyItem(BaseModel):
+    """Схема для представления поставки при фильтрации по wild."""
+    account: str
+    supply_id: str
+    orders: List[WildOrderItem]
+
+
+class WildFilterRequest(BaseModel):
+    """Схема запроса для получения стикеров по определенному wild."""
+    wild: str
+    supplies: List[WildSupplyItem]

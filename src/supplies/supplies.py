@@ -12,8 +12,10 @@ from src.db import AsyncGenerator
 from src.models.card_data import CardData
 from fastapi import HTTPException
 
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId, \
-    SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem
+from src.supplies.schema import (
+    SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId,
+    SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem, WildFilterRequest
+)
 
 
 class SuppliesService:
@@ -197,3 +199,86 @@ class SuppliesService:
         deleted_ids = [item for item in results if item is not None]
 
         return SupplyDeleteResponse(deleted=deleted_ids)
+        
+    async def filter_and_fetch_stickers_by_wild(self, wild_filter: WildFilterRequest) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Фильтрует заказы по указанному wild и получает для них стикеры.
+        Args:
+            wild_filter: Данные о wild, поставках и заказах для фильтрации
+        Returns:
+            Dict[str, List[Dict[str, Any]]]: Сгруппированные данные о заказах со стикерами
+        """
+        logger.info(f'Инициализация получения стикеров для wild: {wild_filter.wild}')
+
+        supplies_list = []
+
+        for supply_item in wild_filter.supplies:
+            orders_details = await self._get_orders_details(
+                supply_item.account, 
+                supply_item.supply_id, 
+                [order.order_id for order in supply_item.orders]
+            )
+
+            orders_list = []
+            orders_list.extend(
+                OrderSchema(order_id=order_detail.get('id'),nm_id=order_detail.get('nmId'),
+                    local_vendor_code=wild_filter.wild)
+                for order_detail in orders_details if order_detail.get('id') in [order.order_id
+                                                                for order in supply_item.orders])
+            if not orders_list:
+                continue
+
+            supplies_list.append(
+                SupplyId(
+                    name="",  # Имя не важно для генерации стикеров
+                    createdAt="",  # Дата создания не важна для генерации стикеров
+                    supply_id=supply_item.supply_id,
+                    account=supply_item.account,
+                    count=len(orders_list),
+                    orders=orders_list)
+            )
+
+        if not supplies_list:
+            logger.warning(f"Не найдено заказов для wild: {wild_filter.wild}")
+            return {wild_filter.wild: []}
+
+        supply_ids_body = SupplyIdBodySchema(supplies=supplies_list)
+
+
+        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids_body))
+        self.union_results_stickers(supply_ids_body, stickers)
+
+        result = await self.group_orders_to_wild(supply_ids_body)
+
+        if wild_filter.wild not in result and len(result) > 0:
+            first_key = next(iter(result))
+            result[wild_filter.wild] = result.pop(first_key)
+
+        return result
+    
+    async def _get_orders_details(self, account: str, supply_id: str, order_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Получает детали заказов для указанной поставки.
+        Args:
+            account: Аккаунт WB
+            supply_id: ID поставки
+            order_ids: Список ID заказов
+        Returns:
+            List[Dict[str, Any]]: Список с деталями заказов
+        """
+        try:
+            supply = Supplies(account, get_wb_tokens()[account])
+            supply_data = await supply.get_supply_orders(supply_id)
+            
+            if not supply_data or account not in supply_data or supply_id not in supply_data[account]:
+                logger.error(f"Не удалось получить данные о поставке {supply_id} для аккаунта {account}")
+                return []
+            
+            all_orders = supply_data[account][supply_id].get("orders", [])
+
+            filtered_orders = [order for order in all_orders if order.get("id") in order_ids]
+            
+            return filtered_orders
+        except Exception as e:
+            logger.error(f"Ошибка при получении деталей заказов для {supply_id}, {account}: {str(e)}")
+            return []

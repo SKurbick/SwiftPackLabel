@@ -434,7 +434,6 @@ class OrdersService:
             return
 
         results = await asyncio.gather(*add_order_tasks, return_exceptions=True)
-
         for (account, supply_id, order_id), result in zip(task_info, results):
             if isinstance(result, Exception):
                 logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
@@ -465,12 +464,14 @@ class OrdersService:
             WildInfo(wild=article, count=len(order_ids))
             for article, order_ids in orders_added_by_article.items()
         )
+
         supply_order_mapping = defaultdict(lambda: defaultdict(list))
         for order_id, info in order_supply_mapping.items():
             supply_id = info['supply_id']
             account = info['account']
             supply_order_mapping[supply_id][account].append(order_id)
         supply_info_list = []
+
         for supply_id, accounts_data in supply_order_mapping.items():
             supply_info_list.extend(
                 SupplyInfo(supply_id=supply_id, account=account, order_ids=order_ids)

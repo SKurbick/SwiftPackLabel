@@ -2,7 +2,8 @@ from starlette.responses import StreamingResponse
 from fastapi import APIRouter, Depends, Body, status
 
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, SupplyDeleteBody, SupplyDeleteResponse
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, SupplyDeleteBody, SupplyDeleteResponse, \
+    WildFilterRequest
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -61,13 +62,44 @@ async def upload_stickers_to_orders(
     )
 
 
-@supply.post("/delete", response_model=SupplyDeleteResponse, status_code=status.HTTP_204_NO_CONTENT)
-async def delete_supplies(
-        body: SupplyDeleteBody = Body(...),
+# @supply.post("/delete", response_model=SupplyDeleteResponse, status_code=status.HTTP_204_NO_CONTENT)
+# async def delete_supplies(
+#         body: SupplyDeleteBody = Body(...),
+#         db: AsyncGenerator = Depends(get_db_connection),
+#         user: dict = Depends(get_current_user)
+# ) -> SupplyDeleteResponse:
+#     """
+#     Удаляет поставки по списку {supply:[{account:..., supply_id:...}]}. Возвращает id успешно удалённых поставок.
+#     """
+#     return await SuppliesService(db=db).delete_supplies(body)
+
+
+@supply.post("/stickers_by_wild",
+             status_code=status.HTTP_201_CREATED,
+             response_description="PDF-файл со стикерами для конкретного wild",
+             responses={201: {"content": {"application/pdf": {}},
+                              "description": "PDF-файл с стикерами для печати"},
+                        422: {"description": "Ошибка валидации входных данных"}})
+async def generate_stickers_by_wild(
+        wild_filter: WildFilterRequest = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
-) -> SupplyDeleteResponse:
+) -> StreamingResponse:
     """
-    Удаляет поставки по списку {supply:[{account:..., supply_id:...}]}. Возвращает id успешно удалённых поставок.
+    Генерирует и возвращает PDF-файл со стикерами для конкретного wild и указанных заказов в поставках.
+    Args:
+        wild_filter: Информация о wild, поставках и заказах для которых нужно создать стикеры
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+    Returns:
+        StreamingResponse: PDF-файл со стикерами для печати
     """
-    return await SuppliesService(db=db).delete_supplies(body)
+    supplies_service = SuppliesService(db)
+    result_stickers = await supplies_service.filter_and_fetch_stickers_by_wild(wild_filter)
+    pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
+    
+    return StreamingResponse(
+        pdf_sticker,
+        media_type="application/pdf",
+        headers={'Content-Disposition': f'attachment; filename=stickers_{wild_filter.wild}.pdf'}
+    )
