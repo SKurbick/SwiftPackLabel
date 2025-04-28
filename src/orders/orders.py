@@ -495,7 +495,7 @@ class OrdersService:
         order_supply_mapping = {}
         filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
         unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
-        supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
-        await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
-                                           order_supply_mapping)
+        # supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
+        # await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
+        #                                    order_supply_mapping)
         return self._prepare_result(orders_added_by_article, order_supply_mapping)
