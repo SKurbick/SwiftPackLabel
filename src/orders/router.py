@@ -4,7 +4,7 @@ from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
-from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut
+from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, WildInfo, SupplyInfo
 from typing import Dict, Any, Coroutine
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body
@@ -80,3 +80,29 @@ async def add_fact_orders_and_supply_name(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Произошла ошибка при создании поставок: {str(e)}",
         )
+
+
+@orders.post("/with-supply-name-mock", response_model=SupplyAccountWildOut, status_code=status.HTTP_200_OK)
+async def add_fact_orders_and_supply_name_mock(
+        payload: OrdersWithSupplyNameIn = Body(...),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> SupplyAccountWildOut:
+    """
+    MOCK: Возвращает фиктивные данные для SupplyAccountWildOut без вызова бизнес-логики.
+    """
+    return SupplyAccountWildOut(
+        wilds=[
+            WildInfo(wild="123456", count=2),
+            WildInfo(wild="654321", count=1)
+        ],
+        supply_ids=[
+            SupplyInfo(supply_id="WB-GI-1234567", account="test_account_1", order_ids=[111, 112]),
+            SupplyInfo(supply_id="WB-GI-7654321", account="test_account_2", order_ids=[113])
+        ],
+        order_wild_map={
+            111: "123456",
+            112: "123456",
+            113: "654321"
+        }
+    )
