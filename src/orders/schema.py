@@ -92,3 +92,4 @@ class SupplyInfo(BaseSchema):
 class SupplyAccountWildOut(BaseSchema):
     wilds: List[WildInfo]
     supply_ids: List[SupplyInfo]
+    order_wild_map: Dict[int, str] = {}

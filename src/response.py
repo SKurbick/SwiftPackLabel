@@ -101,6 +101,19 @@ class HttpClient:
             Содержимое ответа, если запрос успешен, иначе None.
         """
         return self.request("DELETE", url, headers=headers)
+    
+    def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
+              headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """Выполняет PATCH-запрос по указанному URL.
+        Args:
+            url: URL-адрес для запроса.
+            json: JSON-данные для отправки в теле запроса.
+            data: Данные для отправки в теле запроса.
+            headers: HTTP-заголовки для включения в запрос.
+        Returns:
+            Содержимое ответа, если запрос успешен, иначе None.
+        """
+        return self.request("PATCH", url, json=json, data=data, headers=headers)
 
 
 class AsyncHttpClient:
@@ -200,6 +213,19 @@ class AsyncHttpClient:
             Текст ответа, если запрос успешен, иначе None.
         """
         return await self.request("DELETE", url, headers=headers)
+        
+    async def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
+                    headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """Выполняет асинхронный PATCH-запрос по-указанному URL.
+        Args:
+            url: URL-адрес для запроса.
+            json: JSON-данные для отправки в теле запроса.
+            data: Данные для отправки в теле запроса.
+            headers: HTTP-заголовки для включения в запрос.
+        Returns:
+            Текст ответа, если запрос успешен, иначе None.
+        """
+        return await self.request("PATCH", url, json=json, data=data, headers=headers)
 
 
 def parse_json(response_text: str) -> dict:

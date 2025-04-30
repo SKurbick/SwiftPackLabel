@@ -55,7 +55,7 @@ class Supplies(Account):
         url = f"{self.url}/{supply_id}/orders/{order_id}"
         response = await self.async_client.patch(url, headers=self.headers)
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
-        return parse_json(response)
+        return response
 
     async def delete_supply(self, supply_id: str) -> dict:
         """

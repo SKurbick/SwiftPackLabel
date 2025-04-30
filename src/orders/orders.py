@@ -317,7 +317,8 @@ class OrdersService:
             key=lambda x: x[0]
         ))
 
-    def _filter_orders_by_fact_count(self, orders_data: Dict[str, GroupedOrderInfoWithFact]) -> Dict[
+    @staticmethod
+    def _filter_orders_by_fact_count(orders_data: Dict[str, GroupedOrderInfoWithFact]) -> Dict[
         str, List[OrderDetail]]:
         """
         Фильтрует заказы по каждому SKU согласно установленному количеству fact_orders.
@@ -476,9 +477,17 @@ class OrdersService:
             supply_info_list.extend(
                 SupplyInfo(supply_id=supply_id, account=account, order_ids=order_ids)
                 for account, order_ids in accounts_data.items())
+
+        order_wild_map = {}
+        if orders_added_by_article is not None:
+            for article, order_ids in orders_added_by_article.items():
+                for order_id in order_ids:
+                    order_wild_map[order_id] = article
+
         return SupplyAccountWildOut(
             wilds=wilds_info,
-            supply_ids=supply_info_list
+            supply_ids=supply_info_list,
+            order_wild_map=order_wild_map
         )
 
     async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:
@@ -495,7 +504,7 @@ class OrdersService:
         order_supply_mapping = {}
         filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
         unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
-        # supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
-        # await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
-        #                                    order_supply_mapping)
+        supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
+        await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
+                                           order_supply_mapping)
         return self._prepare_result(orders_added_by_article, order_supply_mapping)
