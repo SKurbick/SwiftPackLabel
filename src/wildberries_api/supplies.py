@@ -50,7 +50,7 @@ class Supplies(Account):
         :param order_id: ID сборочного задания (orderId)
         :return: Ответ от WB API
         """
-        self.async_client.retries = 3
+        self.async_client.retries = 10
         self.async_client.delay = 60
         url = f"{self.url}/{supply_id}/orders/{order_id}"
         response = await self.async_client.patch(url, headers=self.headers)

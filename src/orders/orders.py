@@ -294,8 +294,7 @@ class OrdersService:
             order_dict["wild_name"] = wild_data.get(order.article, "")
             temp_grouped_orders[order.article].append(order_dict)
 
-        all_wilds = list(temp_grouped_orders.keys())
-        all_stocks = await stock_db.get_stocks_by_wilds(all_wilds)
+        all_stocks = await stock_db.get_stocks_by_wilds(list(temp_grouped_orders.keys()))
 
         for wild, orders in temp_grouped_orders.items():
             api_name = next((item.get('subject_name', 'Нет наименования из API')
@@ -305,7 +304,7 @@ class OrdersService:
 
             result[wild] = GroupedOrderInfo(
                 wild=wild,
-                stock_quantity=all_stocks[wild],
+                stock_quantity=1000,#all_stocks[wild]
                 doc_name=doc_name,
                 api_name=api_name,
                 orders=orders,
