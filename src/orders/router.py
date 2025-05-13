@@ -81,7 +81,7 @@ async def add_fact_orders_and_supply_name(
             detail=f"Произошла ошибка при создании поставок: {str(e)}",
         )
 
-
+@orders.post("/with-supply-name-mock", response_model=SupplyAccountWildOut, status_code=status.HTTP_200_OK)
 async def add_fact_orders_and_supply_name_mock(
         payload: OrdersWithSupplyNameIn = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
