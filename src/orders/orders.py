@@ -277,10 +277,8 @@ class OrdersService:
     async def group_orders_by_wild(self, order_list):
         """
         Группирует заказы по артикулу wild с добавлением информации из get_information_to_data
-        
         Args:
             order_list: Список заказов
-            
         Returns:
             Dict[str, GroupedOrderInfo]: Словарь с данными о заказах по артикулам
         """
@@ -296,8 +294,10 @@ class OrdersService:
             order_dict["wild_name"] = wild_data.get(order.article, "")
             temp_grouped_orders[order.article].append(order_dict)
 
+        all_wilds = list(temp_grouped_orders.keys())
+        all_stocks = await stock_db.get_stocks_by_wilds(all_wilds)
+
         for wild, orders in temp_grouped_orders.items():
-            stock_quantity = await stock_db.get_stock_by_wild(wild)
             api_name = next((item.get('subject_name', 'Нет наименования из API')
                              for item in orders if item.get('subject_name')),
                             'Нет наименования из API')
@@ -305,7 +305,7 @@ class OrdersService:
 
             result[wild] = GroupedOrderInfo(
                 wild=wild,
-                stock_quantity=stock_quantity,
+                stock_quantity=all_stocks[wild],
                 doc_name=doc_name,
                 api_name=api_name,
                 orders=orders,

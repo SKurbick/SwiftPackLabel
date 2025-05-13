@@ -1,15 +1,27 @@
+from typing import List, Dict
+
+
 class StockDB:
     """
-    Модель-заглушка для работы с остатками по wild-коду.
-    В дальнейшем здесь будет обращение к базе данных.
+    Класс для работы с данными о складских запасах товаров в базе данных.
+    Предоставляет методы для получения информации о количестве товаров 
+    на складе по их артикулам (wild-кодам).
     """
+
     def __init__(self, db=None):
         self.db = db
 
-    async def get_stock_by_wild(self, wild: str) -> int:
+    async def get_stocks_by_wilds(self, wilds: List[str]) -> Dict[str,int]:
         """
-        Заглушка: получить остаток по wild-коду (артикулу).
-        В дальнейшем реализовать обращение к БД.
+        Получает информацию о количестве товаров на складе по списку артикулов (wild-кодов).
+        Args:
+            wilds: Список артикулов (wild-кодов) для получения информации о запасах
+        Returns:
+            Dict[str, int]: Словарь, где ключи - артикулы товаров,
+            а значения - количество единиц товара на складе. 
+            Если количество не является целым числом, возвращается 0.
         """
-        # TODO: реализовать получение остатков из БД
-        return 1000  # фиктивное значение для теста
+        query = """SELECT local_vendor_code ,stocks_quantity from current_real_fbs_stocks_qty WHERE local_vendor_code = ANY($1)"""
+        result = await self.db.fetch(query, wilds)
+        return {res['local_vendor_code']: (res['stocks_quantity'] if isinstance(res['stocks_quantity'], int) else 0)
+                for res in result}
