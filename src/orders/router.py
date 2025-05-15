@@ -90,7 +90,7 @@ async def add_fact_orders_and_supply_name_mock(
     """
     MOCK: Возвращает фиктивные данные для SupplyAccountWildOut без вызова бизнес-логики.
     """
-    time.sleep(300)
+    time.sleep(10)
     return SupplyAccountWildOut(
         wilds=[
             WildInfo(wild="123456", count=2),
