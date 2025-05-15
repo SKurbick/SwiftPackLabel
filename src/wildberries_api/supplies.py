@@ -68,3 +68,21 @@ class Supplies(Account):
         response = await self.async_client.delete(f"{self.url}/{supply_id}", headers=self.headers)
         logger.info(f"Удаление поставки {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return parse_json(response)
+        
+    async def deliver_supply(self, supply_id: str) -> dict | str:
+        """
+        Закрывает поставку и переводит все сборочные задания в ней в статус `complete` — в доставке.
+        
+        После закрытия поставки добавить новые сборочные задания к ней нельзя.
+        Передать поставку в доставку можно только если в ней:
+        * есть хотя бы одно сборочное задания
+        * отсутствуют пустые короба
+
+        
+        :param supply_id: ID поставки (например, WB-GI-1234567)
+        :return: Ответ от WB API
+        """
+        url = f"{self.url}/{supply_id}/deliver"
+        response = await self.async_client.patch(url, headers=self.headers)
+        logger.info(f"Передача поставки {supply_id} в доставку для аккаунта {self.account}. Ответ: {response}")
+        return response

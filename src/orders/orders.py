@@ -1,6 +1,10 @@
 import asyncio
 import datetime
 from typing import List, Dict, Any, Set
+
+from fastapi import HTTPException
+from starlette import status
+
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
@@ -304,7 +308,7 @@ class OrdersService:
 
             result[wild] = GroupedOrderInfo(
                 wild=wild,
-                stock_quantity=1000,#all_stocks[wild]
+                stock_quantity=1000,  # all_stocks[wild]
                 doc_name=doc_name,
                 api_name=api_name,
                 orders=orders,
@@ -489,19 +493,58 @@ class OrdersService:
             order_wild_map=order_wild_map
         )
 
+    async def _validate_orders_existence(self, filtered_orders_by_sku: Dict[str, List[OrderDetail]]) -> None:
+        """
+        Проверяет существование всех заказов, которые планируется добавить в поставки.
+        Выбрасывает исключение, если какой-либо из заказов не существует.
+        Args:
+            filtered_orders_by_sku: Отфильтрованные заказы по SKU
+
+        Raises:
+            HTTPException: Если какой-либо заказ не существует или был отменен
+        """
+        orders_to_add = {order.id for orders in filtered_orders_by_sku.values() for order in orders}
+        if not orders_to_add:
+            logger.warning("Нет заказов для проверки")
+            return
+        logger.info(f"Получение актуальных заказов для проверки {len(orders_to_add)} заказов")
+        current_orders_by_account = await self.get_all_new_orders()
+        existing_order_ids = {order.get('id') for orders_list in current_orders_by_account.values() for order in
+                              orders_list}
+
+        if missing_orders := orders_to_add - existing_order_ids:
+            missing_details = []
+            for sku, orders in filtered_orders_by_sku.items():
+                missing_details.extend(
+                    f"ID заказа: {order.id}, Кабинет: {order.account}, SKU: {sku}"
+                    for order in orders
+                    if order.id in missing_orders
+                )
+            error_message = f"Следующие заказы не существуют или были отменены:\n{', '.join(missing_details)}"
+            logger.error(error_message)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_message
+            )
+
+        logger.info(f"Все {len(orders_to_add)} заказов успешно прошли проверку существования")
+
     async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:
         """
         Обрабатывает заказы с учетом установленного количества fact_orders.
-        
+        Функция фильтрует заказы по указанному количеству, проверяет их существование,
+        создает поставки и добавляет заказы в созданные поставки.
         Args:
             input_data: Объект с данными о заказах и названием поставки
-            
         Returns:
             SupplyAccountWildOut: Объект с результатами обработки в новом формате
+        Raises:
+            HTTPException: Если какой-либо из заказов не существует в системе Wildberries
         """
         orders_added_by_article = defaultdict(list)
         order_supply_mapping = {}
         filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
+        await self._validate_orders_existence(filtered_orders_by_sku)
         unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
