@@ -304,7 +304,7 @@ class OrdersService:
 
             result[wild] = GroupedOrderInfo(
                 wild=wild,
-                stock_quantity=all_stocks[wild],#all_stocks[wild]
+                stock_quantity=all_stocks.get(wild,0),#all_stocks[wild]
                 doc_name=doc_name,
                 api_name=api_name,
                 orders=orders,
