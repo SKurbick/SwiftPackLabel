@@ -2,6 +2,7 @@ from typing import List
 from src.utils import format_date
 
 from pydantic import BaseModel, field_validator, ConfigDict
+from src.orders.schema import SupplyInfo
 
 
 class BaseSchema(BaseModel):
@@ -96,3 +97,19 @@ class WildFilterRequest(BaseModel):
     """Схема запроса для получения стикеров по определенному wild."""
     wild: str
     supplies: List[WildSupplyItem]
+
+
+class DeliverySupplyInfo(SupplyInfo):
+    """
+    Расширенная схема SupplyInfo для использования в API доставки.
+    Добавляет валидацию, что список order_ids не должен быть пустым.
+    """
+    
+    @field_validator("order_ids")
+    def validate_order_ids(cls, order_ids: List[int]) -> List[int]:
+        """
+        Проверяет, что order_ids не пустой список.
+        """
+        if not order_ids:
+            raise ValueError("Список order_ids не может быть пустым")
+        return order_ids

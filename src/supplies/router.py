@@ -1,9 +1,13 @@
+from typing import List, Dict
+
 from starlette.responses import StreamingResponse
 from fastapi import APIRouter, Depends, Body, status
 
+from src.logger import app_logger as logger
+
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, SupplyDeleteBody, SupplyDeleteResponse, \
-    WildFilterRequest
+from src.orders.schema import SupplyAccountWildOut
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -62,16 +66,6 @@ async def upload_stickers_to_orders(
     )
 
 
-# @supply.post("/delete", response_model=SupplyDeleteResponse, status_code=status.HTTP_204_NO_CONTENT)
-# async def delete_supplies(
-#         body: SupplyDeleteBody = Body(...),
-#         db: AsyncGenerator = Depends(get_db_connection),
-#         user: dict = Depends(get_current_user)
-# ) -> SupplyDeleteResponse:
-#     """
-#     Удаляет поставки по списку {supply:[{account:..., supply_id:...}]}. Возвращает id успешно удалённых поставок.
-#     """
-#     return await SuppliesService(db=db).delete_supplies(body)
 
 
 @supply.post("/stickers_by_wild",
@@ -103,3 +97,27 @@ async def generate_stickers_by_wild(
         media_type="application/pdf",
         headers={'Content-Disposition': f'attachment; filename=stickers_{wild_filter.wild}.pdf'}
     )
+
+
+@supply.post("/delivery",
+             status_code=status.HTTP_200_OK,
+             summary="Перевод поставок в статус доставки",
+             description="Переводит указанные поставки в статус доставки")
+async def deliver_supplies(
+        supply_ids: List[DeliverySupplyInfo] = Body(..., description="Список поставок для перевода в статус доставки"),
+        order_wild_map: Dict[str, str] = Body(..., description="Соответствие заказов и артикулов wild"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> None:
+    """
+    Заглушка для перевода поставок в статус доставки.
+    Только принимает запрос и возвращает статус 200 без тела ответа.
+    
+    Args:
+        supply_ids: Список поставок для перевода в статус доставки
+        order_wild_map: Соответствие заказов и артикулов wild
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+    """
+    logger.info(f"Запрос на перевод поставок в статус доставки от {user.get('username', 'unknown')}")
+    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок и {len(order_wild_map)} заказов")    
