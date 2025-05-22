@@ -26,3 +26,10 @@ class CardData:
         WHERE article_id = ANY($1)
         """
         return await self.db.fetch(query, article_ids)
+
+    async def get_information_to_local_vendor_code(self, wild: str):
+        query = """SELECT *
+            FROM card_data cd
+            JOIN article a ON cd.article_id = a.nm_id
+            WHERE a.local_vendor_code = $1"""
+        return await self.db.fetch(query, wild)

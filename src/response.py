@@ -118,7 +118,7 @@ class HttpClient:
 
 class AsyncHttpClient:
 
-    def __init__(self, timeout: int = 120, retries: int = 1, delay: int = 0):
+    def __init__(self, timeout: int = 120, retries: int = 3, delay: int = 61):
         """Инициализирует AsyncHttpClient.
         Args:
             timeout: Таймаут для каждого запроса в секундах.
@@ -140,7 +140,7 @@ class AsyncHttpClient:
         for attempt in range(self.retries):
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.request(method, url, timeout=self.timeout, ssl=False, **kwargs) as response:
+                    async with session.request(method, url, timeout=self.timeout, **kwargs) as response:
                         content_type = response.headers.get("Content-Type", "")
                         response.raise_for_status()
                         if content_type.startswith("image/"):

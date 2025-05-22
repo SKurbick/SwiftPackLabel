@@ -1,18 +1,17 @@
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from starlette.responses import StreamingResponse
-from fastapi import APIRouter, Depends, Body, status
+from fastapi import APIRouter, Depends, Body, status, HTTPException
 
 from src.logger import app_logger as logger
-
 from src.auth.dependencies import get_current_user
-from src.orders.schema import SupplyAccountWildOut
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
+from src.supplies.integration_1c import OneCIntegration
 
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
@@ -49,7 +48,6 @@ async def upload_stickers_to_orders(
             - stickers.pdf: PDF с стикерами для печати
             - selection_sheet.pdf: PDF с листом подбора
     """
-    # Получаем данные стикеров
     supplies_service = SuppliesService(db)
     result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids)
     selection_sheet_content = await create_table_pdf(result_stickers)
@@ -64,8 +62,6 @@ async def upload_stickers_to_orders(
         media_type="application/zip",
         headers={'Content-Disposition': 'attachment; filename=stickers_package.zip'}
     )
-
-
 
 
 @supply.post("/stickers_by_wild",
@@ -91,7 +87,7 @@ async def generate_stickers_by_wild(
     supplies_service = SuppliesService(db)
     result_stickers = await supplies_service.filter_and_fetch_stickers_by_wild(wild_filter)
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
-    
+
     return StreamingResponse(
         pdf_sticker,
         media_type="application/pdf",
@@ -108,16 +104,29 @@ async def deliver_supplies(
         order_wild_map: Dict[str, str] = Body(..., description="Соответствие заказов и артикулов wild"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
-) -> None:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Заглушка для перевода поставок в статус доставки.
-    Только принимает запрос и возвращает статус 200 без тела ответа.
-    
+    Переводит указанные поставки в статус доставки и формирует структурированные данные для 1C.
     Args:
         supply_ids: Список поставок для перевода в статус доставки
         order_wild_map: Соответствие заказов и артикулов wild
         db: Соединение с базой данных
         user: Данные текущего пользователя
+    Returns:
+        Словарь с ключом "accounts", содержащий список данных по аккаунтам, wild-артикулам и поставкам
     """
     logger.info(f"Запрос на перевод поставок в статус доставки от {user.get('username', 'unknown')}")
-    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок и {len(order_wild_map)} заказов")    
+    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок и {len(order_wild_map)} заказов")
+    try:
+        # supply_service = SuppliesService()
+        # await supply_service.process_delivery_supplies(supply_ids)
+        integration = OneCIntegration()
+        result = await integration.format_delivery_data(supply_ids, order_wild_map)
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке доставки поставок: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при обработке доставки поставок: {str(e)}"
+        )

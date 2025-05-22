@@ -118,7 +118,7 @@ class OrdersService:
             Dict[str, List[Dict[str, Any]]]: Словарь с сырыми данными о заказах
         """
         try:
-            supplies_data = await orders.get_orders()
+            supplies_data = await orders.get_new_orders()
             logger.info(f"Кабинет {account}: получено {len(supplies_data)} заказов")
             return {account: supplies_data or []}
         except Exception as e:

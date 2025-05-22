@@ -68,3 +68,21 @@ class Supplies(Account):
         response = await self.async_client.delete(f"{self.url}/{supply_id}", headers=self.headers)
         logger.info(f"Удаление поставки {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return parse_json(response)
+
+    async def deliver_supply(self, supply_id: str):
+        """
+        Переводит поставку в статус доставки.
+        Метод закрывает поставку и переводит все сборочные задания в ней в статус complete (в доставке).
+        Поставка может быть передана в доставку, только если в ней:
+        - есть хотя бы одно сборочное задание
+        - отсутствуют пустые короба
+
+        :param supply_id: ID поставки (например, WB-GI-1234567)
+        :return: Ответ от WB API
+        """
+        response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
+        logger.info(f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response.status_code}")
+        return response.status_code
+
+
+

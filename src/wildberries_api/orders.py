@@ -43,12 +43,27 @@ class Orders(Account):
         return result
 
 
-    async def get_orders(self):
+    async def get_new_orders(self):
         orders = []
         next_value = 0
         while True:
             params = {"limit": 1000, "next": next_value}
             response = await self.async_client.get(f"{self.url}/new", params=params, headers=self.headers)
+            data = parse_json(response)
+            orders.extend(data.get("orders", []))
+            next_value = data.get("next")
+            logger.info(f"Получены {len(orders)} поставок and next {next_value}, account {self.account}")
+            if not next_value:
+                break
+
+        return orders
+
+    async def get_orders(self):
+        orders = []
+        next_value = 0
+        while True:
+            params = {"limit": 1000, "next": next_value}
+            response = await self.async_client.get(f"{self.url}", params=params, headers=self.headers)
             data = parse_json(response)
             orders.extend(data.get("orders", []))
             next_value = data.get("next")

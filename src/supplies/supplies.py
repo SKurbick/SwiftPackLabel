@@ -1,7 +1,5 @@
 import asyncio
-import base64
-import uuid
-from typing import List, Dict, Any, Coroutine, Set, Optional
+from typing import List, Dict, Any, Set, Optional
 
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -14,7 +12,7 @@ from fastapi import HTTPException
 
 from src.supplies.schema import (
     SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId,
-    SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem, WildFilterRequest
+    SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem, WildFilterRequest, DeliverySupplyInfo
 )
 
 
@@ -185,8 +183,7 @@ class SuppliesService:
             logger.error(f"Ошибка при удалении {supply_id} для {account}: {str(e)}")
             return
 
-
-    async def delete_supplies(self,body: SupplyDeleteBody) -> SupplyDeleteResponse:
+    async def delete_supplies(self, body: SupplyDeleteBody) -> SupplyDeleteResponse:
         """Удаляет несколько поставок и возвращает список успешно удалённых"""
         logger.info(f"Удаление поставок: {body.supply}")
         tokens = get_wb_tokens()
@@ -199,8 +196,9 @@ class SuppliesService:
         deleted_ids = [item for item in results if item is not None]
 
         return SupplyDeleteResponse(deleted=deleted_ids)
-        
-    async def filter_and_fetch_stickers_by_wild(self, wild_filter: WildFilterRequest) -> Dict[str, List[Dict[str, Any]]]:
+
+    async def filter_and_fetch_stickers_by_wild(self, wild_filter: WildFilterRequest) -> Dict[
+        str, List[Dict[str, Any]]]:
         """
         Фильтрует заказы по указанному wild и получает для них стикеры.
         Args:
@@ -214,17 +212,17 @@ class SuppliesService:
 
         for supply_item in wild_filter.supplies:
             orders_details = await self._get_orders_details(
-                supply_item.account, 
-                supply_item.supply_id, 
+                supply_item.account,
+                supply_item.supply_id,
                 [order.order_id for order in supply_item.orders]
             )
 
             orders_list = []
             orders_list.extend(
-                OrderSchema(order_id=order_detail.get('id'),nm_id=order_detail.get('nmId'),
-                    local_vendor_code=wild_filter.wild)
+                OrderSchema(order_id=order_detail.get('id'), nm_id=order_detail.get('nmId'),
+                            local_vendor_code=wild_filter.wild)
                 for order_detail in orders_details if order_detail.get('id') in [order.order_id
-                                                                for order in supply_item.orders])
+                                                                                 for order in supply_item.orders])
             if not orders_list:
                 continue
 
@@ -244,7 +242,6 @@ class SuppliesService:
 
         supply_ids_body = SupplyIdBodySchema(supplies=supplies_list)
 
-
         stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids_body))
         self.union_results_stickers(supply_ids_body, stickers)
 
@@ -255,7 +252,7 @@ class SuppliesService:
             result[wild_filter.wild] = result.pop(first_key)
 
         return result
-    
+
     async def _get_orders_details(self, account: str, supply_id: str, order_ids: List[int]) -> List[Dict[str, Any]]:
         """
         Получает детали заказов для указанной поставки.
@@ -269,16 +266,29 @@ class SuppliesService:
         try:
             supply = Supplies(account, get_wb_tokens()[account])
             supply_data = await supply.get_supply_orders(supply_id)
-            
+
             if not supply_data or account not in supply_data or supply_id not in supply_data[account]:
                 logger.error(f"Не удалось получить данные о поставке {supply_id} для аккаунта {account}")
                 return []
-            
+
             all_orders = supply_data[account][supply_id].get("orders", [])
 
             filtered_orders = [order for order in all_orders if order.get("id") in order_ids]
-            
+
             return filtered_orders
         except Exception as e:
             logger.error(f"Ошибка при получении деталей заказов для {supply_id}, {account}: {str(e)}")
             return []
+
+    @staticmethod
+    async def process_delivery_supplies(supply_ids: List[DeliverySupplyInfo]):
+        """
+        Отправляет запросы на перевод поставок в статус доставки в Wildberries API.
+
+        Args:
+            supply_ids: Список поставок для перевода в статус доставки
+        """
+        wb_tokens = get_wb_tokens()
+        tasks = [Supplies(supply.account, wb_tokens.get(supply.account, "")).deliver_supply(supply.supply_id)
+                 for supply in supply_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)

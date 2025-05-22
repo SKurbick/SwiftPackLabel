@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -31,5 +31,12 @@ class WildParserResponse(BaseSchema):
     
     wild: str = Field(..., description="Уникальный номер wild")
     quantity: int = Field(..., description="Количество товара")
-    name: str = Field(..., description="Наименование товара")
-    photos: List[str] = Field(..., description="Ссылки на фото товара")
+    name_file: Optional[str] = Field(..., description="Наименование товара в файле")
+    name_db: Optional[str] = Field(..., description="Наименование товара в базе данных")
+    photos: Optional[str] = Field(..., description="Ссылки на фото товара")
+    length: Optional[int] = Field(None, description="Длина товара в мм")
+    width: Optional[int] = Field(None, description="Ширина товара в мм")
+    height: Optional[int] = Field(None, description="Высота товара в мм")
+    volume: Optional[float] = Field(None, description="Объем товара в м³")
+    rating: Optional[float] = Field(None, description="Рейтинг товара")
+    colors: Optional[List[str]] = Field(None, description="Цвет товара")
