@@ -151,22 +151,22 @@ class WildParserService:
         """
         return await self.get_most_relevant_value(wild_code, 'height', None)
 
-    async def get_volume(self, wild_code: str) -> Optional[float]:
+    @staticmethod
+    async def get_volume(length: Optional[int], width: Optional[int], height: Optional[int]) -> Optional[float]:
         """
-        Рассчитывает объем товара в м³ на основе длины, ширины и высоты.
+        Рассчитывает объем товара в м³ на основе длины, ширины и высоты в сантиметрах.
         Args:
-            wild_code: Уникальный номер wild
+            height: Высота в сантиметрах
+            width: Ширина в сантиметрах
+            length: Длина в сантиметрах
         Returns:
             Optional[float]: Объем товара в м³
         """
-        length = await self.get_length(wild_code)
-        width = await self.get_width(wild_code)
-        height = await self.get_height(wild_code)
 
         if length is None or width is None or height is None:
             return 0
 
-        return (length * width * height) / 1_000_000_000
+        return (length * width * height) / 1_000_000
 
     async def get_rating(self, wild_code: str) -> Optional[float]:
         """
@@ -205,7 +205,7 @@ class WildParserService:
         length = await self.get_length(wild_code)
         width = await self.get_width(wild_code)
         height = await self.get_height(wild_code)
-        volume = await self.get_volume(wild_code)
+        volume = await self.get_volume(length, width, height)
         rating = await self.get_rating(wild_code)
         colors = await self.get_colors(wild_code)
 
