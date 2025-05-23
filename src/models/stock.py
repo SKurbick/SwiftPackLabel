@@ -39,5 +39,5 @@ class StockDB:
 
         query = """SELECT product_id ,physical_quantity from current_balances WHERE product_id = ANY($1)"""
         result = await self.db.fetch(query, wilds)
-        return {res['local_vendor_code']: (res['stocks_quantity'] if isinstance(res['stocks_quantity'], int) else 0)
+        return {res['product_id']: (res['physical_quantity'] if isinstance(res['physical_quantity'], int) else 0)
                 for res in result}
