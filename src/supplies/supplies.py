@@ -353,7 +353,7 @@ class SuppliesService:
                              order_wild_map: Dict[str, str],
                              author: str,
                              warehouse_id: int = 1,
-                             delivery_type: str = "ФБС") -> Dict[str, Any]:
+                             delivery_type: str = "ФБС") -> bool:
         """
         Сохраняет данные об отгрузках в таблицу shipment_of_goods.
         """
@@ -363,7 +363,9 @@ class SuppliesService:
             supply_ids, order_wild_map, author, warehouse_id, delivery_type
         )
         shipment_repository = ShipmentOfGoods(self.db)
+        filter_wild = await shipment_repository.filter_wilds()
 
-        success = await shipment_repository.create_all(shipment_data)
+        filtered_shipment_data = [item for item in shipment_data if item['product_id'] in filter_wild]
+        logger.info(f"Отфильтровано записей: {len(shipment_data)} -> {len(filtered_shipment_data)}")
 
-        return success
+        return await shipment_repository.create_all(filtered_shipment_data)

@@ -61,3 +61,8 @@ class ShipmentOfGoods:
         except Exception as e:
             logger.error(f"Ошибка при вставке данных: {str(e)}")
             return False
+
+    async def filter_wilds(self):
+        query = """SELECT product_id from current_balances"""
+        result =  await self.db.fetch(query)
+        return [i['product_id'] for i in result]
