@@ -2,12 +2,19 @@
 Модуль для форматирования данных в формат, необходимый для интеграции с 1C.
 """
 import asyncio
+import json
+
+from aiohttp import BasicAuth
 from typing import List, Dict, Any, Optional, Tuple
+
+from starlette import status
 
 from src.logger import app_logger as logger
 from src.__init__ import account_inn_map
 from src.utils import get_wb_tokens
 from src.wildberries_api.orders import Orders
+from src.response import AsyncHttpClient
+from src.settings import settings
 
 
 class OneCIntegration:
@@ -18,7 +25,7 @@ class OneCIntegration:
 
     def __init__(self):
         """Инициализация класса интеграции с 1C."""
-        pass
+        self.async_client = AsyncHttpClient()
 
     @staticmethod
     def convert_price(price) -> float:
@@ -87,10 +94,7 @@ class OneCIntegration:
             all_orders = await orders_api.get_orders()
 
             order_ids_set = set(order_ids)
-            filtered_orders = [
-                order for order in all_orders
-                if order.get('id') in order_ids_set
-            ]
+            filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
 
             logger.info(
                 f"Получено {len(filtered_orders)} заказов из {len(order_ids)} запрошенных для аккаунта {account}")
@@ -108,16 +112,12 @@ class OneCIntegration:
         Returns:
             Dict[str, Any]: Структурированные данные заказа
         """
-        order_data = {
-            "id": order.get("id")
-        }
+        order_data = {"id": order.get("id")}
         if "convertedPrice" in order:
             order_data["price"] = self.convert_price(order["convertedPrice"])
 
         for key, value in order.items():
-            if key not in ["id"] and all(
-                    price_key not in key.lower() for price_key in ["price", "cost"]
-            ):
+            if key not in ["id"] and all(price_key not in key.lower() for price_key in ["price", "cost"]):
                 order_data[key] = value
 
         return order_data
@@ -199,21 +199,19 @@ class OneCIntegration:
         Returns:
             Dict[str, Any]: Структурированные данные о wild-коде
         """
-        total_orders = sum(len(supply_item.get("orders", [])) for supply_item in supplies)
-
-        wild_item = {"wild_code": wild_code,"count": total_orders,"supplies": []}
-
+        wild_item = {"wild_code": wild_code, "supplies": []}
 
         for supply_item in supplies:
             supply_id = supply_item.get("supply_id")
             orders = supply_item.get("orders", [])
 
-            supply_data = {"supply_id": supply_id,"orders": [
-                    {
-                        "order_id": order.get("id"),
-                        "price": float(order.get("price", 0)),
-                        "nm_id": order.get("nmId")
-                    } for order in orders]}
+            supply_data = {"supply_id": supply_id, "orders": [
+                {
+                    "order_id": order.get("id"),
+                    "price": float(order.get("price", 0)),
+                    "nm_id": order.get("nmId"),
+                    "count": 1
+                } for order in orders]}
             wild_item["supplies"].append(supply_data)
 
         return wild_item
@@ -230,7 +228,7 @@ class OneCIntegration:
         if "wild_supply_orders" not in data or not data["wild_supply_orders"]:
             return None
 
-        account_data = {"account": account,"inn": account_inn_map.get(account, ""),"data": []}
+        account_data = {"account": account, "inn": account_inn_map.get(account, ""), "data": []}
 
         for wild_code, wild_data in data["wild_supply_orders"].items():
             if "supplies" not in wild_data or not wild_data["supplies"]:
@@ -257,6 +255,41 @@ class OneCIntegration:
 
         return {"accounts": accounts}
 
+    async def send_to_1c(self, request_body: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Отправляет POST запрос к 1C с указанным телом запроса.
+        Args:
+            request_body: Тело запроса для отправки в 1C
+        Returns:
+            Dict[str, Any]: Ответ от 1C или информация об ошибке
+        """
+
+        logger.info(f"Отправка данных в 1C: {len(str(request_body))} байт")
+
+        if not settings.ONEC_USER or not settings.ONEC_PASSWORD:
+            return {"status_code": 500, "message": "Отсутствуют учетные данные для 1C"}
+
+        try:
+            auth = BasicAuth(settings.ONEC_USER, settings.ONEC_PASSWORD)
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+            response_text = await self.async_client._make_request(
+                "POST", settings.ONEC_HOST, json=request_body,
+                headers=headers, auth=auth
+            )
+
+            try:
+                result = json.loads(response_text) if isinstance(response_text, str) else response_text
+                logger.info(f"Успешный ответ от 1C: {result}")
+                return result
+            except json.JSONDecodeError:
+                logger.error(f"Ошибка при чтении JSON ответа от 1C: {response_text}")
+                return {"status_code": 500,"message": "Ошибка при чтении JSON ответа","response": response_text}
+
+        except Exception as e:
+            logger.error(f"Ошибка при отправке данных в 1C: {str(e)}")
+            return {"status_code": 500, "message": f"Ошибка при отправке данных в 1C: {str(e)}"}
+
     async def format_delivery_data(self, supply_ids: List[Any], order_wild_map: Dict[str, str]) -> Dict[
         str, List[Dict[str, Any]]]:
         """
@@ -277,7 +310,8 @@ class OneCIntegration:
                 ) for account, order_ids in accounts_orders.items()
             ]
             await asyncio.gather(*tasks)
-            return self.build_final_structure(result_structure)
+            result =  await self.send_to_1c(self.build_final_structure(result_structure))
+            return result
 
         except Exception as e:
             logger.error(f"Ошибка при форматировании данных для 1C: {str(e)}")

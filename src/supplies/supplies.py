@@ -8,6 +8,7 @@ from src.wildberries_api.supplies import Supplies
 from src.wildberries_api.orders import Orders
 from src.db import AsyncGenerator
 from src.models.card_data import CardData
+from src.models.shipment_of_goods import ShipmentOfGoods
 from fastapi import HTTPException
 
 from src.supplies.schema import (
@@ -292,3 +293,77 @@ class SuppliesService:
         tasks = [Supplies(supply.account, wb_tokens.get(supply.account, "")).deliver_supply(supply.supply_id)
                  for supply in supply_ids]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    async def prepare_shipment_data(supply_ids: List[DeliverySupplyInfo], order_wild_map: Dict[str, str],
+                                    author: str, warehouse_id: int = 1, delivery_type: str = "ФБС") -> List[
+        Dict[str, Any]]:
+        """
+        Подготавливает данные для записи в таблицу shipment_of_goods.
+
+        Args:
+            supply_ids: Список поставок для перевода в статус доставки
+            order_wild_map: Соответствие заказов и артикулов wild
+            author: Имя автора отгрузки
+            warehouse_id: ID склада (по умолчанию 1)
+            delivery_type: Тип доставки (по умолчанию "ФБС")
+
+        Returns:
+            List[Dict[str, Any]]: Список данных для записи в таблицу shipment_of_goods
+        """
+        logger.info(f"Подготовка данных для записи в таблицу shipment_of_goods: {len(supply_ids)} поставок")
+
+        result = []
+
+        for supply_info in supply_ids:
+            supply_orders = [str(order_id) for order_id in supply_info.order_ids]
+
+            wild_orders = {}
+            for order_id in supply_orders:
+                if order_id in order_wild_map:
+                    wild_code = order_wild_map[order_id]
+                    if wild_code not in wild_orders:
+                        wild_orders[wild_code] = 0
+                    wild_orders[wild_code] += 1
+
+            if not wild_orders:
+                logger.warning(f"Для поставки {supply_info.supply_id} не найдено соответствий wild-кодов")
+                continue
+
+            for wild_code, quantity in wild_orders.items():
+                shipment_data = {
+                    "author": author,
+                    "supply_id": supply_info.supply_id,
+                    "product_id": wild_code,
+                    "warehouse_id": warehouse_id,
+                    "delivery_type": delivery_type,
+                    "wb_warehouse": "",
+                    "account": supply_info.account,
+                    "quantity": quantity
+                }
+
+                result.append(shipment_data)
+                logger.info(f"Подготовлены данные для отгрузки: {supply_info.supply_id}, {wild_code}, {quantity}")
+
+        logger.info(f"Всего подготовлено {len(result)} записей для таблицы shipment_of_goods")
+        return result
+
+    async def save_shipments(self,
+                             supply_ids: List[DeliverySupplyInfo],
+                             order_wild_map: Dict[str, str],
+                             author: str,
+                             warehouse_id: int = 1,
+                             delivery_type: str = "ФБС") -> Dict[str, Any]:
+        """
+        Сохраняет данные об отгрузках в таблицу shipment_of_goods.
+        """
+        logger.info(f"Сохранение данных об отгрузках: {len(supply_ids)} поставок")
+
+        shipment_data = await self.prepare_shipment_data(
+            supply_ids, order_wild_map, author, warehouse_id, delivery_type
+        )
+        shipment_repository = ShipmentOfGoods(self.db)
+
+        success = await shipment_repository.create_all(shipment_data)
+
+        return success

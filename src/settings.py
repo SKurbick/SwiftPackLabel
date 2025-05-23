@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     INIT_SUPERUSER_PASSWORD: str = os.getenv("INIT_SUPERUSER_PASSWORD", "adminpassword")
     INIT_SUPERUSER_EMAIL: str = os.getenv("INIT_SUPERUSER_EMAIL", "admin@example.com")
 
+    ONEC_HOST: str = os.getenv("ONEC_HOST","")
+    ONEC_USER: str = os.getenv("ONEC_USER","")
+    ONEC_PASSWORD: str = os.getenv("ONEC_PASSWORD","")
+
 
 @lru_cache()
 def get_settings() -> Settings:

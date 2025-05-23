@@ -1,6 +1,6 @@
-from typing import List, Dict, Any
+from typing import List, Dict
 
-from starlette.responses import StreamingResponse
+from starlette.responses import StreamingResponse, JSONResponse
 from fastapi import APIRouter, Depends, Body, status, HTTPException
 
 from src.logger import app_logger as logger
@@ -96,7 +96,7 @@ async def generate_stickers_by_wild(
 
 
 @supply.post("/delivery",
-             status_code=status.HTTP_200_OK,
+             status_code=status.HTTP_201_CREATED,
              summary="Перевод поставок в статус доставки",
              description="Переводит указанные поставки в статус доставки")
 async def deliver_supplies(
@@ -104,7 +104,7 @@ async def deliver_supplies(
         order_wild_map: Dict[str, str] = Body(..., description="Соответствие заказов и артикулов wild"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> JSONResponse:
     """
     Переводит указанные поставки в статус доставки и формирует структурированные данные для 1C.
     Args:
@@ -118,11 +118,27 @@ async def deliver_supplies(
     logger.info(f"Запрос на перевод поставок в статус доставки от {user.get('username', 'unknown')}")
     logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок и {len(order_wild_map)} заказов")
     try:
-        # supply_service = SuppliesService()
-        # await supply_service.process_delivery_supplies(supply_ids)
+        supply_service = SuppliesService(db)
+        await supply_service.process_delivery_supplies(supply_ids)
         integration = OneCIntegration()
-        result = await integration.format_delivery_data(supply_ids, order_wild_map)
-        return result
+        integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
+        shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
+                                                              user.get('username', "Не найден"))
+
+        integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
+
+        response_content = {
+            "success": integration_success and shipment_result,
+            "message": "Все операции выполнены успешно" if (integration_success and shipment_result)
+                      else "Возникли ошибки при обработке",
+            "integration_result": integration_result,
+            "shipment_result": shipment_result
+        }
+
+        return JSONResponse(
+            content=response_content,
+            status_code=status.HTTP_201_CREATED
+        )
 
     except Exception as e:
         logger.error(f"Ошибка при обработке доставки поставок: {str(e)}")
