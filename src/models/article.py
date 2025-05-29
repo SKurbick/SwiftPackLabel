@@ -44,3 +44,24 @@ class ArticleDB:
         WHERE a.nm_id = ANY($1)
         """
         return await self.db.fetch(query, nm_ids)
+
+    async def get_vendor_codes_by_local_vendor_code(self, local_vendor_code: str) -> List[str]:
+        """
+        Получает все уникальные vendor_code для товаров с указанным local_vendor_code (wild).
+        Args:
+            local_vendor_code: Локальный артикул продавца (wild)
+        Returns:
+            List[str]: Список уникальных vendor_code
+        """
+        query = """
+        SELECT DISTINCT vendor_code
+        FROM article
+        WHERE local_vendor_code = $1
+        """
+        
+        try:
+            rows = await self.db.fetch(query, local_vendor_code)
+            return [row['vendor_code'] for row in rows] if rows else []
+        except Exception as e:
+            logger.error(f"Ошибка при получении vendor_code по local_vendor_code {local_vendor_code}: {str(e)}")
+            return []
