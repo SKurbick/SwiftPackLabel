@@ -25,7 +25,7 @@ class OneCIntegration:
 
     def __init__(self):
         """Инициализация класса интеграции с 1C."""
-        self.async_client = AsyncHttpClient()
+        self.async_client = AsyncHttpClient(timeout=240)
 
     @staticmethod
     def convert_price(price) -> float:
@@ -207,7 +207,7 @@ class OneCIntegration:
 
             supply_data = {"supply_id": supply_id, "orders": [
                 {
-                    "order_id": order.get("id"),
+                    "order_id": str(order.get("id")),
                     "price": float(order.get("price", 0)),
                     "nm_id": order.get("nmId"),
                     "count": 1
