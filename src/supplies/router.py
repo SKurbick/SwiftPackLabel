@@ -120,11 +120,10 @@ async def deliver_supplies(
     try:
         supply_service = SuppliesService(db)
         await supply_service.process_delivery_supplies(supply_ids)
-        # integration = OneCIntegration()
-        # integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
+        integration = OneCIntegration()
+        integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
         shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
                                                               user.get('username', "Не найден"))
-        integration_result = {}
 
         integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
 
