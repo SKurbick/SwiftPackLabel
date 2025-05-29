@@ -207,7 +207,7 @@ class OneCIntegration:
 
             supply_data = {"supply_id": supply_id, "orders": [
                 {
-                    "order_id": order.get("id"),
+                    "order_id": str(order.get("id")),
                     "price": float(order.get("price", 0)),
                     "nm_id": order.get("nmId"),
                     "count": 1

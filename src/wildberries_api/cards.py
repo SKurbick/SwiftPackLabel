@@ -66,7 +66,6 @@ class Cards(Account):
         Returns:
             Список карточек товаров
         """
-        # Проверяем, что vendor_codes является списком
         if not isinstance(vendor_codes, list):
             vendor_codes = [vendor_codes]
 
@@ -76,7 +75,6 @@ class Cards(Account):
 
         logger.info(f"{self.account}: Получение карточек для {len(vendor_codes)} vendor_codes")
 
-        # Получаем карточки для каждого кода последовательно
         all_cards = []
         for wild in vendor_codes:
             cards = await self._get_cards_by_wild(wild, with_photo)

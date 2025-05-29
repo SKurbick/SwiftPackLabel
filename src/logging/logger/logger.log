@@ -36335,3 +36335,4 @@ DETAIL:  Key (status_id)=(1) is not present in table "stock_statuses".
 2025-05-28 18:04:41 | INFO | Даниелян: wild=wild1398d, получено 1 карточек, всего 1/1
 2025-05-28 18:04:41 | INFO | Даниелян: Всего получено 2 карточек для 2 vendor_codes
 2025-05-28 18:04:41 | INFO | Найдено 2 карточек с артикулом wild1398 в аккаунте Даниелян
+2025-05-29 11:46:23 | INFO | Users already exist, skipping superuser creation.
