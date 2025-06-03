@@ -6,6 +6,7 @@ from src.excel_data.router import excel_data
 from src.orders.router import orders
 from src.wild_logs.router import wild_logs
 from src.qr_parser.router import qr_parser
+from src.cards.router import cards
 
 router = APIRouter(prefix='/api/v1')
 router.include_router(supply)
@@ -15,3 +16,4 @@ router.include_router(excel_data)
 router.include_router(orders)
 router.include_router(wild_logs)
 router.include_router(qr_parser)
+router.include_router(cards)
