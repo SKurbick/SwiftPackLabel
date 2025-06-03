@@ -16,7 +16,7 @@ cards = APIRouter(prefix='/cards', tags=['Cards'])
     "/update-dimensions",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Обновление размеров и веса товара",
-    description="Обновляет размеры и вес товара по артикулу продавца (wild). Обновляются только переданные параметры."
+    description="Обновляет размеры и вес товара по артикулу продавца (wild). Обновляются только переданные параметры. Вес указывается в килограммах"
 )
 async def update_dimensions(
     dimensions: DimensionsUpdateRequest = Body(..., description="Данные о размерах и весе товара"),
