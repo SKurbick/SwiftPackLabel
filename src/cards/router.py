@@ -29,34 +29,20 @@ async def update_dimensions(
     username = user.get('username', 'unknown')
     logger.info(f"Пользователь {username} запросил обновление размеров для артикула {dimensions.wild}")
 
-    # Создаем сервис
     cards_service = CardsService(db)
-    
-    # Обновляем размеры
+
     result = await cards_service.update_dimensions(
         wild=dimensions.wild,
         width=dimensions.width,
         length=dimensions.length,
         height=dimensions.height,
-        weight=dimensions.weight
-    )
-    
-    # Проверяем результат
+        weight=dimensions.weight)
+
     if not result["success"]:
         if "Не найдено карточек" in result["error"]:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=result["error"]
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail=result["error"])
         elif "Не указаны параметры" in result["error"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result["error"]
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,detail=result["error"])
         else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
-            )
-    
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,detail=result["error"])
     logger.info(f"Успешно обновлено {result.get('updated_count', 0)} карточек для артикула {dimensions.wild}")

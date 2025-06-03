@@ -1,5 +1,6 @@
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+import math
 
 
 class DimensionsUpdateRequest(BaseModel):
@@ -21,3 +22,12 @@ class DimensionsUpdateRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError('Артикул продавца не может быть пустым')
         return v.strip()
+
+    @model_validator(mode='after')
+    def round_dimensions_and_weight(self) -> 'DimensionsUpdateRequest':
+        """Округляет размеры и вес до верхнего целого числа после валидации."""
+        for field_name in ['width', 'length', 'height']:
+            value = getattr(self, field_name)
+            if value is not None:
+                setattr(self, field_name, int(math.ceil(value)))
+        return self

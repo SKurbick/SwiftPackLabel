@@ -1,3 +1,4 @@
+import json
 from src.response import parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
@@ -57,6 +58,45 @@ class Cards(Account):
 
         return cards
 
+    def _filter_duplicate_cards(self, cards):
+        """
+        Удаляет дубликаты карточек из списка, оставляя только уникальные по nmID и vendorCode.
+        Args:
+            cards: Список карточек товаров
+        Returns:
+            Список карточек без дубликатов
+        """
+        if not cards:
+            return []
+
+        # Создаем словарь для отслеживания уникальных карточек
+        unique_cards = {}
+        duplicate_count = 0
+
+        for card in cards:
+            nm_id = card.get("nmID")
+            vendor_code = card.get("vendorCode")
+            
+            if not nm_id or not vendor_code:
+                logger.warning(f"Пропускаем карточку без nmID или vendorCode: {card}")
+                continue
+
+            # Создаем ключ для определения уникальности
+            key = f"{nm_id}_{vendor_code}"
+            
+            if key not in unique_cards:
+                unique_cards[key] = card
+            else:
+                duplicate_count += 1
+                logger.debug(f"Найден дубликат карточки: nmID={nm_id}, vendorCode={vendor_code}")
+
+        filtered_cards = list(unique_cards.values())
+        
+        if duplicate_count > 0:
+            logger.info(f"Удалено {duplicate_count} дубликатов карточек. Осталось {len(filtered_cards)} уникальных.")
+        
+        return filtered_cards
+
     async def get_cards_list(self, vendor_codes, with_photo=-1):
         """
         Получает список карточек товаров по списку кодов vendor_codes.
@@ -94,17 +134,50 @@ class Cards(Account):
         if not isinstance(cards, list) or not cards:
             logger.warning(f"{self.account}: Пустой список карточек для обновления")
             return {"error": "Список карточек пуст"}
+        
+        # Удаляем дубликаты по nmID и vendorCode
+        filtered_cards = self._filter_duplicate_cards(cards)        
+        if len(filtered_cards) < len(cards):
+            logger.info(f"{self.account}: Удалено {len(cards) - len(filtered_cards)} дублирующихся карточек")
+        
+        # Используем отфильтрованный список карточек для дальнейшей работы
+        cards = filtered_cards
 
         # Если карточек меньше или равно 3000, обновляем одним запросом
         if len(cards) <= 3000:
-            response = await self.async_client.post(
-                f"{self.base_url}/cards/update",
-                json=cards,
-                headers=self.headers
-            )
-            result = parse_json(response)
-            logger.info(f"{self.account}: Обновлено {len(cards)} карточек")
-            return result
+            try:
+                logger.debug(f"{self.account}: Отправляем на обновление данные: {json.dumps(cards, ensure_ascii=False)[:500]}...")
+
+                response = await self.async_client.post(
+                    f"{self.base_url}/cards/update",
+                    json=cards,  # Используем json параметр вместо data
+                    headers=self.headers
+                )
+                
+                # Проверяем, что получили ответ
+                if response is None:
+                    logger.error(f"{self.account}: Получен пустой ответ от API")
+                    return {"error": "Пустой ответ от API", "success": False}
+                
+                # Пытаемся распарсить JSON
+                try:
+                    result = parse_json(response)
+                    logger.info(f"{self.account}: Обновлено {len(cards)} карточек")
+                    return result
+                except ValueError as e:
+                    # Если не удалось распарсить JSON, логируем сам ответ
+                    logger.error(f"{self.account}: Ошибка парсинга ответа: {e}")
+                    logger.error(f"{self.account}: Ответ сервера: {response[:1000]}")
+                    return {"error": f"Ошибка парсинга ответа: {str(e)}", "response": response[:1000], "success": False}
+                    
+            except Exception as e:
+                logger.error(f"{self.account}: Ошибка при обновлении карточек: {type(e).__name__}: {str(e)}")
+                # Если это aiohttp ошибка с телом ответа, пытаемся его получить
+                if hasattr(e, 'status'):
+                    logger.error(f"{self.account}: HTTP статус: {e.status}")
+                if hasattr(e, 'message'):
+                    logger.error(f"{self.account}: Сообщение: {e.message}")
+                return {"error": str(e), "success": False}
 
         batches = [cards[i:i + 3000] for i in range(0, len(cards), 3000)]
         logger.info(f"{self.account}: Разбиение {len(cards)} карточек на {len(batches)} батчей")
