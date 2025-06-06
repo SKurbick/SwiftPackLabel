@@ -6,6 +6,7 @@ from src.utils import get_wb_tokens, process_local_vendor_code, get_information_
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
 from src.models.stock import StockDB
+from src.models.hanging_supplies import HangingSupplies
 from datetime import timedelta
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
@@ -492,6 +493,33 @@ class OrdersService:
             order_wild_map=order_wild_map
         )
 
+    async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]], supply_by_account: Dict[str, str]) -> None:
+        """
+        Сохраняет информацию о висячих поставках в БД.
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+        """
+
+        orders_by_supply = {}
+        for orders in filtered_orders.values():
+            for order in orders:
+                account = order.account
+                if account not in supply_by_account:
+                    continue
+
+                supply_id = supply_by_account[account]
+                if (supply_id, account) not in orders_by_supply:
+                    orders_by_supply[(supply_id, account)] = []
+
+                orders_by_supply[(supply_id, account)].append(order.model_dump())
+
+        hanging_supplies = HangingSupplies(self.db)
+        for (supply_id, account), orders in orders_by_supply.items():
+            order_data = {"orders": orders}
+            await hanging_supplies.save_hanging_supply(supply_id, account, order_data)
+            logger.info(f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами")
+            
     async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:
         """
         Обрабатывает заказы с учетом установленного количества fact_orders.
@@ -509,4 +537,9 @@ class OrdersService:
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
                                            order_supply_mapping)
+        
+        # Если поставки висячие, сохраняем информацию в БД
+        if input_data.is_hanging and self.db:
+            await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account)
+            
         return self._prepare_result(orders_added_by_article, order_supply_mapping)

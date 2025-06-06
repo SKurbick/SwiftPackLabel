@@ -154,3 +154,34 @@ async def deliver_supplies(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при обработке доставки поставок: {str(e)}"
         )
+
+
+@supply.post("/delivery-hanging",
+             status_code=status.HTTP_201_CREATED,
+             summary="Перевод висячих поставок в статус доставки",
+             description="Переводит указанные висячие поставки в статус доставки")
+async def deliver_supplies_hanging(
+        supply_ids: List[DeliverySupplyInfo] = Body(..., description="Список поставок для перевода в статус доставки"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+):
+    """
+    Переводит указанные висячие поставки в статус доставки.
+    Args:
+        supply_ids: Список поставок для перевода в статус доставки
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+    Returns:
+        dict: Словарь с информацией об успешности выполнения
+    """
+    logger.info(f"Запрос на перевод висячих поставок в статус доставки от {user.get('username', 'unknown')}")
+    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок")
+    try:
+        supply_service = SuppliesService(db)
+        await supply_service.process_delivery_supplies(supply_ids)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке доставки висячих поставок: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при обработке доставки поставок: {str(e)}",
+        ) from e
