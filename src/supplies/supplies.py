@@ -9,6 +9,7 @@ from src.wildberries_api.orders import Orders
 from src.db import AsyncGenerator
 from src.models.card_data import CardData
 from src.models.shipment_of_goods import ShipmentOfGoods
+from src.models.hanging_supplies import HangingSupplies
 from fastapi import HTTPException
 
 from src.supplies.schema import (
@@ -133,8 +134,38 @@ class SuppliesService:
                                 local_vendor_code=process_local_vendor_code(data["article"]))
                     for data in orders["orders"]]}
 
-    async def get_list_supplies(self) -> SupplyIdResponseSchema:
-        logger.info("Получение данных о поставках, инициализация")
+    async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
+        """
+        Фильтрует список поставок по признаку "висячая".
+        Args:
+            supplies_data: Список поставок для фильтрации
+            hanging_only: Если True - оставить только висячие поставки, если False - только обычные (не висячие)
+        Returns:
+            List: Отфильтрованный список поставок
+        """
+        hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
+        hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
+        
+        filtered_supplies = []
+        for supply in supplies_data:
+            is_hanging = (supply['supply_id'], supply['account']) in hanging_supplies_map
+
+            if hanging_only == is_hanging:
+                if hanging_only:
+                    supply["is_hanging"] = True
+                filtered_supplies.append(supply)
+                
+        return filtered_supplies
+        
+    async def get_list_supplies(self, hanging_only: bool = False) -> SupplyIdResponseSchema:
+        """
+        Получить список поставок с фильтрацией по висячим.
+        Args:
+            hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+        Returns:
+            SupplyIdResponseSchema: Список поставок с их деталями
+        """
+        logger.info(f"Получение данных о поставках, hanging_only={hanging_only}")
         supplies_ids: List[Any] = await self.get_information_to_supplies()
         supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
         result: List = []
@@ -144,7 +175,9 @@ class SuppliesService:
                 supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
                                                      for data in supplies_ids[account] if not data['done']}
                 result.append(self.create_supply_result(supply, supply_id, account, orders))
-        return SupplyIdResponseSchema(supplies=result)
+
+        filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
+        return SupplyIdResponseSchema(supplies=filtered_result)
 
     async def check_current_orders(self, supply_ids: SupplyIdBodySchema):
         logger.info("Проверка поставок на соответствие наличия заказов (сверка заказов по поставкам)")

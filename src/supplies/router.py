@@ -17,13 +17,21 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-async def get_supplies(user: dict = Depends(get_current_user)) -> SupplyIdResponseSchema:
+async def get_supplies(
+    hanging_only: bool = False,
+    db: AsyncGenerator = Depends(get_db_connection),
+    user: dict = Depends(get_current_user)
+) -> SupplyIdResponseSchema:
     """
-    Получить список всех поставок.
+    Получить список поставок с фильтрацией по висячим.
+    Args:
+        hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+        db: Соединение с базой данных
+        user: Текущий пользователь
     Returns:
         SupplyIdResponseSchema: Список поставок с их деталями
     """
-    return await SuppliesService().get_list_supplies()
+    return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only)
 
 
 @supply.post("/upload_stickers",
