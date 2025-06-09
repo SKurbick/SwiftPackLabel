@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 from typing import List, Dict, Any, Set
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
@@ -517,7 +518,8 @@ class OrdersService:
         hanging_supplies = HangingSupplies(self.db)
         for (supply_id, account), orders in orders_by_supply.items():
             order_data = {"orders": orders}
-            await hanging_supplies.save_hanging_supply(supply_id, account, order_data)
+            order_data_json = json.dumps(order_data)
+            await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json)
             logger.info(f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами")
             
     async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:

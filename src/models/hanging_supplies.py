@@ -21,7 +21,7 @@ class HangingSupplies:
     def __init__(self, db):
         self.db = db
 
-    async def save_hanging_supply(self, supply_id: str, account: str, order_data: Dict[str, Any]) -> bool:
+    async def save_hanging_supply(self, supply_id: str, account: str, order_data: str) -> bool:
         """
         Сохраняет информацию о висячей поставке в БД.
         Args:
