@@ -21,25 +21,26 @@ class HangingSupplies:
     def __init__(self, db):
         self.db = db
 
-    async def save_hanging_supply(self, supply_id: str, account: str, order_data: str) -> bool:
+    async def save_hanging_supply(self, supply_id: str, account: str, order_data: str, operator: str = 'unknown') -> bool:
         """
         Сохраняет информацию о висячей поставке в БД.
         Args:
             supply_id: ID поставки
             account: Аккаунт Wildberries
             order_data: Данные о заказах в поставке в формате JSON
+            operator: Имя пользователя (оператора), создавшего висячую поставку
         Returns:
             bool: True, если запись успешно создана/обновлена, иначе False
         """
         try:
             query = """
-            INSERT INTO public.hanging_supplies (supply_id, account, order_data)
-            VALUES ($1, $2, $3)
+            INSERT INTO public.hanging_supplies (supply_id, account, order_data, operator)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (supply_id, account) 
-            DO UPDATE SET order_data = $3, created_at = CURRENT_TIMESTAMP
+            DO UPDATE SET order_data = $3, created_at = CURRENT_TIMESTAMP, operator = $4
             RETURNING id
             """
-            result = await self.db.fetchrow(query, supply_id, account, order_data)
+            result = await self.db.fetchrow(query, supply_id, account, order_data, operator)
             return result is not None
         except Exception as e:
             logger.error(f"Ошибка при сохранении висячей поставки: {str(e)}")

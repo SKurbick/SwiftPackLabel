@@ -73,7 +73,7 @@ async def add_fact_orders_and_supply_name(
 
     try:
         orders_service = OrdersService(db)
-        result = await orders_service.process_orders_with_fact_count(payload)
+        result = await orders_service.process_orders_with_fact_count(payload, user.get('username', 'unknown'))
         elapsed_time = time.time() - start_time
         logger.info(f"Поставки созданы успешно. Время: {elapsed_time:.2f} сек.")
         return result

@@ -175,7 +175,7 @@ async def deliver_supplies_hanging(
         dict: Словарь с информацией об успешности выполнения
     """
     logger.info(f"Запрос на перевод висячих поставок в статус доставки от {user.get('username', 'unknown')}")
-    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок")
+    logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок : {supply_ids}")
     try:
         supply_service = SuppliesService(db)
         await supply_service.process_delivery_supplies(supply_ids)
