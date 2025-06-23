@@ -49,6 +49,8 @@ class SupplyId(SupplyBase):
 
 class SupplyIdResult(SupplyBase):
     """Схема для обработанных данных о поставке с датой в нужном формате."""
+    is_hanging: bool = None
+    status: str = None
 
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:

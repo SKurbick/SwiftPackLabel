@@ -17,8 +17,44 @@ class Orders(Account):
         return {self.account: {supply_id: [order for order in orders.get("orders", [])]}}
 
     async def get_orders_statuses(self, order_ids: list[int]):
-        response = await self.async_client.post(f"{self.url}/status", headers=self.headers, json={"orders": order_ids})
-        return parse_json(response)
+        """
+        Получает статусы заказов. Обрабатывает списки любой длины, 
+        разбивая их на пакеты по 1000 элементов согласно ограничениям API.
+        
+        Args:
+            order_ids: Список идентификаторов заказов
+        
+        Returns:
+            dict: Ответ от API с статусами заказов
+        """
+
+        if not order_ids:
+            return {"orders": []}
+
+        if len(order_ids) <= 1000:
+            response = await self.async_client.post(
+                f"{self.url}/status", 
+                headers=self.headers, 
+                json={"orders": order_ids}
+            )
+            return parse_json(response)
+
+        batches = [order_ids[i:i+1000] for i in range(0, len(order_ids), 1000)]
+        logger.info(f"Разбиваем запрос статусов на {len(batches)} пакетов по <= 1000 элементов для аккаунта {self.account}")
+
+        tasks = []
+        tasks.extend(
+            self.async_client.post(
+                f"{self.url}/status", headers=self.headers, json={"orders": batch})
+            for batch in batches)
+        responses = await asyncio.gather(*tasks)
+
+        all_orders = []
+        for response in responses:
+            result = parse_json(response)
+            all_orders.extend(result.get("orders", []))
+
+        return {"orders": all_orders}
 
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
         url_with_params = f"{self.url}/stickers?type=png&width=58&height=40"

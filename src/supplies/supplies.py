@@ -129,20 +129,33 @@ class SuppliesService:
                 "supply_id": supply_id,
                 "account": account,
                 "count": len(orders['orders']),
+                "status": None,  # Будет заполнен позже
+                "is_hanging": None,  # Будет заполнен позже
                 "orders": [
                     OrderSchema(order_id=data["id"], nm_id=data["nmId"],
                                 local_vendor_code=process_local_vendor_code(data["article"]))
                     for data in orders["orders"]]}
 
-    async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
+    async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = None) -> List:
         """
         Фильтрует список поставок по признаку "висячая".
         Args:
             supplies_data: Список поставок для фильтрации
-            hanging_only: Если True - оставить только висячие поставки, если False - только обычные (не висячие)
+            hanging_only: Если True - оставить только висячие поставки, 
+                          если False - только обычные (не висячие),
+                          если None - вернуть все поставки
         Returns:
             List: Отфильтрованный список поставок
         """
+        if hanging_only is None:
+            hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
+            hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
+            
+            for supply in supplies_data:
+                supply["is_hanging"] = (supply['supply_id'], supply['account']) in hanging_supplies_map
+                
+            return supplies_data
+
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
         
@@ -153,15 +166,19 @@ class SuppliesService:
             if hanging_only == is_hanging:
                 if hanging_only:
                     supply["is_hanging"] = True
+                else:
+                    supply["is_hanging"] = False
                 filtered_supplies.append(supply)
                 
         return filtered_supplies
         
-    async def get_list_supplies(self, hanging_only: bool = False) -> SupplyIdResponseSchema:
+    async def get_list_supplies(self, hanging_only: bool = None) -> SupplyIdResponseSchema:
         """
-        Получить список поставок с фильтрацией по висячим.
+        Получить список поставок с информацией о статусе и признаке "висячести".
         Args:
-            hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+            hanging_only: Если True - вернуть только висячие поставки, 
+                          если False - только обычные (не висячие),
+                          если None - вернуть все поставки
         Returns:
             SupplyIdResponseSchema: Список поставок с их деталями
         """
@@ -170,11 +187,55 @@ class SuppliesService:
         supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
         result: List = []
         supplies_ids: Dict[str, List] = {key: value for d in supplies_ids for key, value in d.items()}
+
         for account, value in supplies.items():
             for supply_id, orders in value.items():
                 supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
-                                                     for data in supplies_ids[account] if not data['done']}
-                result.append(self.create_supply_result(supply, supply_id, account, orders))
+                                                     for data in supplies_ids[account]}
+
+                supply_data = self.create_supply_result(supply, supply_id, account, orders)
+
+                order_ids = [order["id"] for order in orders.get("orders", [])]
+
+                if order_ids:
+                    try:
+                        orders_client = Orders(account, get_wb_tokens().get(account))
+                        statuses = await orders_client.get_orders_statuses(order_ids)
+
+                        # Подсчитываем количество заказов с разными статусами
+                        in_delivery_count = 0
+                        on_collection_count = 0
+                        other_status_count = 0
+                        order_statuses = statuses.get("orders", [])
+
+                        for status in order_statuses:
+                            supplier_status = status.get("supplierStatus", "")
+                            wb_status = status.get("wbStatus", "")
+
+                            if supplier_status == "complete":
+                                in_delivery_count += 1
+                            elif supplier_status == "confirm":
+                                on_collection_count += 1
+                            else:
+                                other_status_count += 1
+
+                        if in_delivery_count > 0 and on_collection_count == 0 and other_status_count == 0:
+                            # Все заказы в доставке
+                            supply_data["status"] = "in_delivery"
+                        elif on_collection_count > 0 and in_delivery_count == 0 and other_status_count == 0:
+                            # Все заказы на сборке
+                            supply_data["status"] = "on_collection"
+
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении статусов для поставки {supply_id}: {str(e)}")
+                        supply_data["status"] = "error"
+                else:
+                    supply_data["status"] = "unknown"
+
+                if supply_data["status"] in ["in_delivery", "on_collection"]:
+                    result.append(supply_data)
+                else:
+                    logger.info(f"Пропускаем поставку {supply_id} со статусом {supply_data.get('status')}")
 
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
         return SupplyIdResponseSchema(supplies=filtered_result)

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from src.response import parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
@@ -11,7 +12,8 @@ class Supplies(Account):
 
     async def get_supplies_filter_done(self):
         supplies = await self.get_supplies()
-        return {self.account: [sup for sup in supplies if not sup.get('done')]}
+        min_created_time = (datetime.utcnow() - timedelta(hours=240)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {self.account: [sup for sup in supplies if sup.get('createdAt', '') > min_created_time]}
 
     async def get_supplies(self):
         supplies = []
@@ -81,8 +83,6 @@ class Supplies(Account):
         :return: Ответ от WB API
         """
         response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
-        logger.info(f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response.status_code}")
+        logger.info(
+            f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response.status_code}")
         return response.status_code
-
-
-

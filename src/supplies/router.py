@@ -18,14 +18,16 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
 async def get_supplies(
-    hanging_only: bool = False,
+    hanging_only: bool = None,
     db: AsyncGenerator = Depends(get_db_connection),
     user: dict = Depends(get_current_user)
 ) -> SupplyIdResponseSchema:
     """
     Получить список поставок с фильтрацией по висячим.
     Args:
-        hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+        hanging_only: Если True - вернуть только висячие поставки, 
+                      если False - только обычные (не висячие),
+                      если None (по умолчанию) - вернуть все поставки
         db: Соединение с базой данных
         user: Текущий пользователь
     Returns:
