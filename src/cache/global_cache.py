@@ -124,6 +124,9 @@ class GlobalCacheManager:
 
     async def connect(self):
         """Подключение к Redis и инициализация сервисов."""
+        logger.info(f"Attempting to connect to Redis...")
+        logger.info(f"Redis config: host={settings.REDIS_HOST}, port={settings.REDIS_PORT}, db={settings.REDIS_DB}")
+        
         try:
             self.redis_client = redis.Redis(
                 host=settings.REDIS_HOST,
@@ -133,16 +136,24 @@ class GlobalCacheManager:
                 decode_responses=True,
                 retry_on_timeout=True
             )
+            logger.info(f"Redis client created, testing connection...")
+            
             await self.redis_client.ping()
+            logger.info(f"Redis ping successful!")
+            
             self._connected = True
+            logger.info(f"Connection status set to True")
             
             # Инициализация сервиса глобального кэша
             self.cache_service = GlobalCacheService(self.redis_client)
+            logger.info(f"GlobalCacheService initialized")
             
             logger.info(f"Global cache connected to Redis at {settings.REDIS_HOST}:{settings.REDIS_PORT}")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
+            logger.error(f"Exception type: {type(e)}")
             self._connected = False
+            logger.error(f"Connection status set to False")
 
     async def disconnect(self):
         """Отключение от Redis и остановка всех задач."""
@@ -164,18 +175,28 @@ class GlobalCacheManager:
 
     async def get(self, key: str) -> Optional[Any]:
         """Получение данных из кэша."""
+        logger.info(f"Cache.get() called for key: {key}")
+        
         if not self.is_connected():
+            logger.warning(f"Cache.get() - not connected to Redis")
             return None
         
         try:
+            logger.info(f"Executing Redis GET for key: {key}")
             cached_data = await self.redis_client.get(key)
+            logger.info(f"Redis GET result: exists={cached_data is not None}, size={len(cached_data) if cached_data else 0}")
+            
             if cached_data:
-                logger.debug(f"Cache hit: {key}")
-                return json.loads(cached_data)
-            logger.debug(f"Cache miss: {key}")
+                logger.info(f"Cache HIT for key: {key}")
+                parsed_data = json.loads(cached_data)
+                logger.info(f"Cache data parsed successfully, type: {type(parsed_data)}")
+                return parsed_data
+            
+            logger.info(f"Cache MISS for key: {key}")
             return None
         except Exception as e:
             logger.error(f"Error getting cache for key {key}: {e}")
+            logger.error(f"Exception type: {type(e)}")
             return None
 
     def _serialize_value(self, value: Any) -> Any:
@@ -193,17 +214,28 @@ class GlobalCacheManager:
 
     async def set(self, key: str, value: Any, ttl: int = None) -> bool:
         """Сохранение данных в кэш."""
+        logger.info(f"Cache.set() called for key: {key}")
+        
         if not self.is_connected():
+            logger.warning(f"Cache.set() - not connected to Redis")
             return False
         
         try:
             ttl = ttl or settings.CACHE_TTL  # Берем из настроек
+            logger.info(f"Using TTL: {ttl} seconds for key: {key}")
+            
+            logger.info(f"Serializing value for cache, type: {type(value)}")
             serialized_value = json.dumps(self._serialize_value(value), ensure_ascii=False)
+            logger.info(f"Serialized value size: {len(serialized_value)} chars")
+            
+            logger.info(f"Executing Redis SETEX for key: {key}")
             await self.redis_client.setex(key, ttl, serialized_value)
-            logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
+            logger.info(f"Cache SET successful: {key} (TTL: {ttl}s)")
             return True
         except Exception as e:
             logger.error(f"Error setting cache for key {key}: {e}")
+            logger.error(f"Exception type: {type(e)}")
+            logger.error(f"Value type that failed: {type(value)}")
             return False
 
     async def delete_pattern(self, pattern: str) -> bool:
@@ -302,25 +334,37 @@ def global_cached(key: str = None):
         
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            logger.info(f"Cache wrapper called for {func.__name__}")
+            logger.info(f"Global cache connection status: {global_cache.is_connected()}")
+            
             if not global_cache.is_connected():
                 logger.warning(f"Cache not available for {func.__name__}, executing without cache")
+                logger.warning(f"Redis client status: {global_cache.redis_client}")
+                logger.warning(f"Cache service status: {global_cache.cache_service}")
                 return await func(*args, **kwargs)
             
             # Генерация ключа кэша (игнорируем параметры для глобального кэша)
             final_key = global_cache._generate_key(cache_key)
+            logger.info(f"Generated cache key: {final_key}")
             
             # Попытка получить из кэша
+            logger.info(f"Attempting to get cached data for key: {final_key}")
             cached_result = await global_cache.get(final_key)
+            logger.info(f"Cache get result: {type(cached_result)} (None={cached_result is None})")
             
             if cached_result is not None:
-                logger.info(f"Returning cached result for {func.__name__}")
+                logger.info(f"Cache HIT: Returning cached result for {func.__name__} (size: {len(str(cached_result))} chars)")
                 return cached_result
             
             # Если кэша нет - выполняем функцию и кэшируем результат
-            logger.debug(f"No cache found for {final_key}, executing function")
+            logger.info(f"Cache MISS: No cache found for {final_key}, executing function {func.__name__}")
             result = await func(*args, **kwargs)
-            await global_cache.set(final_key, result, settings.CACHE_TTL)  # TTL из настроек
-            logger.info(f"Cached result for {func.__name__}")
+            logger.info(f"Function executed, result size: {len(str(result))} chars")
+            
+            # Сохраняем в кэш
+            logger.info(f"Setting cache for key: {final_key} with TTL: {settings.CACHE_TTL}")
+            await global_cache.set(final_key, result, settings.CACHE_TTL)
+            logger.info(f"Cache SET: Successfully cached result for {func.__name__}")
             
             return result
         
