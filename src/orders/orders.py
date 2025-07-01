@@ -1,11 +1,13 @@
 import asyncio
 import datetime
+import json
 from typing import List, Dict, Any, Set
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
 from src.models.stock import StockDB
+from src.models.hanging_supplies import HangingSupplies
 from datetime import timedelta
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
@@ -492,12 +494,42 @@ class OrdersService:
             order_wild_map=order_wild_map
         )
 
-    async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn) -> SupplyAccountWildOut:
+    async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]], supply_by_account: Dict[str, str], operator: str = 'unknown') -> None:
+        """
+        Сохраняет информацию о висячих поставках в БД.
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            operator: Имя пользователя (оператора), создавшего висячую поставку
+        """
+
+        orders_by_supply = {}
+        for orders in filtered_orders.values():
+            for order in orders:
+                account = order.account
+                if account not in supply_by_account:
+                    continue
+
+                supply_id = supply_by_account[account]
+                if (supply_id, account) not in orders_by_supply:
+                    orders_by_supply[(supply_id, account)] = []
+
+                orders_by_supply[(supply_id, account)].append(order.model_dump())
+
+        hanging_supplies = HangingSupplies(self.db)
+        for (supply_id, account), orders in orders_by_supply.items():
+            order_data = {"orders": orders}
+            order_data_json = json.dumps(order_data)
+            await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
+            logger.info(f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами, оператор: {operator}")
+            
+    async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn, operator: str = 'unknown') -> SupplyAccountWildOut:
         """
         Обрабатывает заказы с учетом установленного количества fact_orders.
         
         Args:
             input_data: Объект с данными о заказах и названием поставки
+            operator: Имя пользователя (оператора), создающего висячую поставку
             
         Returns:
             SupplyAccountWildOut: Объект с результатами обработки в новом формате
@@ -509,4 +541,9 @@ class OrdersService:
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
                                            order_supply_mapping)
+        
+        # Если поставки висячие, сохраняем информацию в БД
+        if input_data.is_hanging and self.db:
+            await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
+            
         return self._prepare_result(orders_added_by_article, order_supply_mapping)

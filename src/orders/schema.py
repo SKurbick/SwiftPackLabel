@@ -61,6 +61,7 @@ class GroupedOrderInfoWithFact(GroupedOrderInfo):
 class OrdersWithSupplyNameIn(BaseSchema):
     orders: Dict[str, GroupedOrderInfoWithFact]
     name_supply: str
+    is_hanging: bool = False
     
     @field_validator('name_supply')
     def validate_name_supply(cls, v):
