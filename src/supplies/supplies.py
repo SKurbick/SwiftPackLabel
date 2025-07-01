@@ -146,6 +146,8 @@ class SuppliesService:
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
         
+        target_wilds = {'wild1512', 'wild355', 'wild354', 'wild102', 'wild659', 'wild399'}
+        
         filtered_supplies = []
         for supply in supplies_data:
             is_hanging = (supply['supply_id'], supply['account']) in hanging_supplies_map
@@ -153,7 +155,14 @@ class SuppliesService:
             if hanging_only == is_hanging:
                 if hanging_only:
                     supply["is_hanging"] = True
-                filtered_supplies.append(supply)
+                    has_target_wild = any(
+                        order.local_vendor_code in target_wilds 
+                        for order in supply.get('orders', [])
+                    )
+                    if not has_target_wild:
+                        filtered_supplies.append(supply)
+                else:
+                    filtered_supplies.append(supply)
                 
         return filtered_supplies
         
