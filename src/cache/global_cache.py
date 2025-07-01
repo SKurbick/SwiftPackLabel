@@ -124,10 +124,16 @@ class GlobalCacheManager:
 
     async def connect(self):
         """Подключение к Redis и инициализация сервисов."""
-        logger.info(f"Attempting to connect to Redis...")
-        logger.info(f"Redis config: host={settings.REDIS_HOST}, port={settings.REDIS_PORT}, db={settings.REDIS_DB}")
+        logger.info(f"=== REDIS CONNECTION ATTEMPT ===")
+        logger.info(f"Current connection status: {self._connected}")
+        logger.info(f"Redis config from settings:")
+        logger.info(f"  REDIS_HOST: '{settings.REDIS_HOST}' (type: {type(settings.REDIS_HOST)})")
+        logger.info(f"  REDIS_PORT: {settings.REDIS_PORT} (type: {type(settings.REDIS_PORT)})")
+        logger.info(f"  REDIS_DB: {settings.REDIS_DB} (type: {type(settings.REDIS_DB)})")
+        logger.info(f"  REDIS_PASSWORD: {'SET' if settings.REDIS_PASSWORD else 'NOT SET'}")
         
         try:
+            logger.info(f"Creating Redis client with parameters...")
             self.redis_client = redis.Redis(
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
@@ -136,24 +142,41 @@ class GlobalCacheManager:
                 decode_responses=True,
                 retry_on_timeout=True
             )
-            logger.info(f"Redis client created, testing connection...")
+            logger.info(f"Redis client created successfully: {self.redis_client}")
+            logger.info(f"Redis client connection pool: {self.redis_client.connection_pool}")
             
-            await self.redis_client.ping()
-            logger.info(f"Redis ping successful!")
+            logger.info(f"Testing Redis connection with PING...")
+            ping_result = await self.redis_client.ping()
+            logger.info(f"Redis PING result: {ping_result} (type: {type(ping_result)})")
             
             self._connected = True
-            logger.info(f"Connection status set to True")
+            logger.info(f"Connection status successfully set to: {self._connected}")
             
             # Инициализация сервиса глобального кэша
+            logger.info(f"Initializing GlobalCacheService...")
             self.cache_service = GlobalCacheService(self.redis_client)
-            logger.info(f"GlobalCacheService initialized")
+            logger.info(f"GlobalCacheService created: {self.cache_service}")
             
+            logger.info(f"=== REDIS CONNECTION SUCCESS ===")
             logger.info(f"Global cache connected to Redis at {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+            
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.error(f"=== REDIS CONNECTION FAILED ===")
+            logger.error(f"Exception during Redis connection: {e}")
             logger.error(f"Exception type: {type(e)}")
+            logger.error(f"Exception args: {e.args}")
+            
+            # Дополнительная диагностика
+            try:
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+            except:
+                pass
+                
             self._connected = False
-            logger.error(f"Connection status set to False")
+            self.cache_service = None
+            logger.error(f"Connection status set to: {self._connected}")
+            logger.error(f"Cache service set to: {self.cache_service}")
 
     async def disconnect(self):
         """Отключение от Redis и остановка всех задач."""
