@@ -172,41 +172,59 @@ class SuppliesService:
                 
         return filtered_supplies
         
-    async def get_list_supplies(self, hanging_only: bool = None) -> SupplyIdResponseSchema:
+    async def _process_supplies_statuses_concurrently(self, supplies: Dict[str, Dict], supplies_ids: Dict[str, List]) -> List:
         """
-        Получить список поставок с информацией о статусе и признаке "висячести".
+        Параллельная обработка статусов поставок через asyncio.gather.
         Args:
-            hanging_only: Если True - вернуть только висячие поставки, 
-                          если False - только обычные (не висячие),
-                          если None - вернуть все поставки
+            supplies: Словарь поставок по аккаунтам
+            supplies_ids: Словарь ID поставок по аккаунтам
         Returns:
-            SupplyIdResponseSchema: Список поставок с их деталями
+            List: Список обработанных поставок с статусами
         """
-        logger.info(f"Получение данных о поставках, hanging_only={hanging_only}")
-        supplies_ids: List[Any] = await self.get_information_to_supplies()
-        supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
-        result: List = []
-        supplies_ids: Dict[str, List] = {key: value for d in supplies_ids for key, value in d.items()}
+        tasks = []
+        supply_data_list = []
+        result = []
 
+        # Подготовка задач для параллельного выполнения
         for account, value in supplies.items():
             for supply_id, orders in value.items():
                 supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
                                                      for data in supplies_ids[account]}
 
                 supply_data = self.create_supply_result(supply, supply_id, account, orders)
+                if order_ids := [
+                    order["id"] for order in orders.get("orders", [])
+                ]:
+                    # Создаем задачу для параллельного выполнения
+                    orders_client = Orders(account, get_wb_tokens().get(account))
+                    task = orders_client.get_orders_statuses(order_ids)
+                    tasks.append(task)
+                    supply_data_list.append((supply_data, supply_id, order_ids))
+                else:
+                    supply_data["status"] = "unknown"
+                    if supply_data["status"] in ["in_delivery", "on_collection"]:
+                        result.append(supply_data)
+                    else:
+                        logger.info(f"Пропускаем поставку {supply_id} со статусом {supply_data.get('status')}")
 
-                order_ids = [order["id"] for order in orders.get("orders", [])]
+        # Выполняем все запросы параллельно
+        if tasks:
+            try:
+                statuses_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                if order_ids:
-                    try:
-                        orders_client = Orders(account, get_wb_tokens().get(account))
-                        statuses = await orders_client.get_orders_statuses(order_ids)
+                # Обрабатываем результаты
+                for i, (supply_data, supply_id, order_ids) in enumerate(supply_data_list):
+                    statuses_result = statuses_results[i]
 
+                    if isinstance(statuses_result, Exception):
+                        logger.error(f"Ошибка при получении статусов для поставки {supply_id}: {str(statuses_result)}")
+                        supply_data["status"] = "error"
+                    else:
                         # Подсчитываем количество заказов с разными статусами
                         in_delivery_count = 0
                         on_collection_count = 0
                         other_status_count = 0
-                        order_statuses = statuses.get("orders", [])
+                        order_statuses = statuses_result.get("orders", [])
 
                         for status in order_statuses:
                             supplier_status = status.get("supplierStatus", "")
@@ -226,17 +244,33 @@ class SuppliesService:
                             # Все заказы на сборке
                             supply_data["status"] = "on_collection"
 
-                    except Exception as e:
-                        logger.error(f"Ошибка при получении статусов для поставки {supply_id}: {str(e)}")
-                        supply_data["status"] = "error"
-                else:
-                    supply_data["status"] = "unknown"
+                    if supply_data["status"] in ["in_delivery", "on_collection"]:
+                        result.append(supply_data)
+                    else:
+                        logger.info(f"Пропускаем поставку {supply_id} со статусом {supply_data.get('status')}")
 
-                if supply_data["status"] in ["in_delivery", "on_collection"]:
-                    result.append(supply_data)
-                else:
-                    logger.info(f"Пропускаем поставку {supply_id} со статусом {supply_data.get('status')}")
+            except Exception as e:
+                logger.error(f"Критическая ошибка при параллельном получении статусов: {str(e)}")
+                raise
 
+        return result
+
+    async def get_list_supplies(self, hanging_only: bool = None) -> SupplyIdResponseSchema:
+        """
+        Получить список поставок с информацией о статусе и признаке "висячести".
+        Args:
+            hanging_only: Если True - вернуть только висячие поставки, 
+                          если False - только обычные (не висячие),
+                          если None - вернуть все поставки
+        Returns:
+            SupplyIdResponseSchema: Список поставок с их деталями
+        """
+        logger.info(f"Получение данных о поставках, hanging_only={hanging_only}")
+        supplies_ids: List[Any] = await self.get_information_to_supplies()
+        supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
+        supplies_ids: Dict[str, List] = {key: value for d in supplies_ids for key, value in d.items()}
+
+        result = await self._process_supplies_statuses_concurrently(supplies, supplies_ids)
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
         return SupplyIdResponseSchema(supplies=filtered_result)
 
