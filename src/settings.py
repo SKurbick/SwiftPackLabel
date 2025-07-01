@@ -38,14 +38,14 @@ class Settings(BaseSettings):
     ONEC_USER: str = os.getenv("ONEC_USER","")
     ONEC_PASSWORD: str = os.getenv("ONEC_PASSWORD","")
 
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
-    CACHE_TTL: int = int(os.getenv("CACHE_TTL", 600))  # 10 минут по умолчанию
+    CACHE_TTL: int = int(os.getenv("CACHE_TTL", 1200))  # 10 минут по умолчанию
     
     # Настройки глобального кэша
-    CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 300))  # 5 минут по умолчанию
+    CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 600))  # 5 минут по умолчанию
 
 
 @lru_cache()
