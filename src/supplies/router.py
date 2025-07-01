@@ -1,7 +1,7 @@
 from typing import List, Dict
 
 from starlette.responses import StreamingResponse, JSONResponse
-from fastapi import APIRouter, Depends, Body, status, HTTPException
+from fastapi import APIRouter, Depends, Body, status, HTTPException, Request, Header
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
@@ -12,17 +12,25 @@ from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
 from src.supplies.integration_1c import OneCIntegration
+from src.cache import global_cached
 
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
+
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
+@global_cached(key="supplies_all")
 async def get_supplies(user: dict = Depends(get_current_user)) -> SupplyIdResponseSchema:
     """
     Получить список всех поставок.
+    
+    Примечание: Cache middleware проверяет глобальный кэш ПЕРЕД авторизацией.
+    Эта функция вызывается только если нет кэша или нужно обновление.
+    
     Returns:
         SupplyIdResponseSchema: Список поставок с их деталями
     """
+    logger.info("get_supplies function called (no cache available)")
     return await SuppliesService().get_list_supplies()
 
 

@@ -8,7 +8,24 @@ services:
     volumes:
       - excel_data:/app/src/excel_data/data
       - archives_data:/app/src/archives/data
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
   excel_data:
   archives_data:
+  redis_data:
