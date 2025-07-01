@@ -1,6 +1,10 @@
 """
 Функции для прогрева глобального кэша.
 """
+from src.orders.orders import OrdersService
+from src.orders.schema import OrderDetail
+from src.db import get_db_connection
+
 
 async def warm_up_supplies():
     """Функция для прогрева кэша поставок."""
@@ -15,10 +19,7 @@ async def warm_up_supplies():
 async def warm_up_orders():
     """Функция для прогрева кэша заказов."""
     try:
-        from src.db import get_db_connection
-        from src.orders.orders import OrdersService
-        from src.orders.schema import OrderDetail
-        
+
         # Получаем DB connection
         async for db in get_db_connection():
             orders_service = OrdersService(db)
