@@ -8,7 +8,9 @@ services:
     volumes:
       - excel_data:/app/src/excel_data/data
       - archives_data:/app/src/archives/data
+      - images_data:/app/src/images/uploads
 
 volumes:
   excel_data:
   archives_data:
+  images_data:
