@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     ONEC_USER: str = os.getenv("ONEC_USER","")
     ONEC_PASSWORD: str = os.getenv("ONEC_PASSWORD","")
 
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
