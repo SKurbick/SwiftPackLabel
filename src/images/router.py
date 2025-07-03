@@ -124,14 +124,21 @@ async def get_image(
         
         mime_type = mime_type_map.get(file_extension, 'application/octet-stream')
         
-        # Кодирование имени файла для HTTP заголовка
-        encoded_filename = urllib.parse.quote(filename, safe='')
+        # Кодирование имени файла для HTTP заголовка (только ASCII символы)
+        try:
+            # Попробуем использовать оригинальное имя, если оно содержит только ASCII
+            ascii_filename = filename.encode('ascii').decode('ascii')
+            content_disposition = f'inline; filename="{ascii_filename}"'
+        except UnicodeEncodeError:
+            # Если есть не-ASCII символы, используем только закодированную версию
+            encoded_filename = urllib.parse.quote(filename, safe='')
+            content_disposition = f'inline; filename*=UTF-8\'\'{encoded_filename}'
         
         return Response(
             content=image_data,
             media_type=mime_type,
             headers={
-                'Content-Disposition': f'inline; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}'
+                'Content-Disposition': content_disposition
             }
         )
         
