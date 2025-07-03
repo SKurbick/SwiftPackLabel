@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 from PIL import Image
 import io
+from datetime import datetime
 
 from src.logger import app_logger as logger
 
@@ -62,7 +63,7 @@ class ImageService:
         
         Args:
             image_data: Бинарные данные изображения
-            filename: Имя файла (опционально). Если не указано, генерируется уникальное имя
+            filename: Игнорируется. Имя файла генерируется автоматически на основе даты и времени
             
         Returns:
             Optional[str]: Путь к сохраненному файлу или None в случае ошибки
@@ -73,12 +74,10 @@ class ImageService:
             if not file_extension:
                 return None
             
-            # Генерация имени файла
-            if filename:
-                # Удаление расширения из имени и добавление правильного
-                filename = Path(filename).stem + file_extension
-            else:
-                filename = f"{uuid.uuid4().hex}{file_extension}"
+            # Генерация имени файла на основе даты и времени
+            current_time = datetime.now()
+            timestamp = current_time.strftime("%Y%m%d_%H%M%S_%f")[:-3]  # убираем последние 3 символа из микросекунд
+            filename = f"img_{timestamp}{file_extension}"
             
             # Полный путь к файлу
             file_path = self.base_path / filename

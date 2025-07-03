@@ -1,10 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import Response
-from typing import Optional
 from pathlib import Path
 import urllib.parse
 
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_current_user,get_current_superuser
 from src.images.service import ImageService
 from src.images.schema import ImageUploadResponse, ImageInfoResponse, ImageDeleteResponse, ImageListResponse
 from src.logger import app_logger as logger
@@ -15,15 +14,14 @@ images = APIRouter(prefix='/images', tags=['Images'])
 @images.post("/upload", response_model=ImageUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_image(
     file: UploadFile = File(..., description="Файл изображения для загрузки"),
-    filename: Optional[str] = Query(None, description="Пользовательское имя файла (опционально)"),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_superuser)
 ) -> ImageUploadResponse:
     """
     Загрузка изображения на сервер.
+    Имя файла генерируется автоматически на основе текущей даты и времени.
     
     Args:
         file: Файл изображения
-        filename: Пользовательское имя файла (опционально)
         user: Данные текущего пользователя
         
     Returns:
@@ -54,8 +52,7 @@ async def upload_image(
             )
 
         image_service = ImageService()
-        use_filename = filename or file.filename
-        saved_path = await image_service.save_image(image_data, use_filename)
+        saved_path = await image_service.save_image(image_data)
         
         if not saved_path:
             raise HTTPException(
@@ -87,7 +84,7 @@ async def upload_image(
 @images.get("/{filename}", status_code=status.HTTP_200_OK)
 async def get_image(
     filename: str,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_superuser)
 ) -> Response:
     """
     Получение изображения по имени файла.
@@ -155,7 +152,7 @@ async def get_image(
 @images.get("/{filename}/info", response_model=ImageInfoResponse, status_code=status.HTTP_200_OK)
 async def get_image_info(
     filename: str,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_superuser)
 ) -> ImageInfoResponse:
     """
     Получение информации об изображении.
@@ -194,7 +191,7 @@ async def get_image_info(
 @images.delete("/{filename}", response_model=ImageDeleteResponse, status_code=status.HTTP_200_OK)
 async def delete_image(
     filename: str,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_superuser)
 ) -> ImageDeleteResponse:
     """
     Удаление изображения.
@@ -236,7 +233,7 @@ async def delete_image(
 
 @images.get("/", response_model=ImageListResponse, status_code=status.HTTP_200_OK)
 async def list_images(
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_superuser)
 ) -> ImageListResponse:
     """
     Получение списка всех изображений.
