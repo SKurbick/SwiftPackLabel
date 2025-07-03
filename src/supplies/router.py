@@ -12,11 +12,13 @@ from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
 from src.supplies.integration_1c import OneCIntegration
+from src.cache import global_cached
 
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
+@global_cached(key="supplies_all")
 async def get_supplies(
     hanging_only: bool = False,
     db: AsyncGenerator = Depends(get_db_connection),
@@ -24,6 +26,10 @@ async def get_supplies(
 ) -> SupplyIdResponseSchema:
     """
     Получить список поставок с фильтрацией по висячим.
+    
+    Примечание: Cache middleware проверяет глобальный кэш ПЕРЕД авторизацией.
+    Эта функция вызывается только если нет кэша или нужно обновление.
+    
     Args:
         hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
         db: Соединение с базой данных
@@ -31,6 +37,7 @@ async def get_supplies(
     Returns:
         SupplyIdResponseSchema: Список поставок с их деталями
     """
+    logger.info("get_supplies function called (no cache available)")
     return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only)
 
 

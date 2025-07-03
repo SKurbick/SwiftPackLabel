@@ -6,6 +6,7 @@ from src.orders.orders import OrdersService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, WildInfo, SupplyInfo
+from src.cache import global_cached
 from typing import Dict, Any, Coroutine
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body
@@ -14,6 +15,7 @@ orders = APIRouter(prefix='/orders', tags=['Orders'])
 
 
 @orders.get("/", response_model=Dict[str, GroupedOrderInfo], status_code=status.HTTP_200_OK)
+@global_cached(key="orders_all")
 async def get_orders(
         request: Request,
         db: AsyncGenerator = Depends(get_db_connection),
@@ -23,6 +25,10 @@ async def get_orders(
 ) -> Dict[str, GroupedOrderInfo]:
     """
     Получить сгруппированные по wild заказы с расширенной информацией:
+    
+    Примечание: Cache middleware проверяет глобальный кэш ПЕРЕД авторизацией.
+    Эта функция вызывается только если нет кэша или нужно обновление.
+    
     Args:
         request: Объект запроса FastAPI
         db: Соединение с базой данных

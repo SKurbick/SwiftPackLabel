@@ -53,7 +53,20 @@ class SupplyIdResult(SupplyBase):
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:
         """Преобразует строку даты в требуемый формат."""
-        return format_date(v)
+        import re
+        if not isinstance(v, str):
+            return str(v)
+        
+        # Check if date is already in DD.MM.YYYY format (from cache)
+        if re.match(r'^\d{2}\.\d{2}\.\d{4}$', v):
+            return v
+            
+        # If it's ISO format, convert it
+        try:
+            return format_date(v)
+        except ValueError:
+            # If format is unexpected, return as-is
+            return v
 
 
 class SupplyIdBodySchema(BaseSchema):
