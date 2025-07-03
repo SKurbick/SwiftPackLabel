@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status,
 from fastapi.responses import Response
 from typing import Optional
 from pathlib import Path
+import urllib.parse
 
 from src.auth.dependencies import get_current_user
 from src.images.service import ImageService
@@ -123,11 +124,14 @@ async def get_image(
         
         mime_type = mime_type_map.get(file_extension, 'application/octet-stream')
         
+        # Кодирование имени файла для HTTP заголовка
+        encoded_filename = urllib.parse.quote(filename, safe='')
+        
         return Response(
             content=image_data,
             media_type=mime_type,
             headers={
-                'Content-Disposition': f'inline; filename="{filename}"'
+                'Content-Disposition': f'inline; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}'
             }
         )
         
