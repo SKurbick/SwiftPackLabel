@@ -14,7 +14,7 @@ images = APIRouter(prefix='/images', tags=['Images'])
 @images.post("/upload", response_model=ImageUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_image(
     file: UploadFile = File(..., description="Файл изображения для загрузки"),
-    user: dict = Depends(get_current_superuser)
+    user: dict = Depends(get_current_user)
 ) -> ImageUploadResponse:
     """
     Загрузка изображения на сервер.
