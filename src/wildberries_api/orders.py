@@ -1,9 +1,9 @@
 import asyncio
 import json
-import urllib.parse
 from src.logger import app_logger as logger
 from src.users.account import Account
 from src.response import parse_json
+
 
 
 class Orders(Account):
@@ -42,8 +42,8 @@ class Orders(Account):
 
         return result
 
-
     async def get_new_orders(self):
+        """Получает новые заказы и сохраняет их в базу данных."""
         orders = []
         next_value = 0
         while True:
@@ -52,13 +52,20 @@ class Orders(Account):
             data = parse_json(response)
             orders.extend(data.get("orders", []))
             next_value = data.get("next")
-            logger.info(f"Получены {len(orders)} поставок and next {next_value}, account {self.account}")
+            logger.info(f"Получены {len(orders)} новых заказов and next {next_value}, account {self.account}")
             if not next_value:
                 break
+
+        # Сохраняем в БД
+        if orders:
+            from src.models.orders_wb import OrdersDB
+            await OrdersDB.add_orders(orders)
+            logger.info(f"Сохранено {len(orders)} новых заказов в базу данных")
 
         return orders
 
     async def get_orders(self):
+        """Получает все заказы и обновляет их в базе данных."""
         orders = []
         next_value = 0
         while True:
@@ -67,8 +74,14 @@ class Orders(Account):
             data = parse_json(response)
             orders.extend(data.get("orders", []))
             next_value = data.get("next")
-            logger.info(f"Получены {len(orders)} поставок and next {next_value}, account {self.account}")
+            logger.info(f"Получены {len(orders)} заказов and next {next_value}, account {self.account}")
             if not next_value:
                 break
+
+        # Обновляем в БД
+        if orders:
+            from src.models.orders_wb import OrdersDB
+            await OrdersDB.update_orders(orders)
+            logger.info(f"Обновлено {len(orders)} заказов в базе данных")
 
         return orders
