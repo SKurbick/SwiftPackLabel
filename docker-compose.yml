@@ -71,7 +71,7 @@ services:
 
   flower:
     build: .
-    command: celery -A src.celery_app.celery flower --port=5555 --broker=redis://redis:6379/1
+    command: celery -A src.celery_app.celery flower --address=0.0.0.0 --port=5555 --broker=redis://redis:6379/1 --basic_auth=admin:admin123
     ports:
       - "5555:5555"
     depends_on:
@@ -83,6 +83,11 @@ services:
       - REDIS_DB=0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=swiftpacklabel
+      - POSTGRES_PASSWORD=swiftpacklabel123
+      - POSTGRES_DB=swiftpacklabel
     restart: unless-stopped
 
   postgres:
