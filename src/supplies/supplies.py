@@ -24,6 +24,7 @@ class SuppliesService:
 
     def __init__(self, db: AsyncGenerator = None):
         self.db = db
+        self.async_client = AsyncHttpClient(timeout=120, retries=3, delay=5)
 
     @staticmethod
     def format_data_to_result(supply: SupplyId, order: StickerSchema, name_and_photo: Dict[int, Dict[str, Any]]) -> \
@@ -147,9 +148,9 @@ class SuppliesService:
         """
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
-        
+
         target_wilds = {'wild1512', 'wild355', 'wild354', 'wild102', 'wild659', 'wild399'}
-        
+
         filtered_supplies = []
         for supply in supplies_data:
             is_hanging = (supply['supply_id'], supply['account']) in hanging_supplies_map
@@ -158,16 +159,16 @@ class SuppliesService:
                 if hanging_only:
                     supply["is_hanging"] = True
                     has_target_wild = any(
-                        order.local_vendor_code in target_wilds 
+                        order.local_vendor_code in target_wilds
                         for order in supply.get('orders', [])
                     )
                     if not has_target_wild:
                         filtered_supplies.append(supply)
                 else:
                     filtered_supplies.append(supply)
-                
+
         return filtered_supplies
-        
+
     async def get_list_supplies(self, hanging_only: bool = False) -> SupplyIdResponseSchema:
         """
         Получить список поставок с фильтрацией по висячим.
@@ -407,7 +408,7 @@ class SuppliesService:
         shipment_data = await self.prepare_shipment_data(
             supply_ids, order_wild_map, author, warehouse_id, delivery_type
         )
-        
+
         # Получаем список доступных wild-кодов для фильтрации
         shipment_repository = ShipmentOfGoods(self.db)
         filter_wild = await shipment_repository.filter_wilds()
@@ -432,18 +433,14 @@ class SuppliesService:
         Returns:
             bool: True если отправка успешна, False в противном случае
         """
-        api_url = "http://149.154.66.213:8302/api/shipment_of_goods/update"
-        
         try:
-            # Используем AsyncHttpClient из response.py
-            async_client = AsyncHttpClient(timeout=120, retries=3, delay=5)
-            
-            response_text = await async_client.post(
-                api_url,
+
+            response_text = await self.async_client.post(
+                settings.SHIPMENT_API_URL,
                 json=shipment_data,
                 headers={"Content-Type": "application/json"}
             )
-            
+
             if response_text:
                 try:
                     response_data = parse_json(response_text)
@@ -456,7 +453,7 @@ class SuppliesService:
             else:
                 logger.error("Не получен ответ от API")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Неожиданная ошибка при отправке в API: {e}")
             return False

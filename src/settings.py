@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     CELERY_WORKER_MAX_TASKS_PER_CHILD: int = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", 1000))
     CELERY_TASK_SOFT_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", 60))
     CELERY_TASK_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_TIME_LIMIT", 120))
+    
+    # Настройки API отгрузки
+    SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://149.154.66.213:8302/api/shipment_of_goods/update")
 
 
 @lru_cache()

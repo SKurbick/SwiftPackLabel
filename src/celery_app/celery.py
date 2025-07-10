@@ -65,7 +65,7 @@ celery_app = create_celery_app()
 
 # Автоматическое обнаружение задач
 celery_app.autodiscover_tasks([
-    'src.celery_app.tasks',
+    'src.celery_app.tasks.orders_sync',
 ])
 
 
