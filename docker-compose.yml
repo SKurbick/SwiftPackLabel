@@ -1,52 +1,44 @@
 services:
-  app:
-    build: .
+  swift_pack_label:
+    build: ./SwiftPackLabel
+    container_name: swift_pack_label_container
+    image: swift_pack_label_image
+    restart: always
+    volumes:
+      - excel_data:/app/src/excel_data/data
+      - archives_data:/app/src/archives/data
+      - images_data:/app/src/images/uploads
+    depends_on:
+      - redis
+      - celery_worker
+      - celery_beat
+      - flower
     ports:
-      - "8001:8001"
-    volumes:
-      - excel_data:/app/src/excel_data/data
-      - archives_data:/app/src/archives/data
-      - images_data:/app/src/images/uploads
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=swiftpacklabel
-      - POSTGRES_PASSWORD=swiftpacklabel123
-      - POSTGRES_DB=swiftpacklabel
+      - "8301:8001"
+    networks:
+      - vector_db_default
+      - start_qr_network
 
-  celery-worker:
-    build: .
-    command: celery -A src.celery_app.celery worker --loglevel=info --concurrency=4 --queues=celery,supplies,orders,wildberries,notifications
+  celery_worker:
+    build: ./SwiftPackLabel
+    image: swift_pack_label_image
+    command: celery -A src.celery_app.celery worker --loglevel=info --concurrency=4
     volumes:
       - excel_data:/app/src/excel_data/data
       - archives_data:/app/src/archives/data
       - images_data:/app/src/images/uploads
     depends_on:
       - redis
-      - postgres
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=swiftpacklabel
-      - POSTGRES_PASSWORD=swiftpacklabel123
-      - POSTGRES_DB=swiftpacklabel
     restart: unless-stopped
+    networks:
+      - vector_db_default
 
-  celery-beat:
-    build: .
+  celery_beat:
+    build: ./SwiftPackLabel
+    image: swift_pack_label_image
     command: celery -A src.celery_app.celery beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     volumes:
       - excel_data:/app/src/excel_data/data
@@ -55,57 +47,29 @@ services:
       - celerybeat_data:/tmp
     depends_on:
       - redis
-      - postgres
+      - celery_worker
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=swiftpacklabel
-      - POSTGRES_PASSWORD=swiftpacklabel123
-      - POSTGRES_DB=swiftpacklabel
     restart: unless-stopped
+    networks:
+      - vector_db_default
 
   flower:
-    build: .
+    build: ./SwiftPackLabel
+    image: swift_pack_label_image
     command: celery -A src.celery_app.celery flower --address=0.0.0.0 --port=5555 --broker=redis://redis:6379/1 --basic_auth=admin:admin123
     ports:
       - "5555:5555"
     depends_on:
       - redis
-      - celery-worker
+      - celery_worker
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DB=0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=swiftpacklabel
-      - POSTGRES_PASSWORD=swiftpacklabel123
-      - POSTGRES_DB=swiftpacklabel
     restart: unless-stopped
-
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: swiftpacklabel
-      POSTGRES_USER: swiftpacklabel
-      POSTGRES_PASSWORD: swiftpacklabel123
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U swiftpacklabel"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
+    networks:
+      - vector_db_default
 
   redis:
     image: redis:7-alpine
@@ -120,6 +84,16 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    networks:
+      - vector_db_default
+
+networks:
+  vector_db_default:
+    external: true
+
+  start_qr_network:
+    driver: bridge
+    name: start_qr_network
 
 volumes:
   excel_data:
@@ -127,4 +101,3 @@ volumes:
   images_data:
   redis_data:
   celerybeat_data:
-  postgres_data:

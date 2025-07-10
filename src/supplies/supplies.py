@@ -1,5 +1,6 @@
 import asyncio
 from typing import List, Dict, Any, Set, Optional
+from datetime import datetime
 
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -10,6 +11,7 @@ from src.db import AsyncGenerator
 from src.models.card_data import CardData
 from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
+from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
 from src.supplies.schema import (
@@ -341,7 +343,7 @@ class SuppliesService:
                                     author: str, warehouse_id: int = 1, delivery_type: str = "ФБС") -> List[
         Dict[str, Any]]:
         """
-        Подготавливает данные для записи в таблицу shipment_of_goods.
+        Подготавливает данные для отправки в API shipment_of_goods.
 
         Args:
             supply_ids: Список поставок для перевода в статус доставки
@@ -351,7 +353,7 @@ class SuppliesService:
             delivery_type: Тип доставки (по умолчанию "ФБС")
 
         Returns:
-            List[Dict[str, Any]]: Список данных для записи в таблицу shipment_of_goods
+            List[Dict[str, Any]]: Список данных для отправки в API shipment_of_goods
         """
         logger.info(f"Подготовка данных для записи в таблицу shipment_of_goods: {len(supply_ids)} поставок")
 
@@ -379,6 +381,7 @@ class SuppliesService:
                     "product_id": wild_code,
                     "warehouse_id": warehouse_id,
                     "delivery_type": delivery_type,
+                    "shipment_date": datetime.now().strftime("%Y-%m-%d"),
                     "wb_warehouse": "",
                     "account": supply_info.account,
                     "quantity": quantity
@@ -397,17 +400,63 @@ class SuppliesService:
                              warehouse_id: int = 1,
                              delivery_type: str = "ФБС") -> bool:
         """
-        Сохраняет данные об отгрузках в таблицу shipment_of_goods.
+        Отправляет данные об отгрузках в API shipment_of_goods.
         """
-        logger.info(f"Сохранение данных об отгрузках: {len(supply_ids)} поставок")
+        logger.info(f"Отправка данных об отгрузках: {len(supply_ids)} поставок")
 
         shipment_data = await self.prepare_shipment_data(
             supply_ids, order_wild_map, author, warehouse_id, delivery_type
         )
+        
+        # Получаем список доступных wild-кодов для фильтрации
         shipment_repository = ShipmentOfGoods(self.db)
         filter_wild = await shipment_repository.filter_wilds()
 
         filtered_shipment_data = [item for item in shipment_data if item['product_id'] in filter_wild]
         logger.info(f"Отфильтровано записей: {len(shipment_data)} -> {len(filtered_shipment_data)}")
 
-        return await shipment_repository.create_all(filtered_shipment_data)
+        if not filtered_shipment_data:
+            logger.warning("Нет данных для отправки в API")
+            return False
+
+        # Отправляем данные в API
+        return await self._send_shipment_data_to_api(filtered_shipment_data)
+
+    async def _send_shipment_data_to_api(self, shipment_data: List[Dict[str, Any]]) -> bool:
+        """
+        Отправляет данные об отгрузках в API /api/shipment_of_goods/update
+        
+        Args:
+            shipment_data: Список данных для отправки
+            
+        Returns:
+            bool: True если отправка успешна, False в противном случае
+        """
+        api_url = "http://149.154.66.213:8302/api/shipment_of_goods/update"
+        
+        try:
+            # Используем AsyncHttpClient из response.py
+            async_client = AsyncHttpClient(timeout=120, retries=3, delay=5)
+            
+            response_text = await async_client.post(
+                api_url,
+                json=shipment_data,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response_text:
+                try:
+                    response_data = parse_json(response_text)
+                    logger.info(f"Данные успешно отправлены в API: {response_data}")
+                    return True
+                except ValueError as e:
+                    logger.error(f"Ошибка парсинга ответа API: {e}")
+                    logger.error(f"Сырой ответ: {response_text}")
+                    return False
+            else:
+                logger.error("Не получен ответ от API")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при отправке в API: {e}")
+            return False
