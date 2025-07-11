@@ -434,12 +434,9 @@ class SuppliesService:
             bool: True если отправка успешна, False в противном случае
         """
         try:
-
+            logger.info(f'Входные данные : {shipment_data}')
             response_text = await self.async_client.post(
-                settings.SHIPMENT_API_URL,
-                json=shipment_data,
-                headers={"Content-Type": "application/json"}
-            )
+                settings.SHIPMENT_API_URL, data=shipment_data)
 
             if response_text:
                 try:
