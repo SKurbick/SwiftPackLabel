@@ -277,9 +277,13 @@ class GlobalCache:
                     order_details = [OrderDetail(**order) for order in orders_data]
                     grouped_orders = await orders_service.group_orders_by_wild(order_details)
                     
+                    # Создаем объект ответа с timestamp
+                    from src.orders.schema import OrdersResponse
+                    response_orders = OrdersResponse(orders=grouped_orders)
+                    
                     # Правильный ключ с параметрами
                     cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
-                    await self.set(cache_key_orders, grouped_orders)
+                    await self.set(cache_key_orders, response_orders)
                     
                     logger.info("Кэш заказов прогрет успешно")
                 finally:

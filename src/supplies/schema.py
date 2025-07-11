@@ -1,7 +1,8 @@
-from typing import List
+from typing import List, Optional
 from src.utils import format_date
+from datetime import datetime
 
-from pydantic import BaseModel, field_validator, ConfigDict
+from pydantic import BaseModel, field_validator, ConfigDict, Field
 from src.orders.schema import SupplyInfo
 
 
@@ -12,6 +13,11 @@ class BaseSchema(BaseModel):
         arbitrary_types_allowed=True,
         str_strip_whitespace=True,
         str_min_length=0,)
+
+
+class BaseResponseSchema(BaseSchema):
+    """Базовая схема для ответов с автоматическим timestamp."""
+    cached_at: datetime = Field(default_factory=datetime.utcnow, description="Время получения данных")
 
 
 class OrderSchema(BaseModel):
@@ -75,7 +81,7 @@ class SupplyIdBodySchema(BaseSchema):
     supplies: List[SupplyId]
 
 
-class SupplyIdResponseSchema(BaseSchema):
+class SupplyIdResponseSchema(BaseResponseSchema):
     """Схема для ответа с списком обработанных поставок."""
 
     supplies: List[SupplyIdResult]

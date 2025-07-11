@@ -4,7 +4,7 @@ from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
-from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut
+from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
 from src.cache import global_cached
 from typing import Dict
 
@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, B
 orders = APIRouter(prefix='/orders', tags=['Orders'])
 
 
-@orders.get("/", response_model=Dict[str, GroupedOrderInfo], status_code=status.HTTP_200_OK)
+@orders.get("/", response_model=OrdersResponse, status_code=status.HTTP_200_OK)
 @global_cached(key="orders_all")
 async def get_orders(
         request: Request,
@@ -21,7 +21,7 @@ async def get_orders(
         user: dict = Depends(get_current_user),
         time_delta: float = Query(1, description="Фильтрация по времени создания заказа (в часах)"),
         wild: str = Query(None, description="Фильтрация по wild")
-) -> Dict[str, GroupedOrderInfo]:
+) -> OrdersResponse:
     """
     Получить сгруппированные по wild заказы с расширенной информацией:
     
@@ -47,7 +47,7 @@ async def get_orders(
 
         elapsed_time = time.time() - start_time
         logger.info(f"Заказы сгруппированы успешно. Всего: {len(filtered_orders)}. Время: {elapsed_time:.2f} сек.")
-        return grouped_orders
+        return OrdersResponse(orders=grouped_orders)
     except Exception as e:
         logger.error(f"Ошибка при получении заказов: {str(e)}")
         raise HTTPException(

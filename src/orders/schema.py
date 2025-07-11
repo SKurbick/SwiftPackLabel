@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from datetime import datetime
 
 
 class BaseSchema(BaseModel):
@@ -9,6 +10,11 @@ class BaseSchema(BaseModel):
         str_strip_whitespace=True,
         str_min_length=0,
     )
+
+
+class BaseResponseSchema(BaseSchema):
+    """Базовая схема для ответов с автоматическим timestamp."""
+    cached_at: datetime = Field(default_factory=datetime.utcnow, description="Время получения данных")
 
 
 class OrderDetail(BaseSchema):
@@ -94,3 +100,8 @@ class SupplyAccountWildOut(BaseSchema):
     wilds: List[WildInfo]
     supply_ids: List[SupplyInfo]
     order_wild_map: Dict[int, str] = {}
+
+
+class OrdersResponse(BaseResponseSchema):
+    """Схема для ответа с заказами."""
+    orders: Dict[str, GroupedOrderInfo]
