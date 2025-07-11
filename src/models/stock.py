@@ -41,3 +41,20 @@ class StockDB:
         result = await self.db.fetch(query, wilds)
         return {res['product_id']: int(res['physical_quantity'])
                 for res in result}
+
+
+    async def get_current_by_wilds_view(self, wilds: List[str]) -> Dict[str, int]:
+        """
+        Получает информацию о количестве товаров на складе по списку артикулов (wild-кодов).
+        Args:
+            wilds: Список артикулов (wild-кодов) для получения информации о запасах
+        Returns:
+            Dict[str, int]: Словарь, где ключи - артикулы товаров,
+            а значения - количество единиц товара на складе.
+            Если количество не является целым числом, возвращается 0.
+        """
+
+        query = """SELECT product_id ,available_stock from product_availability WHERE product_id = ANY($1)"""
+        result = await self.db.fetch(query, wilds)
+        return {res['product_id']: int(res['available_stock'])
+                for res in result}
