@@ -47,7 +47,8 @@ async def get_orders(
 
         elapsed_time = time.time() - start_time
         logger.info(f"Заказы сгруппированы успешно. Всего: {len(filtered_orders)}. Время: {elapsed_time:.2f} сек.")
-        return OrdersResponse(orders=grouped_orders)
+        response_data = {"orders": grouped_orders}
+        return OrdersResponse(**response_data)
     except Exception as e:
         logger.error(f"Ошибка при получении заказов: {str(e)}")
         raise HTTPException(
