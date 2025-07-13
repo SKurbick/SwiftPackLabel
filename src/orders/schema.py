@@ -102,6 +102,6 @@ class SupplyAccountWildOut(BaseSchema):
     order_wild_map: Dict[int, str] = {}
 
 
-class OrdersResponse(BaseResponseSchema):
+class OrdersResponse(BaseSchema):
     """Схема для ответа с заказами."""
     orders: Dict[str, GroupedOrderInfo]
