@@ -7,7 +7,7 @@ from .global_cache import global_cache
 from src.logger import app_logger as logger
 
 
-def global_cached(key: str, ttl: Optional[int] = None, cache_only: bool = True):
+def global_cached(key: str, ttl: Optional[int] = None, cache_only: bool = False):
     """
     Декоратор для кэширования результатов функций.
     
@@ -62,7 +62,12 @@ def global_cached(key: str, ttl: Optional[int] = None, cache_only: bool = True):
                     except Exception:
                         pass
                     
-                    raise Exception(f"No cache data available for cache-only function {func.__name__}")
+                    # Вместо исключения попытаемся выполнить функцию как fallback
+                    logger.warning(f"Fallback: выполняем {func.__name__} без кэша из-за отсутствия данных")
+                    result = await func(*args, **kwargs)
+                    # Сохраняем результат в кэш для следующих запросов
+                    await global_cache.set(cache_key, result, ttl)
+                    return result
                 
                 # Если cache_only=False, выполняем функцию
                 logger.warning(f"Cache MISS для {func.__name__}, выполняем функцию")

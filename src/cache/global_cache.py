@@ -119,6 +119,9 @@ class GlobalCache:
             return False
             
         try:
+            # Удаляем старый ключ перед записью нового для экономии памяти
+            await self.redis_client.delete(key)
+            
             # Сериализация данных
             serialized_data = pickle.dumps(value)
             
@@ -177,6 +180,43 @@ class GlobalCache:
             logger.error(f"Ошибка при очистке кэша: {str(e)}")
             return False
     
+    async def cleanup_expired_keys(self) -> int:
+        """
+        Очистка истекших ключей кэша для экономии памяти.
+        
+        Returns:
+            Количество удаленных ключей
+        """
+        if not self.is_connected or not self.redis_client:
+            return 0
+            
+        try:
+            # Получаем все ключи кэша
+            all_keys = await self.redis_client.keys("cache:*")
+            expired_keys = []
+            
+            for key in all_keys:
+                try:
+                    ttl = await self.redis_client.ttl(key)
+                    # TTL = -2 означает, что ключ истек, но еще не удален
+                    # TTL = -1 означает, что ключ существует без TTL
+                    if ttl == -2:
+                        expired_keys.append(key)
+                except Exception:
+                    continue
+            
+            # Удаляем истекшие ключи
+            if expired_keys:
+                await self.redis_client.delete(*expired_keys)
+                logger.info(f"Очищено {len(expired_keys)} истекших ключей кэша")
+                return len(expired_keys)
+            
+            return 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка при очистке истекших ключей: {str(e)}")
+            return 0
+    
     async def get_cache_info(self) -> Dict[str, Any]:
         """
         Получение информации о состоянии кэша.
@@ -213,6 +253,15 @@ class GlobalCache:
             return
             
         logger.info("Начинаем прогрев кэша...")
+        
+        # Очищаем старые ключи перед прогревом для экономии памяти
+        try:
+            old_keys = await self.redis_client.keys("cache:*")
+            if old_keys:
+                await self.redis_client.delete(*old_keys)
+                logger.info(f"Удалено {len(old_keys)} старых ключей кэша")
+        except Exception as e:
+            logger.warning(f"Не удалось очистить старые ключи: {str(e)}")
         
         try:
             # Импортируем сервисы для прогрева
@@ -277,7 +326,7 @@ class GlobalCache:
                     order_details = [OrderDetail(**order) for order in orders_data]
                     grouped_orders = await orders_service.group_orders_by_wild(order_details)
                     
-                    # Правильный ключ с параметрами
+                    # Правильный ключ с параметрами - используем увеличенный TTL
                     cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
                     await self.set(cache_key_orders, grouped_orders)
                     
@@ -297,7 +346,9 @@ class GlobalCache:
         refresh_count = 0
         while True:
             try:
-                await asyncio.sleep(settings.CACHE_REFRESH_INTERVAL)
+                # Обновляем каждые 8 минут вместо 10, чтобы данные не успевали истечь
+                refresh_interval = min(int(settings.CACHE_REFRESH_INTERVAL * 0.8), settings.CACHE_TTL - 120)  # На 2 минуты раньше истечения TTL
+                await asyncio.sleep(refresh_interval)
                 refresh_count += 1
                 
                 logger.info(f"[Refresh #{refresh_count}] Запуск фонового обновления кэша...")
@@ -311,6 +362,11 @@ class GlobalCache:
                 # Логируем текущее состояние кэша
                 cache_info = await self.get_cache_info()
                 logger.info(f"Состояние кэша перед обновлением: {cache_info}")
+                
+                # Очищаем истекшие ключи перед обновлением
+                cleaned_keys = await self.cleanup_expired_keys()
+                if cleaned_keys > 0:
+                    logger.info(f"Очищено {cleaned_keys} истекших ключей перед обновлением")
                 
                 # Обновляем кэш
                 await self.warm_up_cache()

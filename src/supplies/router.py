@@ -18,7 +18,7 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-@global_cached(key="supplies_all")
+@global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
     hanging_only: bool = False,
     db: AsyncGenerator = Depends(get_db_connection),
