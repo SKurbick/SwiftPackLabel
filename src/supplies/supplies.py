@@ -433,24 +433,19 @@ class SuppliesService:
         Returns:
             bool: True если отправка успешна, False в противном случае
         """
-        try:
-            logger.info(f'Входные данные : {shipment_data}')
-            response_text = await self.async_client.post(
-                settings.SHIPMENT_API_URL, json=shipment_data)
+        logger.info(f'Входные данные : {shipment_data}')
+        response_text = await self.async_client.post(
+            settings.SHIPMENT_API_URL, json=shipment_data)
 
-            if response_text:
-                try:
-                    response_data = parse_json(response_text)
-                    logger.info(f"Данные успешно отправлены в API: {response_data}")
-                    return True
-                except ValueError as e:
-                    logger.error(f"Ошибка парсинга ответа API: {e}")
-                    logger.error(f"Сырой ответ: {response_text}")
-                    return False
-            else:
-                logger.error("Не получен ответ от API")
+        if response_text:
+            try:
+                response_data = parse_json(response_text)
+                logger.info(f"Данные успешно отправлены в API: {response_data}")
+                return True
+            except ValueError as e:
+                logger.error(f"Ошибка парсинга ответа API: {e}")
+                logger.error(f"Сырой ответ: {response_text}")
                 return False
-
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка при отправке в API: {e}")
+        else:
+            logger.error("Не получен ответ от API")
             return False
