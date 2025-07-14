@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_TIME_LIMIT", 120))
     
     # Настройки API отгрузки
-    SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api_container:8302/api/shipment_of_goods/update")
+    SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/update")
 
 
 @lru_cache()
