@@ -1,4 +1,6 @@
-from typing import List, Optional
+from typing import List
+from zoneinfo import ZoneInfo
+
 from src.utils import format_date
 from datetime import datetime
 
@@ -17,7 +19,10 @@ class BaseSchema(BaseModel):
 
 class BaseResponseSchema(BaseSchema):
     """Базовая схема для ответов с автоматическим timestamp."""
-    cached_at: datetime = Field(default_factory=datetime.utcnow, description="Время получения данных")
+    cached_at: datetime = Field(
+        default_factory=lambda: datetime.now(ZoneInfo("Europe/Moscow")),
+        description="Время получения данных (московское время)"
+    )
 
 
 class OrderSchema(BaseModel):
