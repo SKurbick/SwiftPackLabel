@@ -5,8 +5,17 @@ from typing import Any, Optional, Dict, List
 from datetime import datetime, timedelta
 import redis.asyncio as redis
 
+from src.orders.schema import OrderDetail
 from src.settings import settings
 from src.logger import app_logger as logger
+from src.supplies.schema import SupplyIdResponseSchema
+
+from src.supplies.supplies import SuppliesService
+from src.orders.orders import OrdersService
+from src.db import get_db_connection
+
+from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
+
 
 
 class GlobalCache:
@@ -264,10 +273,6 @@ class GlobalCache:
             logger.warning(f"Не удалось очистить старые ключи: {str(e)}")
         
         try:
-            # Импортируем сервисы для прогрева
-            from src.supplies.supplies import SuppliesService
-            from src.orders.orders import OrdersService
-            from src.db import get_db_connection
             
             # Прогрев данных поставок (оптимизированный - один запрос к API)
             try:
@@ -295,7 +300,6 @@ class GlobalCache:
                     # Фильтруем и кэшируем обычные поставки (hanging_only=False)
                     supplies_data_normal = await supplies_service.filter_supplies_by_hanging(result, hanging_only=False)
                     cache_key_normal = "cache:supplies_all:hanging_only:False"
-                    from src.supplies.schema import SupplyIdResponseSchema
                     response_normal = SupplyIdResponseSchema(supplies=supplies_data_normal)
                     await self.set(cache_key_normal, response_normal)
                     
@@ -306,6 +310,14 @@ class GlobalCache:
                     await self.set(cache_key_hanging, response_hanging)
                     
                     logger.info(f"Кэш поставок прогрет успешно: обычные={len(supplies_data_normal)}, висячие={len(supplies_data_hanging)}")
+                    
+                    # Запускаем фоновую синхронизацию висячих поставок с полученными данными
+                    try:
+                        sync_hanging_supplies_with_data.delay(supplies)
+                        logger.info("Запущена фоновая синхронизация висячих поставок")
+                    except Exception as e:
+                        logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
+                        
                 finally:
                     await db_gen.aclose()
             except Exception as e:
@@ -322,7 +334,6 @@ class GlobalCache:
                     orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
                     
                     # Создаем полные объекты OrderDetail
-                    from src.orders.schema import OrderDetail
                     order_details = [OrderDetail(**order) for order in orders_data]
                     grouped_orders = await orders_service.group_orders_by_wild(order_details)
                     

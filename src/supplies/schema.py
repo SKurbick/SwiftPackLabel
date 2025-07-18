@@ -56,6 +56,8 @@ class SupplyId(SupplyBase):
 class SupplyIdResult(SupplyBase):
     """Схема для обработанных данных о поставке с датой в нужном формате."""
 
+    shipped_count: Optional[int] = Field(None, description="Количество отгруженных товаров (только для висячих поставок)")
+
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:
         """Преобразует строку даты в требуемый формат."""

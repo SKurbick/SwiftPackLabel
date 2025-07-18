@@ -52,6 +52,11 @@ def create_celery_app() -> Celery:
                 'task': 'sync_orders_periodic',
                 'schedule': 600.0,  # каждые 10 минут (600 секунд)
             },
+            'cleanup-hanging-supplies-changes-log-weekly': {
+                'task': 'cleanup_old_changes_log',
+                'schedule': 604800.0,  # каждую неделю (7 дней)
+                'args': [30],  # хранить логи за последние 30 дней
+            },
         },
     )
     
@@ -66,6 +71,7 @@ celery_app = create_celery_app()
 # Автоматическое обнаружение задач
 celery_app.autodiscover_tasks([
     'src.celery_app.tasks.orders_sync',
+    'src.celery_app.tasks.hanging_supplies_sync',
 ])
 
 

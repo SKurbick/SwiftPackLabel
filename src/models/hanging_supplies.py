@@ -1,4 +1,6 @@
-from typing import List, Dict, Any, Optional
+import json
+from typing import List, Dict, Any, Optional, Set
+from datetime import datetime, timedelta
 
 from src.logger import app_logger as logger
 
@@ -15,7 +17,10 @@ class HangingSupplies:
         supply_id (varchar): ID поставки
         account (varchar): Аккаунт Wildberries
         order_data (jsonb): Полные данные о заказах поставки
+        shipped_orders (jsonb): Отгруженные заказы
+        changes_log (jsonb): Лог изменений в составе поставки
         created_at (timestamptz): Время создания записи, по умолчанию CURRENT_TIMESTAMP
+        operator (varchar): Оператор, создавший поставку
     """
 
     def __init__(self, db):
@@ -64,3 +69,299 @@ class HangingSupplies:
         except Exception as e:
             logger.error(f"Ошибка при получении висячих поставок: {str(e)}")
             return []
+    
+    async def update_changes_log(self, supply_id: str, account: str, changes_log_entries: List[Dict[str, Any]]) -> bool:
+        """
+        Обновляет changes_log в БД, добавляя новые записи.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            changes_log_entries: Список новых записей для лога
+            
+        Returns:
+            bool: True если обновление прошло успешно, False иначе
+        """
+        try:
+            query = """
+            UPDATE public.hanging_supplies 
+            SET changes_log = changes_log || $3::jsonb
+            WHERE supply_id = $1 AND account = $2
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account, json.dumps(changes_log_entries))
+            success = result is not None
+            if success:
+                logger.debug(f"Обновлен changes_log для поставки {supply_id} ({account})")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка обновления changes_log для поставки {supply_id} ({account}): {str(e)}")
+            return False
+    
+    async def get_changes_log(self, supply_id: str, account: str) -> List[Dict[str, Any]]:
+        """
+        Получает лог изменений для конкретной поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            List[Dict[str, Any]]: Лог изменений
+        """
+        try:
+            query = """
+            SELECT changes_log 
+            FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            if result and result['changes_log']:
+                return result['changes_log']
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка получения changes_log для поставки {supply_id} ({account}): {str(e)}")
+            return []
+    
+    async def get_changes_statistics(self) -> Dict[str, Any]:
+        """
+        Получает статистику изменений по всем висячим поставкам.
+        
+        Returns:
+            Dict[str, Any]: Статистика изменений
+        """
+        try:
+            query = """
+            SELECT 
+                supply_id,
+                account,
+                jsonb_array_length(COALESCE(changes_log, '[]'::jsonb)) as changes_count,
+                created_at
+            FROM public.hanging_supplies 
+            WHERE jsonb_array_length(COALESCE(changes_log, '[]'::jsonb)) > 0
+            ORDER BY changes_count DESC
+            """
+            result = await self.db.fetch(query)
+            
+            statistics = {
+                "total_supplies_with_changes": len(result),
+                "total_changes": sum(row['changes_count'] for row in result),
+                "supplies": [dict(row) for row in result]
+            }
+            
+            return statistics
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики изменений: {str(e)}")
+            return {"error": str(e)}
+    
+    async def get_hanging_supply_by_id(self, supply_id: str, account: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает конкретную висячую поставку по ID и аккаунту.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            Optional[Dict[str, Any]]: Данные висячей поставки или None
+        """
+        try:
+            query = """
+            SELECT * FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения висячей поставки {supply_id} ({account}): {str(e)}")
+            return None
+    
+    async def update_shipped_orders(self, supply_id: str, account: str, shipped_orders: List[Dict[str, Any]]) -> bool:
+        """
+        Обновляет список отгруженных заказов для поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            shipped_orders: Список отгруженных заказов для добавления
+            
+        Returns:
+            bool: True если обновление прошло успешно, False иначе
+        """
+        try:
+            query = """
+            UPDATE public.hanging_supplies 
+            SET shipped_orders = shipped_orders || $3::jsonb
+            WHERE supply_id = $1 AND account = $2
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account, json.dumps(shipped_orders))
+            success = result is not None
+            if success:
+                logger.info(f"Обновлен shipped_orders для поставки {supply_id} ({account}): добавлено {len(shipped_orders)} заказов")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка обновления shipped_orders для поставки {supply_id} ({account}): {str(e)}")
+            return False
+    
+    async def get_shipped_orders(self, supply_id: str, account: str) -> List[Dict[str, Any]]:
+        """
+        Получает список отгруженных заказов для поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            List[Dict[str, Any]]: Список отгруженных заказов
+        """
+        try:
+            query = """
+            SELECT shipped_orders 
+            FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            if result and result['shipped_orders']:
+                return result['shipped_orders']
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка получения shipped_orders для поставки {supply_id} ({account}): {str(e)}")
+            return []
+    
+    async def cleanup_old_changes_log(self, days_to_keep: int = 30) -> Dict[str, Any]:
+        """
+        Очищает старые записи из changes_log для экономии места.
+        
+        Args:
+            days_to_keep: Количество дней для хранения логов
+            
+        Returns:
+            Dict[str, Any]: Результат очистки
+        """
+        try:
+            # Вычисляем дату отсечения
+            cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+            cutoff_date = cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            cutoff_timestamp = cutoff_date.isoformat()
+            
+            # Обновляем changes_log, удаляя старые записи
+            query = """
+            UPDATE public.hanging_supplies 
+            SET changes_log = (
+                SELECT jsonb_agg(log_entry)
+                FROM jsonb_array_elements(changes_log) AS log_entry
+                WHERE (log_entry->>'timestamp')::timestamp > $1::timestamp
+            )
+            WHERE jsonb_array_length(changes_log) > 0
+            """
+            
+            await self.db.execute(query, cutoff_timestamp)
+            
+            # Получаем статистику после очистки
+            stats_query = """
+            SELECT 
+                COUNT(*) as total_supplies,
+                SUM(jsonb_array_length(COALESCE(changes_log, '[]'::jsonb))) as total_logs_remaining
+            FROM public.hanging_supplies
+            """
+            
+            stats = await self.db.fetchrow(stats_query)
+            
+            result = {
+                "cutoff_date": cutoff_timestamp,
+                "days_kept": days_to_keep,
+                "total_supplies": stats['total_supplies'],
+                "total_logs_remaining": stats['total_logs_remaining']
+            }
+            
+            logger.info(f"Очистка changes_log завершена: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка при очистке changes_log: {str(e)}")
+            return {"error": str(e)}
+    
+    async def get_supplies_with_changes(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Получает висячие поставки, у которых есть изменения в changes_log.
+        
+        Args:
+            limit: Максимальное количество записей для возврата
+            
+        Returns:
+            List[Dict[str, Any]]: Список поставок с изменениями
+        """
+        try:
+            query = """
+            SELECT 
+                supply_id,
+                account,
+                operator,
+                created_at,
+                jsonb_array_length(COALESCE(changes_log, '[]'::jsonb)) as changes_count,
+                jsonb_array_length(COALESCE(shipped_orders, '[]'::jsonb)) as shipped_count
+            FROM public.hanging_supplies 
+            WHERE jsonb_array_length(COALESCE(changes_log, '[]'::jsonb)) > 0
+            ORDER BY created_at DESC
+            LIMIT $1
+            """
+            result = await self.db.fetch(query, limit)
+            return [dict(row) for row in result]
+        except Exception as e:
+            logger.error(f"Ошибка получения поставок с изменениями: {str(e)}")
+            return []
+    
+    async def update_order_data(self, supply_id: str, account: str, order_data: Dict[str, Any]) -> bool:
+        """
+        Обновляет order_data для висячей поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            order_data: Новые данные заказов
+            
+        Returns:
+            bool: True если обновление прошло успешно, False иначе
+        """
+        try:
+            query = """
+            UPDATE public.hanging_supplies 
+            SET order_data = $3::jsonb
+            WHERE supply_id = $1 AND account = $2
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account, json.dumps(order_data))
+            success = result is not None
+            if success:
+                logger.info(f"Обновлен order_data для поставки {supply_id} ({account})")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка обновления order_data для поставки {supply_id} ({account}): {str(e)}")
+            return False
+
+    async def delete_hanging_supply(self, supply_id: str, account: str) -> bool:
+        """
+        Удаляет висячую поставку из БД.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            bool: True если удаление прошло успешно, False иначе
+        """
+        try:
+            query = """
+            DELETE FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            success = result is not None
+            if success:
+                logger.info(f"Удалена висячая поставка {supply_id} ({account})")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка удаления висячей поставки {supply_id} ({account}): {str(e)}")
+            return False

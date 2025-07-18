@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import List, Dict, Any, Set, Optional
 from datetime import datetime
 
@@ -158,6 +159,28 @@ class SuppliesService:
             if hanging_only == is_hanging:
                 if hanging_only:
                     supply["is_hanging"] = True
+                    
+                    # Добавляем количество отгруженных товаров
+                    hanging_supply_data = hanging_supplies_map[(supply['supply_id'], supply['account'])]
+                    shipped_orders = hanging_supply_data.get('shipped_orders', [])
+                    
+                    # Десериализуем shipped_orders если это строка JSON
+                    if isinstance(shipped_orders, str):
+                        try:
+                            shipped_orders = json.loads(shipped_orders)
+                        except json.JSONDecodeError:
+                            shipped_orders = []
+                    
+                    if shipped_orders and isinstance(shipped_orders, list):
+                        # Подсчитываем уникальные ID заказов
+                        unique_shipped_ids = set(
+                            order.get('id') for order in shipped_orders 
+                            if isinstance(order, dict) and order.get('id')
+                        )
+                        supply["shipped_count"] = len(unique_shipped_ids)
+                    else:
+                        supply["shipped_count"] = 0
+                    
                     has_target_wild = any(
                         order.local_vendor_code in target_wilds
                         for order in supply.get('orders', [])
