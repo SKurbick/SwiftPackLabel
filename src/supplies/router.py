@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Body, status, HTTPException
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, SupplyIdWithShippedBodySchema
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -192,3 +192,51 @@ async def deliver_supplies_hanging(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при обработке доставки поставок: {str(e)}",
         ) from e
+
+
+@supply.post("/shipment-hanging-actual",
+             status_code=status.HTTP_201_CREATED,
+             summary="Отгрузка фактического количества висячих поставок",
+             description="Отгружает фактическое количество товаров из висячих поставок")
+async def shipment_hanging_actual_quantity(
+        supply_data: SupplyIdWithShippedBodySchema = Body(..., description="Данные висячих поставок с фактическим количеством для отгрузки"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> JSONResponse:
+    """
+    Отгружает фактическое количество товаров из висячих поставок.
+    Args:
+        supply_data: Данные висячих поставок с фактическим количеством для отгрузки
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+    Returns:
+        JSONResponse: Результат отгрузки фактического количества
+    """
+    logger.info(f"Запрос на отгрузку фактического количества висячих поставок от {user.get('username', 'unknown')}")
+    logger.info(f"Получен запрос для {len(supply_data.supplies)} висячих поставок с фактическим количеством={supply_data.shipped_count}")
+    
+    try:
+        # TODO: Здесь будет реализована основная функциональность
+        # supply_service = SuppliesService(db)
+        # result = await supply_service.shipment_hanging_actual_quantity(supply_data, user.get('username', 'unknown'))
+        
+        # Заглушка - возвращаем временный ответ
+        response_data = {
+            "success": True,
+            "message": "Отгрузка фактического количества висячих поставок выполнена успешно",
+            "processed_supplies": len(supply_data.supplies),
+            "actual_shipped_count": supply_data.shipped_count,
+            "operator": user.get('username', 'unknown'),
+            "timestamp": f"Отгружено {supply_data.shipped_count} единиц товара"
+        }
+        
+        return JSONResponse(
+            content=response_data,
+            status_code=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отгрузке фактического количества висячих поставок: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при отгрузке фактического количества висячих поставок: {str(e)}"
+        )

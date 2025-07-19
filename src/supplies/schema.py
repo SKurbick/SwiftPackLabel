@@ -134,3 +134,10 @@ class DeliverySupplyInfo(SupplyInfo):
         if not order_ids:
             raise ValueError("Список order_ids не может быть пустым")
         return order_ids
+
+
+class SupplyIdWithShippedBodySchema(BaseSchema):
+    """Схема для тела запроса с списком висячих поставок и фактическим количеством для отгрузки."""
+    
+    supplies: List[SupplyId]
+    shipped_count: int = Field(description="Фактическое количество товаров для отгрузки из висячих поставок")
