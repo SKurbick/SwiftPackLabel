@@ -479,13 +479,10 @@ class SuppliesService:
     def validate_unique_vendor_code(self, supplies: List[SupplyId]) -> str:
         """
         Проверяет, что все заказы имеют одинаковый local_vendor_code.
-        
         Args:
             supplies: Список поставок для проверки
-            
         Returns:
             str: Уникальный vendor_code
-            
         Raises:
             HTTPException: Если найдено несколько разных vendor_code
         """
@@ -505,10 +502,8 @@ class SuppliesService:
     async def get_hanging_supplies_order_data_optimized(self, supplies: List[SupplyId]) -> Dict[str, dict]:
         """
         Получает данные о заказах из базы данных оптимизированным способом.
-        
         Args:
             supplies: Список поставок
-            
         Returns:
             Dict[str, dict]: Данные о заказах по ключу supply_id
         """
@@ -606,16 +601,13 @@ class SuppliesService:
         """
         all_orders = []
         total_shipped = 0
-        
-        # Если переданы данные запроса, работаем только с ними
+
         if request_supplies:
-            # Создаем словарь заказов из запроса для быстрого поиска
             request_orders_map = {}
             for supply in request_supplies:
                 request_orders_map[supply.supply_id] = {order.order_id: order for order in supply.orders}
             
             for supply_id, data in hanging_data.items():
-                # Проверяем наличие поставки в запросе
                 if supply_id not in request_orders_map:
                     logger.warning(f"Поставка {supply_id} не найдена в запросе")
                     continue
@@ -624,7 +616,6 @@ class SuppliesService:
                 all_orders.extend(available_orders)
                 total_shipped += shipped_count
         else:
-            # Старая логика - работаем со всеми заказами из БД
             for supply_id, data in hanging_data.items():
                 available_orders, shipped_count = self._process_supply_orders(supply_id, data)
                 all_orders.extend(available_orders)
@@ -638,10 +629,8 @@ class SuppliesService:
     def group_selected_orders_by_supply(self, selected_orders: List[dict]) -> Dict[str, List[dict]]:
         """
         Группирует отобранные заказы по поставкам.
-        
         Args:
             selected_orders: Отобранные заказы для отгрузки
-            
         Returns:
             Dict[str, List[dict]]: Заказы, сгруппированные по supply_id
         """
@@ -728,10 +717,8 @@ class SuppliesService:
     def prepare_data_for_delivery_optimized(self, selected_orders: List[dict]) -> Tuple[List[DeliverySupplyInfo], Dict[str, str]]:
         """
         Оптимизированная подготовка данных для 1C и отгрузки.
-        
         Args:
             selected_orders: Список отобранных заказов
-            
         Returns:
             Tuple[List[DeliverySupplyInfo], Dict[str, str]]: Данные для доставки и маппинг заказов
         """
@@ -748,8 +735,7 @@ class SuppliesService:
         for supply_id, orders in grouped_orders.items():
             if not orders:
                 continue
-                
-            # Берем account из первого заказа (все заказы одной поставки имеют одинаковый account)
+
             account = orders[0]["account"]
             
             orders_list = [
@@ -788,10 +774,8 @@ class SuppliesService:
     async def generate_qr_codes_for_selected_orders(self, grouped_orders: Dict[str, List[dict]]) -> Dict[str, Any]:
         """
         Генерирует QR-коды для отобранных заказов.
-        
         Args:
             grouped_orders: Заказы, сгруппированные по поставкам
-            
         Returns:
             Dict[str, Any]: Сгруппированные данные со стикерами для печати
         """
@@ -869,11 +853,9 @@ class SuppliesService:
                                                              user: dict) -> Dict[str, Any]:
         """
         Оптимизированная отгрузка фактического количества из висячих поставок.
-        
         Args:
             supply_data: Данные о поставках с количеством для отгрузки
             user: Данные пользователя
-            
         Returns:
             Dict[str, Any]: Результат операции со статистикой и QR-кодами
         """

@@ -369,10 +369,8 @@ class HangingSupplies:
     async def get_order_data_by_supplies(self, supply_ids: List[str]) -> Dict[str, dict]:
         """
         Получает order_data и shipped_orders для списка поставок оптимизированным запросом.
-        
         Args:
             supply_ids: Список ID поставок
-            
         Returns:
             Dict[str, dict]: Словарь {supply_id: {"order_data": ..., "shipped_orders": ..., "account": ...}}
         """
