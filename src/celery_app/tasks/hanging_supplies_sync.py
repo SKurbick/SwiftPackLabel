@@ -3,7 +3,6 @@ Celery задачи для синхронизации висячих поста�
 """
 import asyncio
 import json
-import concurrent.futures
 from datetime import datetime
 from typing import Dict, Any, List, Set
 
@@ -313,22 +312,7 @@ def sync_hanging_supplies_with_data(supplies_data: Dict[str, Dict[str, Any]]) ->
     """
     try:
         logger.info("Запуск фоновой синхронизации висячих поставок с переданными данными")
-        
-        # Проверяем, есть ли уже запущенный event loop
-        try:
-            loop = asyncio.get_running_loop()
-            # Если есть запущенный loop, создаем задачу в отдельном потоке
-            def run_in_new_loop():
-                return asyncio.run(_sync_hanging_supplies_async(supplies_data))
-            
-            # Создаем новый event loop в отдельном потоке
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_new_loop)
-                result = future.result()
-        except RuntimeError:
-            # Если нет запущенного loop, используем asyncio.run
-            result = asyncio.run(_sync_hanging_supplies_async(supplies_data))
-        
+        result = asyncio.run(_sync_hanging_supplies_async(supplies_data))
         logger.info(f"Фоновая синхронизация завершена успешно: {result}")
         return result
         
@@ -391,21 +375,7 @@ def get_hanging_supplies_statistics() -> Dict[str, Any]:
     """
     try:
         logger.info("Запуск получения статистики висячих поставок")
-        
-        # Проверяем, есть ли уже запущенный event loop
-        try:
-            loop = asyncio.get_running_loop()
-            # Если есть запущенный loop, создаем задачу в отдельном потоке
-            def run_in_new_loop():
-                return asyncio.run(_get_statistics_async())
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_new_loop)
-                result = future.result()
-        except RuntimeError:
-            # Если нет запущенного loop, используем asyncio.run
-            result = asyncio.run(_get_statistics_async())
-        
+        result = asyncio.run(_get_statistics_async())
         logger.info(f"Статистика получена: {result.get('total_supplies_with_changes', 0)} поставок с изменениями")
         return result
         
@@ -459,21 +429,7 @@ def cleanup_old_changes_log(days_to_keep: int = 30) -> Dict[str, Any]:
     """
     try:
         logger.info(f"Запуск очистки старых записей changes_log (старше {days_to_keep} дней)")
-        
-        # Проверяем, есть ли уже запущенный event loop
-        try:
-            loop = asyncio.get_running_loop()
-            # Если есть запущенный loop, создаем задачу в отдельном потоке
-            def run_in_new_loop():
-                return asyncio.run(_cleanup_old_logs_async(days_to_keep))
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_new_loop)
-                result = future.result()
-        except RuntimeError:
-            # Если нет запущенного loop, используем asyncio.run
-            result = asyncio.run(_cleanup_old_logs_async(days_to_keep))
-        
+        result = asyncio.run(_cleanup_old_logs_async(days_to_keep))
         logger.info(f"Очистка завершена: {result}")
         return result
         
