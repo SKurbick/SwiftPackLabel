@@ -216,22 +216,11 @@ async def shipment_hanging_actual_quantity(
     logger.info(f"Получен запрос для {len(supply_data.supplies)} висячих поставок с фактическим количеством={supply_data.shipped_count}")
     
     try:
-        # TODO: Здесь будет реализована основная функциональность
-        # supply_service = SuppliesService(db)
-        # result = await supply_service.shipment_hanging_actual_quantity(supply_data, user.get('username', 'unknown'))
-        
-        # Заглушка - возвращаем временный ответ
-        response_data = {
-            "success": True,
-            "message": "Отгрузка фактического количества висячих поставок выполнена успешно",
-            "processed_supplies": len(supply_data.supplies),
-            "actual_shipped_count": supply_data.shipped_count,
-            "operator": user.get('username', 'unknown'),
-            "timestamp": f"Отгружено {supply_data.shipped_count} единиц товара"
-        }
+        supply_service = SuppliesService(db)
+        result = await supply_service.shipment_hanging_actual_quantity_implementation(supply_data, user)
         
         return JSONResponse(
-            content=response_data,
+            content=result,
             status_code=status.HTTP_201_CREATED)
         
     except Exception as e:

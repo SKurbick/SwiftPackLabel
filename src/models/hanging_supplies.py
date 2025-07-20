@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from datetime import datetime, timedelta
 
 from src.logger import app_logger as logger
@@ -365,3 +365,40 @@ class HangingSupplies:
         except Exception as e:
             logger.error(f"Ошибка удаления висячей поставки {supply_id} ({account}): {str(e)}")
             return False
+
+    async def get_order_data_by_supplies(self, supply_ids: List[str]) -> Dict[str, dict]:
+        """
+        Получает order_data и shipped_orders для списка поставок оптимизированным запросом.
+        
+        Args:
+            supply_ids: Список ID поставок
+            
+        Returns:
+            Dict[str, dict]: Словарь {supply_id: {"order_data": ..., "shipped_orders": ..., "account": ...}}
+        """
+        if not supply_ids:
+            return {}
+            
+        try:
+            placeholders = ','.join(f"${i+1}" for i in range(len(supply_ids)))
+            query = f"""
+                SELECT supply_id, account, order_data, shipped_orders 
+                FROM public.hanging_supplies 
+                WHERE supply_id IN ({placeholders})
+            """
+            
+            rows = await self.db.fetch(query, *supply_ids)
+            logger.info(f"Получено {len(rows)} записей order_data и shipped_orders из таблицы hanging_supplies")
+            
+            return {
+                row['supply_id']: {
+                    "order_data": row['order_data'],
+                    "shipped_orders": row['shipped_orders'] or [],
+                    "account": row['account']
+                } 
+                for row in rows
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении order_data для поставок: {str(e)}")
+            return {}

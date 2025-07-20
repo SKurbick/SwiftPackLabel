@@ -310,7 +310,8 @@ class OneCIntegration:
                 ) for account, order_ids in accounts_orders.items()
             ]
             await asyncio.gather(*tasks)
-            result =  await self.send_to_1c(self.build_final_structure(result_structure))
+            # result =  await self.send_to_1c(self.build_final_structure(result_structure))
+            result = False
             return result
 
         except Exception as e:
