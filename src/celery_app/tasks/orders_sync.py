@@ -65,15 +65,29 @@ async def _sync_orders_async():
                 'error': str(e)
             }
     
-    # Этап 2: Один bulk update всех заказов
+    # Этап 2: Batch update всех заказов
     if all_orders:
         try:
-            logger.info(f"Начинаем bulk update {len(all_orders)} заказов в БД")
+            logger.info(f"Начинаем batch update {len(all_orders)} заказов в БД")
             from src.models.orders_wb import OrdersDB
-            await OrdersDB.update_orders(all_orders)
-            logger.info(f"Успешно обновлено {len(all_orders)} заказов в базе данных")
+            
+            # Разделяем на batch по 1000 записей
+            batch_size = 1000
+            total_batches = (len(all_orders) + batch_size - 1) // batch_size
+            processed_orders = 0
+            
+            for i in range(0, len(all_orders), batch_size):
+                batch = all_orders[i:i + batch_size]
+                current_batch = (i // batch_size) + 1
+                
+                logger.info(f"Обрабатываем batch {current_batch}/{total_batches}: {len(batch)} заказов")
+                await OrdersDB.update_orders(batch)
+                processed_orders += len(batch)
+                
+            logger.info(f"Успешно обновлено {processed_orders} заказов в базе данных ({total_batches} batch)")
+            
         except Exception as e:
-            logger.error(f"Ошибка bulk update заказов в БД: {e}")
+            logger.error(f"Ошибка batch update заказов в БД: {e}")
             # Помечаем все аккаунты как ошибочные, если БД недоступна
             for account_name in results:
                 if results[account_name]['status'] == 'success':
