@@ -70,15 +70,18 @@ async def _sync_orders_async():
         try:
             logger.info(f"Начинаем batch update {len(all_orders)} заказов в БД")
             from src.models.orders_wb import OrdersDB
-            from src.db import db
+            from src.db import get_celery_orders_db
+            
+            # Получаем отдельный пул для orders sync задач
+            orders_db = await get_celery_orders_db()
             
             # Разделяем на batch по 1000 записей
             batch_size = 1000
             total_batches = (len(all_orders) + batch_size - 1) // batch_size
             processed_orders = 0
             
-            # Используем одно соединение для всех batch операций
-            async with db.connection() as connection:
+            # Используем отдельный пул соединений для orders задач
+            async with orders_db.connection() as connection:
                 for i in range(0, len(all_orders), batch_size):
                     batch = all_orders[i:i + batch_size]
                     current_batch = (i // batch_size) + 1

@@ -62,7 +62,12 @@ class DatabaseManager:
             return await conn.execute(query, *args)
 
 
+# Основной пул для FastAPI приложения
 db = DatabaseManager()
+
+# Отдельные пулы для Celery задач
+celery_orders_db = DatabaseManager()
+celery_hanging_supplies_db = DatabaseManager()
 
 
 async def get_db_connection() -> AsyncGenerator:
@@ -71,19 +76,49 @@ async def get_db_connection() -> AsyncGenerator:
         yield connection
 
 
+async def get_celery_orders_db():
+    """Получение БД соединения для Celery задач синхронизации заказов"""
+    return celery_orders_db
+
+
+async def get_celery_hanging_supplies_db():
+    """Получение БД соединения для Celery задач синхронизации висячих поставок"""
+    return celery_hanging_supplies_db
+
+
 async def check_db_connected() -> None:
     try:
+        # Создаем пулы для основного приложения
         if not db.pool:
             await db.create_pool()
         await db.execute("SELECT 1")
+        
+        # Создаем пулы для Celery задач
+        if not celery_orders_db.pool:
+            await celery_orders_db.create_pool()
+            
+        if not celery_hanging_supplies_db.pool:
+            await celery_hanging_supplies_db.create_pool()
+            
     except Exception as e:
         raise e
 
 
 async def check_db_disconnected() -> None:
     try:
+        # Закрываем основной пул
         if db.pool:
             await db.pool.close()
             db.pool = None
+            
+        # Закрываем Celery пулы
+        if celery_orders_db.pool:
+            await celery_orders_db.pool.close()
+            celery_orders_db.pool = None
+            
+        if celery_hanging_supplies_db.pool:
+            await celery_hanging_supplies_db.pool.close()
+            celery_hanging_supplies_db.pool = None
+            
     except Exception as e:
         raise e

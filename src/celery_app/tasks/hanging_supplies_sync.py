@@ -331,10 +331,13 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
     Returns:
         Dict[str, Any]: Результат синхронизации
     """
-    from src.db import db
+    from src.db import get_celery_hanging_supplies_db
     
     try:
-        async with db.connection() as connection:
+        # Получаем отдельный пул для hanging supplies sync задач
+        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        
+        async with hanging_supplies_db.connection() as connection:
             hanging_supplies_service = HangingSuppliesService(connection)
             
             # Выполняем синхронизацию с переданными данными
@@ -387,10 +390,13 @@ async def _get_statistics_async() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Статистика изменений
     """
-    from src.db import db
+    from src.db import get_celery_hanging_supplies_db
     
     try:
-        async with db.connection() as connection:
+        # Получаем отдельный пул для hanging supplies sync задач
+        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        
+        async with hanging_supplies_db.connection() as connection:
             hanging_supplies_model = HangingSupplies(connection)
             statistics = await hanging_supplies_model.get_changes_statistics()
             
@@ -441,10 +447,13 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Результат очистки
     """
-    from src.db import db
+    from src.db import get_celery_hanging_supplies_db
     
     try:
-        async with db.connection() as connection:
+        # Получаем отдельный пул для hanging supplies sync задач
+        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        
+        async with hanging_supplies_db.connection() as connection:
             hanging_supplies_model = HangingSupplies(connection)
             cleanup_result = await hanging_supplies_model.cleanup_old_changes_log(days_to_keep)
             
