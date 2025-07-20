@@ -12,7 +12,6 @@ from src.supplies.schema import SupplyIdResponseSchema
 
 from src.supplies.supplies import SuppliesService
 from src.orders.orders import OrdersService
-from src.db import get_db_connection
 
 from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
 
@@ -276,10 +275,9 @@ class GlobalCache:
             
             # Прогрев данных поставок (оптимизированный - один запрос к API)
             try:
-                db_gen = get_db_connection()
-                db = await db_gen.__anext__()
-                try:
-                    supplies_service = SuppliesService(db)
+                from src.db import db as main_db
+                async with main_db.connection() as connection:
+                    supplies_service = SuppliesService(connection)
                     
                     logger.info("Выполняем один запрос к API WB для получения всех поставок...")
                     
@@ -317,18 +315,14 @@ class GlobalCache:
                         logger.info("Запущена фоновая синхронизация висячих поставок")
                     except Exception as e:
                         logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
-                        
-                finally:
-                    await db_gen.aclose()
             except Exception as e:
                 logger.error(f"Ошибка при прогреве кэша поставок: {str(e)}")
             
             # Прогрев данных заказов (с правильными ключами и полными объектами)
             try:
-                db_gen = get_db_connection()
-                db = await db_gen.__anext__()
-                try:
-                    orders_service = OrdersService(db)
+                from src.db import db as main_db
+                async with main_db.connection() as connection:
+                    orders_service = OrdersService(connection)
                     
                     # Базовый запрос: time_delta=1.0, wild=None
                     orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
@@ -342,8 +336,6 @@ class GlobalCache:
                     await self.set(cache_key_orders, grouped_orders)
                     
                     logger.info("Кэш заказов прогрет успешно")
-                finally:
-                    await db_gen.aclose()
             except Exception as e:
                 logger.error(f"Ошибка при прогреве кэша заказов: {str(e)}")
                 
