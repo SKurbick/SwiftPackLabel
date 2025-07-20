@@ -136,6 +136,74 @@ class OrdersDB:
             raise
     
     @staticmethod
+    async def _update_orders_with_connection(conn, orders: List[Dict[str, Any]]) -> int:
+        """
+        Обновляет заказы используя переданное соединение с БД.
+        
+        Args:
+            conn: Активное соединение с БД
+            orders: Список словарей с данными заказов
+            
+        Returns:
+            Количество обновленных заказов
+        """
+        if not orders:
+            return 0
+
+        current_time = datetime.utcnow()
+
+        try:
+            async with conn.transaction():
+                # Подготавливаем все данные для bulk update
+                orders_data = [
+                    OrdersDB._prepare_order_data(order, current_time) 
+                    for order in orders
+                ]
+
+                # Bulk update всех заказов одним запросом
+                query = """
+                    INSERT INTO orders_wb (
+                        id, order_uid, rid, article, nm_id, chrt_id, color_code, skus,
+                        price, sale_price, converted_price, currency_code, converted_currency_code, scan_price,
+                        delivery_type, cargo_type, warehouse_id, supply_id, offices, address,
+                        comment, is_zero_order, options, required_meta, user_id,
+                        created_at, updated_at, processed_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8,
+                        $9, $10, $11, $12, $13, $14,
+                        $15, $16, $17, $18, $19, $20,
+                        $21, $22, $23, $24, $25,
+                        $26, $27, $28
+                    )
+                    ON CONFLICT (order_uid) DO UPDATE SET
+                        price = EXCLUDED.price,
+                        sale_price = EXCLUDED.sale_price,
+                        converted_price = EXCLUDED.converted_price,
+                        scan_price = EXCLUDED.scan_price,
+                        delivery_type = EXCLUDED.delivery_type,
+                        cargo_type = EXCLUDED.cargo_type,
+                        warehouse_id = EXCLUDED.warehouse_id,
+                        supply_id = EXCLUDED.supply_id,
+                        offices = EXCLUDED.offices,
+                        address = EXCLUDED.address,
+                        comment = EXCLUDED.comment,
+                        is_zero_order = EXCLUDED.is_zero_order,
+                        options = EXCLUDED.options,
+                        required_meta = EXCLUDED.required_meta,
+                        user_id = EXCLUDED.user_id,
+                        updated_at = EXCLUDED.updated_at
+                """
+                
+                await conn.executemany(query, orders_data)
+                processed_count = len(orders)
+                
+                return processed_count
+
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении заказов с переданным соединением: {e}")
+            raise
+    
+    @staticmethod
     def _prepare_order_data(order: Dict[str, Any], current_time: datetime) -> tuple:
         """
         Подготавливает данные заказа для вставки в БД.

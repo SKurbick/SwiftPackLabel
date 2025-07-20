@@ -70,20 +70,29 @@ async def _sync_orders_async():
         try:
             logger.info(f"Начинаем batch update {len(all_orders)} заказов в БД")
             from src.models.orders_wb import OrdersDB
+            from src.db import db
             
             # Разделяем на batch по 1000 записей
             batch_size = 1000
             total_batches = (len(all_orders) + batch_size - 1) // batch_size
             processed_orders = 0
             
-            for i in range(0, len(all_orders), batch_size):
-                batch = all_orders[i:i + batch_size]
-                current_batch = (i // batch_size) + 1
-                
-                logger.info(f"Обрабатываем batch {current_batch}/{total_batches}: {len(batch)} заказов")
-                await OrdersDB.update_orders(batch)
-                processed_orders += len(batch)
-                
+            # Используем одно соединение для всех batch операций
+            async with db.connection() as connection:
+                for i in range(0, len(all_orders), batch_size):
+                    batch = all_orders[i:i + batch_size]
+                    current_batch = (i // batch_size) + 1
+                    
+                    logger.info(f"Обрабатываем batch {current_batch}/{total_batches}: {len(batch)} заказов")
+                    
+                    # Вызываем метод напрямую с соединением
+                    await OrdersDB._update_orders_with_connection(connection, batch)
+                    processed_orders += len(batch)
+                    
+                    # Добавляем задержку между batch операциями
+                    if current_batch < total_batches:  # Не ждем после последнего batch
+                        await asyncio.sleep(0.1)
+                    
             logger.info(f"Успешно обновлено {processed_orders} заказов в базе данных ({total_batches} batch)")
             
         except Exception as e:
