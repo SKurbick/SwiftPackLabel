@@ -8,7 +8,6 @@ from typing import Dict, Any, List, Set
 
 from src.celery_app.celery import celery_app
 from src.models.hanging_supplies import HangingSupplies
-from src.db import get_db_connection
 from src.logger import get_logger
 
 logger = get_logger()
@@ -332,26 +331,26 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
     Returns:
         Dict[str, Any]: Результат синхронизации
     """
-    db_gen = get_db_connection()
-    db = await db_gen.__anext__()
+    from src.db import db
     
     try:
-        hanging_supplies_service = HangingSuppliesService(db)
-        
-        # Выполняем синхронизацию с переданными данными
-        sync_result = await hanging_supplies_service.sync_hanging_supplies_with_current_data(supplies_data)
-        
-        # Добавляем общую информацию о задаче
-        result = {
-            "task_status": "success",
-            "task_timestamp": datetime.utcnow().isoformat(),
-            "api_data_accounts": len(supplies_data),
-            "api_data_supplies": sum(len(supplies) for supplies in supplies_data.values()),
-            **sync_result
-        }
-        
-        logger.info(f"Синхронизация завершена: обработано {result['processed_supplies']} поставок")
-        return result
+        async with db.connection() as connection:
+            hanging_supplies_service = HangingSuppliesService(connection)
+            
+            # Выполняем синхронизацию с переданными данными
+            sync_result = await hanging_supplies_service.sync_hanging_supplies_with_current_data(supplies_data)
+            
+            # Добавляем общую информацию о задаче
+            result = {
+                "task_status": "success",
+                "task_timestamp": datetime.utcnow().isoformat(),
+                "api_data_accounts": len(supplies_data),
+                "api_data_supplies": sum(len(supplies) for supplies in supplies_data.values()),
+                **sync_result
+            }
+            
+            logger.info(f"Синхронизация завершена: обработано {result['processed_supplies']} поставок")
+            return result
         
     except Exception as e:
         logger.error(f"Ошибка в асинхронной синхронизации: {str(e)}")
@@ -360,9 +359,6 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
-        
-    finally:
-        await db_gen.aclose()
 
 
 @celery_app.task(name='get_hanging_supplies_statistics')
@@ -391,18 +387,18 @@ async def _get_statistics_async() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Статистика изменений
     """
-    db_gen = get_db_connection()
-    db = await db_gen.__anext__()
+    from src.db import db
     
     try:
-        hanging_supplies_model = HangingSupplies(db)
-        statistics = await hanging_supplies_model.get_changes_statistics()
-        
-        return {
-            "task_status": "success",
-            "task_timestamp": datetime.utcnow().isoformat(),
-            **statistics
-        }
+        async with db.connection() as connection:
+            hanging_supplies_model = HangingSupplies(connection)
+            statistics = await hanging_supplies_model.get_changes_statistics()
+            
+            return {
+                "task_status": "success",
+                "task_timestamp": datetime.utcnow().isoformat(),
+                **statistics
+            }
         
     except Exception as e:
         logger.error(f"Ошибка получения статистики: {str(e)}")
@@ -411,9 +407,6 @@ async def _get_statistics_async() -> Dict[str, Any]:
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
-        
-    finally:
-        await db_gen.aclose()
 
 
 @celery_app.task(name='cleanup_old_changes_log')
@@ -448,20 +441,20 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Результат очистки
     """
-    db_gen = get_db_connection()
-    db = await db_gen.__anext__()
+    from src.db import db
     
     try:
-        hanging_supplies_model = HangingSupplies(db)
-        cleanup_result = await hanging_supplies_model.cleanup_old_changes_log(days_to_keep)
-        
-        result = {
-            "task_status": "success",
-            "task_timestamp": datetime.utcnow().isoformat(),
-            **cleanup_result
-        }
-        
-        return result
+        async with db.connection() as connection:
+            hanging_supplies_model = HangingSupplies(connection)
+            cleanup_result = await hanging_supplies_model.cleanup_old_changes_log(days_to_keep)
+            
+            result = {
+                "task_status": "success",
+                "task_timestamp": datetime.utcnow().isoformat(),
+                **cleanup_result
+            }
+            
+            return result
         
     except Exception as e:
         logger.error(f"Ошибка в асинхронной очистке: {str(e)}")
@@ -470,6 +463,3 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
-        
-    finally:
-        await db_gen.aclose()
