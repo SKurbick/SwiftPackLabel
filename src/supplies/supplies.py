@@ -177,8 +177,8 @@ class SuppliesService:
                     if shipped_orders and isinstance(shipped_orders, list):
                         # Подсчитываем уникальные ID заказов
                         unique_shipped_ids = set(
-                            order.get('id') for order in shipped_orders 
-                            if isinstance(order, dict) and order.get('id')
+                            order.get('order_id') for order in shipped_orders
+                            if isinstance(order, dict) and order.get('order_id')
                         )
                         supply["shipped_count"] = len(unique_shipped_ids)
                     else:
@@ -217,7 +217,7 @@ class SuppliesService:
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
         return SupplyIdResponseSchema(supplies=filtered_result)
 
-    async def check_current_orders(self, supply_ids: SupplyIdBodySchema):
+    async def check_current_orders(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False):
         logger.info("Проверка поставок на соответствие наличия заказов (сверка заказов по поставкам)")
         tasks: List = []
         for supply in supply_ids.supplies:
@@ -227,11 +227,21 @@ class SuppliesService:
             supply_orders: Set[int] = {order.order_id for order in supply.orders}
             check_orders: Set[int] = {order.get("id") for order in
                                       result[supply.account][supply.supply_id].get("orders", [])}
-            diff: Set[int] = supply_orders.symmetric_difference(check_orders)
-            if diff:
-                raise HTTPException(status_code=409,
-                                    detail=f'Есть различия между поставками {diff} в кабинете {supply.account}'
-                                           f' Номер поставки : {supply.supply_id}')
+            
+            if allow_partial:
+                # Для частичной отгрузки: проверяем, что заказы из запроса существуют в поставке
+                missing_orders = supply_orders - check_orders
+                if missing_orders:
+                    raise HTTPException(status_code=409,
+                                       detail=f'Заказы {missing_orders} не найдены в поставке {supply.supply_id} '
+                                              f'в кабинете {supply.account}')
+            else:
+                # Для полной печати: проверяем точное соответствие (текущая логика)
+                diff: Set[int] = supply_orders.symmetric_difference(check_orders)
+                if diff:
+                    raise HTTPException(status_code=409,
+                                        detail=f'Есть различия между поставками {diff} в кабинете {supply.account}'
+                                               f' Номер поставки : {supply.supply_id}')
 
     async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema) -> Dict[str, List[Dict[str, Any]]]:
         logger.info('Инициализация получение документов (Стикеры и Лист подбора)')
@@ -798,11 +808,15 @@ class SuppliesService:
         return supplies_list
 
     async def _generate_stickers(self, supplies_list: List[SupplyId]) -> Dict[str, Any]:
-        """Генерирует стикеры для списка поставок."""
+        """Генерирует стикеры для списка поставок с частичной проверкой."""
         supply_ids_body = SupplyIdBodySchema(supplies=supplies_list)
         
         try:
-            result = await self.filter_and_fetch_stickers(supply_ids_body)
+            # Для частичной отгрузки используем allow_partial=True
+            await self.check_current_orders(supply_ids_body, allow_partial=True)
+            stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids_body))
+            self.union_results_stickers(supply_ids_body, stickers)
+            result = await self.group_orders_to_wild(supply_ids_body)
             logger.info(f"Успешно сгенерированы QR-коды для {len(supplies_list)} поставок")
             return result
         except Exception as e:
