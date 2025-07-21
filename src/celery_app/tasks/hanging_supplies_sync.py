@@ -295,7 +295,7 @@ class HangingSuppliesService:
         return await self.hanging_supplies_model.get_changes_statistics()
 
 
-@celery_app.task(name='sync_hanging_supplies_with_data')
+@celery_app.task(name='sync_hanging_supplies_with_data', soft_time_limit=600, time_limit=600)
 def sync_hanging_supplies_with_data(supplies_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
     Фоновая задача для синхронизации висячих поставок с переданными данными из API.
@@ -392,7 +392,7 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
             await pool.close()
 
 
-@celery_app.task(name='get_hanging_supplies_statistics')
+@celery_app.task(name='get_hanging_supplies_statistics', soft_time_limit=600, time_limit=600)
 def get_hanging_supplies_statistics() -> Dict[str, Any]:
     """
     Получает статистику изменений по всем висячим поставкам.
@@ -471,7 +471,7 @@ async def _get_statistics_async() -> Dict[str, Any]:
             await pool.close()
 
 
-@celery_app.task(name='cleanup_old_changes_log')
+@celery_app.task(name='cleanup_old_changes_log', soft_time_limit=600, time_limit=600)
 def cleanup_old_changes_log(days_to_keep: int = 30) -> Dict[str, Any]:
     """
     Очищает старые записи из changes_log для экономии места.
