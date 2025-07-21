@@ -528,65 +528,102 @@ class SuppliesService:
 
     def _filter_available_orders(self, orders_list: List[dict], shipped_order_ids: set, supply_id: str, account: str) -> List[dict]:
         """Фильтрует доступные (не отгруженные) заказы для одной поставки."""
-        return [
-            {
-                "supply_id": supply_id,
-                "account": account,
-                "order_id": order["id"],
-                "created_at_ts": datetime.fromisoformat(order["createdAt"].replace('Z', '+00:00')).timestamp(),
-                "created_at": order["createdAt"],
-                "article": order["article"],
-                "nm_id": order["nmId"],
-                "price": order["convertedPrice"]
-            }
-            for order in orders_list
-            if order["id"] not in shipped_order_ids
-        ]
+        result = []
+        for order in orders_list:
+            if order["id"] not in shipped_order_ids:
+                # Безопасное получение полей с правильными названиями из БД
+                created_at = order.get("created_at", order.get("createdAt", ""))  # Пробуем оба варианта
+                created_at_ts = 0
+                
+                if created_at:
+                    try:
+                        created_at_ts = datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
+                    except (ValueError, AttributeError):
+                        logger.warning(f"Не удалось обработать created_at для заказа {order.get('id')}: {created_at}")
+                        created_at_ts = 0
+                
+                order_data = {
+                    "supply_id": supply_id,
+                    "account": account,
+                    "order_id": order["id"],
+                    "created_at_ts": created_at_ts,
+                    "created_at": created_at,
+                    "article": order.get("article", ""),
+                    "nm_id": order.get("nmId", order.get("nm_id", 0)),  # Пробуем оба варианта
+                    "price": order.get("price", order.get("convertedPrice", 0))  # Пробуем оба варианта
+                }
+                result.append(order_data)
+        
+        return result
 
-    def _process_supply_orders(self, supply_id: str, data: dict, request_orders: dict = None) -> Tuple[List[dict], int]:
-        """Обрабатывает заказы одной поставки и возвращает доступные заказы."""
-        # Десериализуем order_data
-        order_data = data["order_data"]
-        if isinstance(order_data, str):
+    def _deserialize_order_data(self, order_data_raw: Any, supply_id: str) -> dict:
+        """Десериализует order_data из БД."""
+        if isinstance(order_data_raw, str):
             try:
-                order_data = json.loads(order_data)
+                return json.loads(order_data_raw)
             except json.JSONDecodeError as e:
                 logger.error(f"Ошибка десериализации order_data для поставки {supply_id}: {e}")
-                return [], 0
+                raise HTTPException(status_code=500, detail=f"Ошибка данных поставки {supply_id}")
+        return order_data_raw
+
+    def _validate_request_orders(self, request_orders: dict, db_orders_map: dict, supply_id: str) -> None:
+        """Валидирует, что заказы из запроса существуют в БД."""
+        for order_id in request_orders.keys():
+            if order_id not in db_orders_map:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Заказ {order_id} не найден в БД для поставки {supply_id}"
+                )
+
+    def _enrich_order_with_request_data(self, db_order: dict, request_order) -> dict:
+        """Обогащает данные заказа из БД данными из запроса."""
+        return {
+            **db_order,  # Данные из БД (createdAt, convertedPrice, article, id)
+            "nmId": request_order.nm_id,  # nm_id из запроса
+            "local_vendor_code": request_order.local_vendor_code  # На всякий случай
+        }
+
+    def _process_request_orders(self, request_orders: dict, orders_list: List[dict], 
+                               shipped_order_ids: set, supply_id: str, account: str) -> Tuple[List[dict], int]:
+        """Обрабатывает заказы из запроса."""
+        db_orders_map = {order["id"]: order for order in orders_list}
+        self._validate_request_orders(request_orders, db_orders_map, supply_id)
         
+        filtered_orders = []
+        for order_id, request_order in request_orders.items():
+            if order_id not in shipped_order_ids:
+                db_order = db_orders_map[order_id]
+                enriched_order = self._enrich_order_with_request_data(db_order, request_order)
+                filtered_orders.append(enriched_order)
+        
+        available_orders = self._filter_available_orders(filtered_orders, shipped_order_ids, supply_id, account)
+        shipped_count = len(request_orders) - len(available_orders)
+        
+        logger.info(f"Поставка {supply_id}: {len(request_orders)} заказов в запросе, {shipped_count} уже отгружено, {len(available_orders)} доступно")
+        return available_orders, shipped_count
+
+    def _process_db_orders(self, orders_list: List[dict], shipped_order_ids: set, 
+                          supply_id: str, account: str) -> Tuple[List[dict], int]:
+        """Обрабатывает заказы только из БД (старая логика)."""
+        available_orders = self._filter_available_orders(orders_list, shipped_order_ids, supply_id, account)
+        shipped_count = len(orders_list) - len(available_orders)
+        
+        logger.info(f"Поставка {supply_id}: {len(orders_list)} заказов, {shipped_count} уже отгружено, {len(available_orders)} доступно")
+        return available_orders, shipped_count
+
+    def _process_supply_orders(self, supply_id: str, data: dict, request_orders: dict = None) -> Tuple[List[dict], int]:
+        """Координирует обработку заказов поставки."""
+        # Десериализуем данные из БД
+        order_data = self._deserialize_order_data(data["order_data"], supply_id)
         shipped_order_ids = self._get_shipped_order_ids(data["shipped_orders"])
         orders_list = order_data["orders"]
         account = data["account"]
         
-        # Если переданы заказы из запроса, работаем только с ними
+        # Выбираем стратегию обработки
         if request_orders:
-            # Создаем словарь заказов из БД для быстрого поиска
-            db_orders_map = {order["id"]: order for order in orders_list}
-            
-            # Фильтруем только те заказы, которые есть в запросе
-            filtered_orders = []
-            for order_id, request_order in request_orders.items():
-                if order_id not in db_orders_map:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Заказ {order_id} не найден в БД для поставки {supply_id}"
-                    )
-                
-                # Проверяем, не отгружен ли уже заказ
-                if order_id not in shipped_order_ids:
-                    db_order = db_orders_map[order_id]
-                    filtered_orders.append(db_order)
-            
-            available_orders = self._filter_available_orders(filtered_orders, shipped_order_ids, supply_id, account)
-            shipped_count = len(request_orders) - len(available_orders)
-            logger.info(f"Поставка {supply_id}: {len(request_orders)} заказов в запросе, {shipped_count} уже отгружено, {len(available_orders)} доступно")
+            return self._process_request_orders(request_orders, orders_list, shipped_order_ids, supply_id, account)
         else:
-            # Старая логика - работаем со всеми заказами из БД
-            available_orders = self._filter_available_orders(orders_list, shipped_order_ids, supply_id, account)
-            shipped_count = len(orders_list) - len(available_orders)
-            logger.info(f"Поставка {supply_id}: {len(orders_list)} заказов, {shipped_count} уже отгружено, {len(available_orders)} доступно")
-        
-        return available_orders, shipped_count
+            return self._process_db_orders(orders_list, shipped_order_ids, supply_id, account)
 
     def extract_available_orders(self, hanging_data: Dict[str, dict], request_supplies: List[SupplyId] = None) -> List[dict]:
         """
@@ -621,7 +658,8 @@ class SuppliesService:
                 all_orders.extend(available_orders)
                 total_shipped += shipped_count
         
-        all_orders.sort(key=lambda x: x["created_at_ts"])
+        # FIFO сортировка: сначала по времени создания, затем по order_id
+        all_orders.sort(key=lambda x: (x["created_at_ts"], x["order_id"]))
         logger.info(f"Обработано заказов из {len(hanging_data)} поставок: {total_shipped} уже отгружено, {len(all_orders)} доступно для отгрузки")
         
         return all_orders
