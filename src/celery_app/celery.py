@@ -41,6 +41,8 @@ def create_celery_app() -> Celery:
         task_reject_on_worker_lost=True,
         task_default_retry_delay=60,
         task_max_retries=3,
+        task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+        task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
         
         # Мониторинг
         worker_send_task_events=True,
