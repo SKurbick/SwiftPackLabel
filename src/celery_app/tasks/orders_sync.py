@@ -17,7 +17,20 @@ def sync_orders_periodic():
     """
     try:
         logger.info("Запуск периодической синхронизации заказов")
-        result = asyncio.run(_sync_orders_async())
+        
+        # Получаем или создаем event loop для Celery задачи
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Создаем новый event loop если текущий закрыт или отсутствует
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Выполняем асинхронную функцию в текущем loop
+        result = loop.run_until_complete(_sync_orders_async())
+        
         logger.info(f"Периодическая синхронизация завершена: {result}")
         return result
         
@@ -70,33 +83,47 @@ async def _sync_orders_async():
         try:
             logger.info(f"Начинаем batch update {len(all_orders)} заказов в БД")
             from src.models.orders_wb import OrdersDB
-            from src.db import get_celery_orders_db
+            from src.settings import settings
+            import asyncpg
             
-            # Получаем отдельный пул для orders sync задач
-            orders_db = await get_celery_orders_db()
+            # Создаем собственный пул для этой задачи
+            pool = await asyncpg.create_pool(
+                host=settings.db_app_host,
+                port=settings.db_app_port,
+                user=settings.db_app_user,
+                password=settings.db_app_password,
+                database=settings.dp_app_name,
+                min_size=1,
+                max_size=5,
+                command_timeout=60
+            )
             
             # Разделяем на batch по 1000 записей
             batch_size = 1000
             total_batches = (len(all_orders) + batch_size - 1) // batch_size
             processed_orders = 0
             
-            # Используем отдельный пул соединений для orders задач
-            async with orders_db.connection() as connection:
-                for i in range(0, len(all_orders), batch_size):
-                    batch = all_orders[i:i + batch_size]
-                    current_batch = (i // batch_size) + 1
-                    
-                    logger.info(f"Обрабатываем batch {current_batch}/{total_batches}: {len(batch)} заказов")
-                    
-                    # Вызываем метод напрямую с соединением
-                    await OrdersDB._update_orders_with_connection(connection, batch)
-                    processed_orders += len(batch)
-                    
-                    # Добавляем задержку между batch операциями
-                    if current_batch < total_batches:  # Не ждем после последнего batch
-                        await asyncio.sleep(0.1)
-                    
-            logger.info(f"Успешно обновлено {processed_orders} заказов в базе данных ({total_batches} batch)")
+            try:
+                # Используем наш пул соединений
+                async with pool.acquire() as connection:
+                    for i in range(0, len(all_orders), batch_size):
+                        batch = all_orders[i:i + batch_size]
+                        current_batch = (i // batch_size) + 1
+                        
+                        logger.info(f"Обрабатываем batch {current_batch}/{total_batches}: {len(batch)} заказов")
+                        
+                        # Вызываем метод напрямую с соединением
+                        await OrdersDB._update_orders_with_connection(connection, batch)
+                        processed_orders += len(batch)
+                        
+                        # Добавляем задержку между batch операциями
+                        if current_batch < total_batches:  # Не ждем после последнего batch
+                            await asyncio.sleep(0.1)
+                        
+                logger.info(f"Успешно обновлено {processed_orders} заказов в базе данных ({total_batches} batch)")
+            finally:
+                # Обязательно закрываем пул
+                await pool.close()
             
         except Exception as e:
             logger.error(f"Ошибка batch update заказов в БД: {e}")

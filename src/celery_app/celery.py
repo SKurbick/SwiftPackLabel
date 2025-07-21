@@ -32,15 +32,19 @@ def create_celery_app() -> Celery:
         accept_content=['json'],
         result_serializer='json',
         
-        # Настройки воркера
+        # Настройки воркера для работы с asyncio
         worker_prefetch_multiplier=settings.CELERY_WORKER_PREFETCH_MULTIPLIER,
         worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS_PER_CHILD,
+        worker_pool='prefork',  # Используем prefork pool для стабильности
+        worker_concurrency=2,   # Ограничиваем concurrency для избежания конфликтов loop
         
         # Настройки задач
         task_acks_late=True,
         task_reject_on_worker_lost=True,
         task_default_retry_delay=60,
         task_max_retries=3,
+        task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+        task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
         
         # Мониторинг
         worker_send_task_events=True,

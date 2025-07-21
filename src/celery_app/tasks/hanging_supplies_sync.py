@@ -311,7 +311,20 @@ def sync_hanging_supplies_with_data(supplies_data: Dict[str, Dict[str, Any]]) ->
     """
     try:
         logger.info("Запуск фоновой синхронизации висячих поставок с переданными данными")
-        result = asyncio.run(_sync_hanging_supplies_async(supplies_data))
+        
+        # Получаем или создаем event loop для Celery задачи
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Создаем новый event loop если текущий закрыт или отсутствует
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Выполняем асинхронную функцию в текущем loop
+        result = loop.run_until_complete(_sync_hanging_supplies_async(supplies_data))
+        
         logger.info(f"Фоновая синхронизация завершена успешно: {result}")
         return result
         
@@ -331,13 +344,24 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
     Returns:
         Dict[str, Any]: Результат синхронизации
     """
-    from src.db import get_celery_hanging_supplies_db
+    from src.settings import settings
+    import asyncpg
     
+    # Создаем собственный пул для этой задачи
+    pool = None
     try:
-        # Получаем отдельный пул для hanging supplies sync задач
-        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        pool = await asyncpg.create_pool(
+            host=settings.db_app_host,
+            port=settings.db_app_port,
+            user=settings.db_app_user,
+            password=settings.db_app_password,
+            database=settings.dp_app_name,
+            min_size=1,
+            max_size=5,
+            command_timeout=60
+        )
         
-        async with hanging_supplies_db.connection() as connection:
+        async with pool.acquire() as connection:
             hanging_supplies_service = HangingSuppliesService(connection)
             
             # Выполняем синхронизацию с переданными данными
@@ -362,6 +386,10 @@ async def _sync_hanging_supplies_async(supplies_data: Dict[str, Dict[str, Any]])
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
+    finally:
+        # Обязательно закрываем пул
+        if pool:
+            await pool.close()
 
 
 @celery_app.task(name='get_hanging_supplies_statistics')
@@ -374,7 +402,20 @@ def get_hanging_supplies_statistics() -> Dict[str, Any]:
     """
     try:
         logger.info("Запуск получения статистики висячих поставок")
-        result = asyncio.run(_get_statistics_async())
+        
+        # Получаем или создаем event loop для Celery задачи
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Создаем новый event loop если текущий закрыт или отсутствует
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Выполняем асинхронную функцию в текущем loop
+        result = loop.run_until_complete(_get_statistics_async())
+        
         logger.info(f"Статистика получена: {result.get('total_supplies_with_changes', 0)} поставок с изменениями")
         return result
         
@@ -390,13 +431,24 @@ async def _get_statistics_async() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Статистика изменений
     """
-    from src.db import get_celery_hanging_supplies_db
+    from src.settings import settings
+    import asyncpg
     
+    # Создаем собственный пул для этой задачи
+    pool = None
     try:
-        # Получаем отдельный пул для hanging supplies sync задач
-        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        pool = await asyncpg.create_pool(
+            host=settings.db_app_host,
+            port=settings.db_app_port,
+            user=settings.db_app_user,
+            password=settings.db_app_password,
+            database=settings.dp_app_name,
+            min_size=1,
+            max_size=5,
+            command_timeout=60
+        )
         
-        async with hanging_supplies_db.connection() as connection:
+        async with pool.acquire() as connection:
             hanging_supplies_model = HangingSupplies(connection)
             statistics = await hanging_supplies_model.get_changes_statistics()
             
@@ -413,6 +465,10 @@ async def _get_statistics_async() -> Dict[str, Any]:
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
+    finally:
+        # Обязательно закрываем пул
+        if pool:
+            await pool.close()
 
 
 @celery_app.task(name='cleanup_old_changes_log')
@@ -428,7 +484,20 @@ def cleanup_old_changes_log(days_to_keep: int = 30) -> Dict[str, Any]:
     """
     try:
         logger.info(f"Запуск очистки старых записей changes_log (старше {days_to_keep} дней)")
-        result = asyncio.run(_cleanup_old_logs_async(days_to_keep))
+        
+        # Получаем или создаем event loop для Celery задачи
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Создаем новый event loop если текущий закрыт или отсутствует
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Выполняем асинхронную функцию в текущем loop
+        result = loop.run_until_complete(_cleanup_old_logs_async(days_to_keep))
+        
         logger.info(f"Очистка завершена: {result}")
         return result
         
@@ -447,13 +516,24 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Результат очистки
     """
-    from src.db import get_celery_hanging_supplies_db
+    from src.settings import settings
+    import asyncpg
     
+    # Создаем собственный пул для этой задачи
+    pool = None
     try:
-        # Получаем отдельный пул для hanging supplies sync задач
-        hanging_supplies_db = await get_celery_hanging_supplies_db()
+        pool = await asyncpg.create_pool(
+            host=settings.db_app_host,
+            port=settings.db_app_port,
+            user=settings.db_app_user,
+            password=settings.db_app_password,
+            database=settings.dp_app_name,
+            min_size=1,
+            max_size=5,
+            command_timeout=60
+        )
         
-        async with hanging_supplies_db.connection() as connection:
+        async with pool.acquire() as connection:
             hanging_supplies_model = HangingSupplies(connection)
             cleanup_result = await hanging_supplies_model.cleanup_old_changes_log(days_to_keep)
             
@@ -472,3 +552,7 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
             "task_timestamp": datetime.utcnow().isoformat(),
             "error": str(e)
         }
+    finally:
+        # Обязательно закрываем пул
+        if pool:
+            await pool.close()
