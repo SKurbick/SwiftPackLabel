@@ -63,6 +63,6 @@ class ShipmentOfGoods:
             return False
 
     async def filter_wilds(self):
-        query = """SELECT product_id from current_balances"""
+        query = """SELECT id from products"""
         result =  await self.db.fetch(query)
-        return [i['product_id'] for i in result]
+        return [i['id'] for i in result]
