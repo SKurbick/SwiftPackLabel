@@ -162,18 +162,18 @@ class SuppliesService:
             if hanging_only == is_hanging:
                 if hanging_only:
                     supply["is_hanging"] = True
-                    
+
                     # Добавляем количество отгруженных товаров
                     hanging_supply_data = hanging_supplies_map[(supply['supply_id'], supply['account'])]
                     shipped_orders = hanging_supply_data.get('shipped_orders', [])
-                    
+
                     # Десериализуем shipped_orders если это строка JSON
                     if isinstance(shipped_orders, str):
                         try:
                             shipped_orders = json.loads(shipped_orders)
                         except json.JSONDecodeError:
                             shipped_orders = []
-                    
+
                     if shipped_orders and isinstance(shipped_orders, list):
                         # Подсчитываем уникальные ID заказов
                         unique_shipped_ids = set(
@@ -183,7 +183,7 @@ class SuppliesService:
                         supply["shipped_count"] = len(unique_shipped_ids)
                     else:
                         supply["shipped_count"] = 0
-                    
+
                     has_target_wild = any(
                         order.local_vendor_code in target_wilds
                         for order in supply.get('orders', [])
@@ -227,7 +227,7 @@ class SuppliesService:
             supply_orders: Set[int] = {order.order_id for order in supply.orders}
             check_orders: Set[int] = {order.get("id") for order in
                                       result[supply.account][supply.supply_id].get("orders", [])}
-            
+
             if allow_partial:
                 # Для частичной отгрузки: проверяем, что заказы из запроса существуют в поставке
                 missing_orders = supply_orders - check_orders
@@ -500,13 +500,13 @@ class SuppliesService:
         for supply in supplies:
             for order in supply.orders:
                 vendor_codes.add(order.local_vendor_code)
-        
+
         if len(vendor_codes) != 1:
             raise HTTPException(
                 status_code=400,
                 detail=f"Все заказы должны иметь одинаковый local_vendor_code. Найдено: {vendor_codes}"
             )
-        
+
         return vendor_codes.pop()
 
     async def get_hanging_supplies_order_data_optimized(self, supplies: List[SupplyId]) -> Dict[str, dict]:
@@ -528,7 +528,7 @@ class SuppliesService:
                 shipped_orders = json.loads(shipped_orders)
             except json.JSONDecodeError:
                 shipped_orders = []
-        
+
         shipped_order_ids = set()
         if shipped_orders and isinstance(shipped_orders, list):
             for shipped_order in shipped_orders:
@@ -544,14 +544,14 @@ class SuppliesService:
                 # Безопасное получение полей с правильными названиями из БД
                 created_at = order.get("created_at", order.get("createdAt", ""))  # Пробуем оба варианта
                 created_at_ts = 0
-                
+
                 if created_at:
                     try:
                         created_at_ts = datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
                     except (ValueError, AttributeError):
                         logger.warning(f"Не удалось обработать created_at для заказа {order.get('id')}: {created_at}")
                         created_at_ts = 0
-                
+
                 order_data = {
                     "supply_id": supply_id,
                     "account": account,
@@ -563,7 +563,7 @@ class SuppliesService:
                     "price": order.get("price", order.get("convertedPrice", 0))  # Пробуем оба варианта
                 }
                 result.append(order_data)
-        
+
         return result
 
     def _deserialize_order_data(self, order_data_raw: Any, supply_id: str) -> dict:
@@ -593,31 +593,31 @@ class SuppliesService:
             "local_vendor_code": request_order.local_vendor_code  # На всякий случай
         }
 
-    def _process_request_orders(self, request_orders: dict, orders_list: List[dict], 
+    def _process_request_orders(self, request_orders: dict, orders_list: List[dict],
                                shipped_order_ids: set, supply_id: str, account: str) -> Tuple[List[dict], int]:
         """Обрабатывает заказы из запроса."""
         db_orders_map = {order["id"]: order for order in orders_list}
         self._validate_request_orders(request_orders, db_orders_map, supply_id)
-        
+
         filtered_orders = []
         for order_id, request_order in request_orders.items():
             if order_id not in shipped_order_ids:
                 db_order = db_orders_map[order_id]
                 enriched_order = self._enrich_order_with_request_data(db_order, request_order)
                 filtered_orders.append(enriched_order)
-        
+
         available_orders = self._filter_available_orders(filtered_orders, shipped_order_ids, supply_id, account)
         shipped_count = len(request_orders) - len(available_orders)
-        
+
         logger.info(f"Поставка {supply_id}: {len(request_orders)} заказов в запросе, {shipped_count} уже отгружено, {len(available_orders)} доступно")
         return available_orders, shipped_count
 
-    def _process_db_orders(self, orders_list: List[dict], shipped_order_ids: set, 
+    def _process_db_orders(self, orders_list: List[dict], shipped_order_ids: set,
                           supply_id: str, account: str) -> Tuple[List[dict], int]:
         """Обрабатывает заказы только из БД (старая логика)."""
         available_orders = self._filter_available_orders(orders_list, shipped_order_ids, supply_id, account)
         shipped_count = len(orders_list) - len(available_orders)
-        
+
         logger.info(f"Поставка {supply_id}: {len(orders_list)} заказов, {shipped_count} уже отгружено, {len(available_orders)} доступно")
         return available_orders, shipped_count
 
@@ -628,7 +628,7 @@ class SuppliesService:
         shipped_order_ids = self._get_shipped_order_ids(data["shipped_orders"])
         orders_list = order_data["orders"]
         account = data["account"]
-        
+
         # Выбираем стратегию обработки
         if request_orders:
             return self._process_request_orders(request_orders, orders_list, shipped_order_ids, supply_id, account)
@@ -653,12 +653,12 @@ class SuppliesService:
             request_orders_map = {}
             for supply in request_supplies:
                 request_orders_map[supply.supply_id] = {order.order_id: order for order in supply.orders}
-            
+
             for supply_id, data in hanging_data.items():
                 if supply_id not in request_orders_map:
                     logger.warning(f"Поставка {supply_id} не найдена в запросе")
                     continue
-                    
+
                 available_orders, shipped_count = self._process_supply_orders(supply_id, data, request_orders_map[supply_id])
                 all_orders.extend(available_orders)
                 total_shipped += shipped_count
@@ -667,11 +667,11 @@ class SuppliesService:
                 available_orders, shipped_count = self._process_supply_orders(supply_id, data)
                 all_orders.extend(available_orders)
                 total_shipped += shipped_count
-        
+
         # FIFO сортировка: сначала по времени создания, затем по order_id
         all_orders.sort(key=lambda x: (x["created_at_ts"], x["order_id"]))
         logger.info(f"Обработано заказов из {len(hanging_data)} поставок: {total_shipped} уже отгружено, {len(all_orders)} доступно для отгрузки")
-        
+
         return all_orders
 
     def group_selected_orders_by_supply(self, selected_orders: List[dict]) -> Dict[str, List[dict]]:
@@ -683,11 +683,11 @@ class SuppliesService:
             Dict[str, List[dict]]: Заказы, сгруппированные по supply_id
         """
         grouped = defaultdict(list)
-        
+
         for order in selected_orders:
             supply_id = order["supply_id"]
             grouped[supply_id].append(order)
-        
+
         logger.info(f"Заказы сгруппированы по {len(grouped)} поставкам")
         return dict(grouped)
 
@@ -718,7 +718,7 @@ class SuppliesService:
             SET shipped_orders = shipped_orders || $2::jsonb
             WHERE supply_id = $1
         """
-        
+
         try:
             for supply_id, shipped_data in update_data:
                 await self.db.execute(query, supply_id, shipped_data)
@@ -742,13 +742,13 @@ class SuppliesService:
         """Группирует заказы по поставкам и создает маппинг заказов."""
         supply_orders = defaultdict(lambda: {"order_ids": [], "account": None})
         order_wild_map = {}
-        
+
         for order in selected_orders:
             supply_id = order["supply_id"]
             supply_orders[supply_id]["order_ids"].append(order["order_id"])
             supply_orders[supply_id]["account"] = order["account"]
             order_wild_map[str(order["order_id"])] = order["article"]
-        
+
         return dict(supply_orders), order_wild_map
 
     def _build_delivery_supplies(self, supply_orders: Dict[str, dict]) -> List[DeliverySupplyInfo]:
@@ -772,20 +772,20 @@ class SuppliesService:
         """
         supply_orders, order_wild_map = self._group_orders_by_supply(selected_orders)
         delivery_supplies = self._build_delivery_supplies(supply_orders)
-        
+
         logger.info(f"Подготовлено {len(delivery_supplies)} поставок для доставки")
         return delivery_supplies, order_wild_map
 
     def _build_supplies_list(self, grouped_orders: Dict[str, List[dict]]) -> List[SupplyId]:
         """Создает список поставок для генерации QR-кодов."""
         supplies_list = []
-        
+
         for supply_id, orders in grouped_orders.items():
             if not orders:
                 continue
 
             account = orders[0]["account"]
-            
+
             orders_list = [
                 OrderSchema(
                     order_id=order["order_id"],
@@ -794,7 +794,7 @@ class SuppliesService:
                 )
                 for order in orders
             ]
-            
+
             supplies_list.append(
                 SupplyId(
                     name="Тестовая поставка",
@@ -810,7 +810,7 @@ class SuppliesService:
     async def _generate_stickers(self, supplies_list: List[SupplyId]) -> Dict[str, Any]:
         """Генерирует стикеры для списка поставок с частичной проверкой."""
         supply_ids_body = SupplyIdBodySchema(supplies=supplies_list)
-        
+
         try:
             # Для частичной отгрузки используем allow_partial=True
             await self.check_current_orders(supply_ids_body, allow_partial=True)
@@ -832,60 +832,60 @@ class SuppliesService:
             Dict[str, Any]: Сгруппированные данные со стикерами для печати
         """
         supplies_list = self._build_supplies_list(grouped_orders)
-        
+
         if not supplies_list:
             logger.warning("Нет данных для генерации QR-кодов")
             return {}
-        
+
         return await self._generate_stickers(supplies_list)
 
     async def _validate_and_get_data(self, supply_data: SupplyIdWithShippedBodySchema) -> Tuple[str, List[dict]]:
         """Валидирует входные данные и получает доступные заказы из БД."""
         target_article = self.validate_unique_vendor_code(supply_data.supplies)
         logger.info(f"Валидация пройдена, артикул: {target_article}")
-        
+
         hanging_data = await self.get_hanging_supplies_order_data_optimized(supply_data.supplies)
         if not hanging_data:
             raise HTTPException(status_code=404, detail="Не найдено данных о висячих поставках")
-        
+
         all_orders = self.extract_available_orders(hanging_data, supply_data.supplies)
         if len(all_orders) < supply_data.shipped_count:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Недостаточно доступных заказов для отгрузки. Доступно: {len(all_orders)}, запрошено: {supply_data.shipped_count}"
             )
-        
+
         return target_article, all_orders
 
     def _select_and_group_orders(self, all_orders: List[dict], shipped_count: int) -> Tuple[List[dict], Dict[str, List[dict]]]:
         """Выбирает N заказов и группирует их по поставкам."""
         selected_orders = all_orders[:shipped_count]
         logger.info(f"Отобрано {len(selected_orders)} заказов для отгрузки")
-        
+
         grouped_orders = self.group_selected_orders_by_supply(selected_orders)
         return selected_orders, grouped_orders
 
-    async def _process_shipment(self, grouped_orders: Dict[str, List[dict]], 
-                               delivery_supplies: List[DeliverySupplyInfo], 
-                               order_wild_map: Dict[str, str], 
+    async def _process_shipment(self, grouped_orders: Dict[str, List[dict]],
+                               delivery_supplies: List[DeliverySupplyInfo],
+                               order_wild_map: Dict[str, str],
                                user: dict) -> Tuple[Dict, bool]:
         """Обрабатывает интеграцию с 1C и сохранение отгрузок."""
         await self.update_hanging_supplies_shipped_orders_batch(grouped_orders)
-        
+
         integration = OneCIntegration()
         integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
         integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
-        
+
         if not integration_success:
             logger.error(f"Ошибка интеграции с 1C: {integration_result}")
-        
+
         shipment_result = await self.save_shipments(delivery_supplies, order_wild_map, user.get('username', 'unknown'))
-        
+
         return integration_result, integration_success and shipment_result
 
-    def _build_response(self, selected_orders: List[dict], grouped_orders: Dict[str, List[dict]], 
-                       target_article: str, shipped_count: int, user: dict, 
-                       qr_codes: Dict[str, Any], integration_result: Dict, success: bool) -> Dict[str, Any]:
+    def _build_response(self, selected_orders: List[dict], grouped_orders: Dict[str, List[dict]],
+                       target_article: str, shipped_count: int, user: dict,
+                       qr_codes: List[Any], integration_result: Dict, success: bool) -> Dict[str, Any]:
         """Формирует итоговый ответ."""
         return {
             "success": success,
@@ -900,7 +900,7 @@ class SuppliesService:
             "shipment_result": success
         }
 
-    async def shipment_hanging_actual_quantity_implementation(self, 
+    async def shipment_hanging_actual_quantity_implementation(self,
                                                              supply_data: SupplyIdWithShippedBodySchema,
                                                              user: dict) -> Dict[str, Any]:
         """
@@ -912,21 +912,21 @@ class SuppliesService:
             Dict[str, Any]: Результат операции со статистикой и QR-кодами
         """
         logger.info(f"Начало обработки отгрузки фактического количества: {supply_data.shipped_count} заказов")
-        
+
         try:
             target_article, all_orders = await self._validate_and_get_data(supply_data)
             selected_orders, grouped_orders = self._select_and_group_orders(all_orders, supply_data.shipped_count)
             delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(selected_orders)
-            
+
             integration_result, success = await self._process_shipment(grouped_orders, delivery_supplies, order_wild_map, user)
             qr_codes = await self.generate_qr_codes_for_selected_orders(grouped_orders)
-            
-            response_data = self._build_response(selected_orders, grouped_orders, target_article, 
-                                               supply_data.shipped_count, user, qr_codes, integration_result, success)
-            
+            all_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
+            response_data = self._build_response(selected_orders, grouped_orders, target_article,
+                                               supply_data.shipped_count, user, all_files, integration_result, success)
+
             logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов")
             return response_data
-            
+
         except HTTPException:
             raise
         except Exception as e:
