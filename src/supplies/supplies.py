@@ -912,11 +912,11 @@ class SuppliesService:
         }
 
     @staticmethod
-    def _get_images(qr_codes: Dict[str, Any]) -> bytes:
+    def _get_images(qr_codes: Dict[str, Any]) -> str:
         """Простое вертикальное объединение QR-кодов."""
         individual_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
         if not individual_files:
-            return b""
+            return ""
         
         try:
             # Конвертируем все в байты
@@ -945,10 +945,11 @@ class SuppliesService:
                 y_position = i * height
                 combined.paste(img, (0, y_position))
             
-            # Сохраняем в байты
+            # Сохраняем в байты и конвертируем в base64
             output = io.BytesIO()
             combined.save(output, format='PNG')
-            result = output.getvalue()
+            result_bytes = output.getvalue()
+            result_base64 = base64.b64encode(result_bytes).decode('utf-8')
             
             # Очищаем память
             for img in images:
@@ -956,11 +957,11 @@ class SuppliesService:
             combined.close()
             output.close()
             
-            return result
+            return result_base64
             
         except Exception as e:
             logger.error(f"Ошибка объединения QR-кодов: {e}")
-            return b""
+            return ""
 
     async def shipment_hanging_actual_quantity_implementation(self,
                                                               supply_data: SupplyIdWithShippedBodySchema,
