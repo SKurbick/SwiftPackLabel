@@ -911,7 +911,16 @@ class SuppliesService:
     @staticmethod
     def _get_images(qr_codes: Dict[str, Any]):
         individual_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
-        combined_file_data = b"".join(individual_files) if individual_files else b""
+        if not individual_files:
+            return []
+        
+        # Если это строки (base64), объединяем как строки
+        if isinstance(individual_files[0], str):
+            combined_file_data = "".join(individual_files)
+            return [combined_file_data]
+        
+        # Если это байты, объединяем как байты  
+        combined_file_data = b"".join(individual_files)
         return [combined_file_data] if combined_file_data else []
 
     async def shipment_hanging_actual_quantity_implementation(self,
