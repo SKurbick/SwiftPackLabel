@@ -21,25 +21,42 @@ class Orders(Account):
         return parse_json(response)
 
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
+        logger.info(f"Начинаем получение стикеров для поставки {supply}, аккаунт {self.account}, заказов: {len(order_ids)}")
+        logger.debug(f"ID заказов: {order_ids}")
+        
         url_with_params = f"{self.url}/stickers?type=png&width=58&height=40"
         batches = [order_ids[i:i + 99] for i in range(0, len(order_ids), 99)]
+        logger.info(f"Разделено на {len(batches)} батчей по 99 заказов")
 
         sticker_batches = await asyncio.gather(
             *[self.async_client.post(url_with_params, headers=self.headers, data=json.dumps({"orders": batch}))
               for batch in batches])
+        
+        logger.info(f"Получены ответы от {len(sticker_batches)} батчей")
 
         result = {}
-        for response in sticker_batches:
+        for i, response in enumerate(sticker_batches):
             if not response:
+                logger.warning(f"Пустой ответ от батча {i+1}")
                 continue
 
-            response_json = parse_json(response)
+            try:
+                response_json = parse_json(response)
+                logger.debug(f"Батч {i+1}: получено стикеров - {len(response_json.get('stickers', []))}")
+            except Exception as e:
+                logger.error(f"Ошибка при парсинге ответа батча {i+1}: {str(e)}")
+                logger.error(f"Сырой ответ: {response}")
+                continue
 
             if not result:
                 result = {self.account: {supply: response_json}}
+                logger.debug(f"Инициализирован результат для аккаунта {self.account}, поставки {supply}")
             else:
                 result[self.account][supply]['stickers'].extend(response_json['stickers'])
+                logger.debug(f"Добавлено {len(response_json['stickers'])} стикеров к существующему результату")
 
+        total_stickers = len(result.get(self.account, {}).get(supply, {}).get('stickers', []))
+        logger.info(f"Завершено получение стикеров. Итого стикеров: {total_stickers}")
         return result
 
     async def get_new_orders(self):
