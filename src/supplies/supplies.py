@@ -1,8 +1,11 @@
 import asyncio
 import json
+import base64
+import io
 from typing import List, Dict, Any, Set, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
+from PIL import Image
 
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -909,18 +912,55 @@ class SuppliesService:
         }
 
     @staticmethod
-    def _get_images(qr_codes: Dict[str, Any]):
+    def _get_images(qr_codes: Dict[str, Any]) -> bytes:
+        """Простое вертикальное объединение QR-кодов."""
         individual_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
         if not individual_files:
-            return ""
+            return b""
         
-        # Если это строки (base64), объединяем как строки
-        if isinstance(individual_files[0], str):
-            return "".join(individual_files)
-        
-        # Если это байты, объединяем как байты  
-        combined_file_data = b"".join(individual_files)
-        return combined_file_data if combined_file_data else b""
+        try:
+            # Конвертируем все в байты
+            image_bytes = []
+            for img_data in individual_files:
+                if isinstance(img_data, str):
+                    # base64 строка - декодируем
+                    image_bytes.append(base64.b64decode(img_data))
+                else:
+                    # уже байты
+                    image_bytes.append(img_data)
+            
+            # Открываем изображения
+            images = [Image.open(io.BytesIO(img_byte)) for img_byte in image_bytes]
+            
+            # Размеры (предполагаем что все изображения одинакового размера)
+            width = images[0].width
+            height = images[0].height
+            
+            # Создаем объединенное изображение
+            total_height = height * len(images)
+            combined = Image.new('RGB', (width, total_height), 'white')
+            
+            # Размещаем изображения друг за другом вертикально
+            for i, img in enumerate(images):
+                y_position = i * height
+                combined.paste(img, (0, y_position))
+            
+            # Сохраняем в байты
+            output = io.BytesIO()
+            combined.save(output, format='PNG')
+            result = output.getvalue()
+            
+            # Очищаем память
+            for img in images:
+                img.close()
+            combined.close()
+            output.close()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка объединения QR-кодов: {e}")
+            return b""
 
     async def shipment_hanging_actual_quantity_implementation(self,
                                                               supply_data: SupplyIdWithShippedBodySchema,
