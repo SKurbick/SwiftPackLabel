@@ -913,7 +913,7 @@ class SuppliesService:
 
     @staticmethod
     def _get_images(qr_codes: Dict[str, Any]) -> str:
-        """Простое вертикальное объединение QR-кодов."""
+        """Вертикальное объединение QR-кодов с разделителем 5мм."""
         individual_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
         if not individual_files:
             return ""
@@ -936,14 +936,22 @@ class SuppliesService:
             width = images[0].width
             height = images[0].height
             
-            # Создаем объединенное изображение
-            total_height = height * len(images)
+            # Конвертируем 5мм в пиксели (используем стандартное разрешение 72 DPI)
+            # 5мм = 5 * 72 / 25.4 ≈ 14.17 пикселей
+            separator_height = int(5 * 72 / 25.4)
+            
+            # Создаем объединенное изображение с учетом разделителей
+            total_height = height * len(images) + separator_height * (len(images) - 1)
             combined = Image.new('RGB', (width, total_height), 'white')
             
-            # Размещаем изображения друг за другом вертикально
+            # Размещаем изображения друг за другом вертикально с разделителями
+            current_y = 0
             for i, img in enumerate(images):
-                y_position = i * height
-                combined.paste(img, (0, y_position))
+                combined.paste(img, (0, current_y))
+                current_y += height
+                # Добавляем разделитель после каждого изображения кроме последнего
+                if i < len(images) - 1:
+                    current_y += separator_height
             
             # Сохраняем в байты и конвертируем в base64
             output = io.BytesIO()
