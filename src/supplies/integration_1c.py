@@ -63,7 +63,7 @@ class OneCIntegration:
                 if supply_info.account not in result_structure:
                     result_structure[supply_info.account] = {
                         "data": [],
-                        "wild_supply_orders": {}
+                        "supply_wild_orders": {}
                     }
             accounts_orders[supply_info.account].extend(supply_info.order_ids)
 
@@ -123,27 +123,27 @@ class OneCIntegration:
         return order_data
 
     @staticmethod
-    def find_or_create_supply_item(wild_supply_orders: Dict, wild_code: str, supply_id: str) -> Dict[str, Any]:
+    def find_or_create_wild_item(supply_wild_orders: Dict, supply_id: str, wild_code: str) -> Dict[str, Any]:
         """
-        Находит или создает элемент поставки в структуре данных.
+        Находит или создает элемент wild в структуре данных поставки.
         Args:
-            wild_supply_orders: Структура wild_supply_orders для аккаунта
-            wild_code: Код wild
+            supply_wild_orders: Структура supply_wild_orders для аккаунта
             supply_id: ID поставки
+            wild_code: Код wild
         Returns:
-            Dict[str, Any]: Элемент поставки (существующий или новый)
+            Dict[str, Any]: Элемент wild (существующий или новый)
         """
 
-        if wild_code not in wild_supply_orders:
-            wild_supply_orders[wild_code] = {"wild_code": wild_code, "supplies": []}
+        if supply_id not in supply_wild_orders:
+            supply_wild_orders[supply_id] = {"supply_id": supply_id, "wilds": []}
 
-        for supply_item in wild_supply_orders[wild_code]["supplies"]:
-            if supply_item.get("supply_id") == supply_id:
-                return supply_item
+        for wild_item in supply_wild_orders[supply_id]["wilds"]:
+            if wild_item.get("wild_code") == wild_code:
+                return wild_item
 
-        supply_item = {"supply_id": supply_id, "orders": []}
-        wild_supply_orders[wild_code]["supplies"].append(supply_item)
-        return supply_item
+        wild_item = {"wild_code": wild_code, "orders": []}
+        supply_wild_orders[supply_id]["wilds"].append(wild_item)
+        return wild_item
 
     async def process_account_orders(
             self,
@@ -181,40 +181,40 @@ class OneCIntegration:
 
             order_data = self.create_order_data(order)
 
-            wild_supply_orders = result_structure[account]["wild_supply_orders"]
+            supply_wild_orders = result_structure[account]["supply_wild_orders"]
 
-            supply_item = self.find_or_create_supply_item(
-                wild_supply_orders, wild_code, supply_id
+            wild_item = self.find_or_create_wild_item(
+                supply_wild_orders, supply_id, wild_code
             )
 
-            supply_item["orders"].append(order_data)
+            wild_item["orders"].append(order_data)
 
     @staticmethod
-    def format_wild_item(wild_code: str, supplies: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def format_supply_item(supply_id: str, wilds: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Форматирует данные о wild-коде в итоговую структуру.
+        Форматирует данные о поставке в итоговую структуру.
         Args:
-            wild_code: Код wild
-            supplies: Список поставок для данного wild-кода
+            supply_id: ID поставки
+            wilds: Список wild-кодов для данной поставки
         Returns:
-            Dict[str, Any]: Структурированные данные о wild-коде
+            Dict[str, Any]: Структурированные данные о поставке
         """
-        wild_item = {"wild_code": wild_code, "supplies": []}
+        supply_item = {"supply_id": supply_id, "wilds": []}
 
-        for supply_item in supplies:
-            supply_id = supply_item.get("supply_id")
-            orders = supply_item.get("orders", [])
+        for wild_item in wilds:
+            wild_code = wild_item.get("wild_code")
+            orders = wild_item.get("orders", [])
 
-            supply_data = {"supply_id": supply_id, "orders": [
+            wild_data = {"wild_code": wild_code, "orders": [
                 {
                     "order_id": str(order.get("id")),
                     "price": float(order.get("price", 0)),
                     "nm_id": order.get("nmId"),
                     "count": 1
                 } for order in orders]}
-            wild_item["supplies"].append(supply_data)
+            supply_item["wilds"].append(wild_data)
 
-        return wild_item
+        return supply_item
 
     def format_account_data(self, account: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -225,17 +225,17 @@ class OneCIntegration:
         Returns:
             Optional[Dict[str, Any]]: Структурированные данные аккаунта
         """
-        if "wild_supply_orders" not in data or not data["wild_supply_orders"]:
+        if "supply_wild_orders" not in data or not data["supply_wild_orders"]:
             return None
 
         account_data = {"account": account, "inn": account_inn_map.get(account, ""), "data": []}
 
-        for wild_code, wild_data in data["wild_supply_orders"].items():
-            if "supplies" not in wild_data or not wild_data["supplies"]:
+        for supply_id, supply_data in data["supply_wild_orders"].items():
+            if "wilds" not in supply_data or not supply_data["wilds"]:
                 continue
 
-            wild_item = self.format_wild_item(wild_code, wild_data["supplies"])
-            account_data["data"].append(wild_item)
+            supply_item = self.format_supply_item(supply_id, supply_data["wilds"])
+            account_data["data"].append(supply_item)
 
         return account_data if account_data["data"] else None
 
@@ -310,8 +310,8 @@ class OneCIntegration:
                 ) for account, order_ids in accounts_orders.items()
             ]
             await asyncio.gather(*tasks)
-            # result =  await self.send_to_1c(self.build_final_structure(result_structure))
-            result = False
+            result =  await self.send_to_1c(self.build_final_structure(result_structure))
+            # result = False
             return result
 
         except Exception as e:
