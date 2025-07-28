@@ -975,29 +975,58 @@ class SuppliesService:
                                                               supply_data: SupplyIdWithShippedBodySchema,
                                                               user: dict) -> Dict[str, Any]:
         """
-        Оптимизированная отгрузка фактического количества из висячих поставок.
+        Отгрузка фактического количества из висячих поставок с созданием новых поставок.
         Args:
             supply_data: Данные о поставках с количеством для отгрузки
             user: Данные пользователя
         Returns:
-            Dict[str, Any]: Результат операции со статистикой и QR-кодами
+            Dict[str, Any]: Результат операции со статистикой
         """
         logger.info(f"Начало обработки отгрузки фактического количества: {supply_data.shipped_count} заказов")
 
         try:
             target_article, all_orders = await self._validate_and_get_data(supply_data)
             selected_orders, grouped_orders = self._select_and_group_orders(all_orders, supply_data.shipped_count)
-            delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(selected_orders)
-
-            integration_result, success = await self._process_shipment(grouped_orders, delivery_supplies,
+            
+            # 1. Создаем новые поставки и перемещаем заказы
+            new_supplies_map = await self._create_and_transfer_orders(selected_orders, target_article, user)
+            
+            # 2. Переводим новые поставки в статус доставки
+            await self._deliver_new_supplies(new_supplies_map)
+            
+            # 3. Обновляем данные заказов с новыми supply_id
+            updated_selected_orders = self._update_orders_with_new_supplies(selected_orders, new_supplies_map)
+            updated_grouped_orders = self.group_selected_orders_by_supply(updated_selected_orders)
+            
+            # 4. Подготавливаем данные для 1C и shipment_goods
+            delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_selected_orders)
+            
+            # 5. Обновляем БД висячих поставок
+            # await self.update_hanging_supplies_shipped_orders_batch(grouped_orders)
+            
+            # 6. Отправляем в 1C и shipment_goods
+            integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
                                                                        order_wild_map, user)
-            qr_codes = await self.generate_qr_codes_for_selected_orders(grouped_orders)
-            all_files = self._get_images(qr_codes)
-            response_data = self._build_response(selected_orders, grouped_orders, target_article,
-                                                 supply_data.shipped_count, user, all_files, integration_result,
-                                                 success)
+            
+            # 7. Генерируем PDF со стикерами для новых поставок
+            pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article, updated_selected_orders)
+            
+            response_data = {
+                "success": success,
+                "message": "Отгрузка фактического количества выполнена успешно" if success else "Операция выполнена с ошибками",
+                "processed_orders": len(updated_selected_orders),
+                "processed_supplies": len(updated_grouped_orders),
+                "target_article": target_article,
+                "shipped_count": supply_data.shipped_count,
+                "operator": user.get('username', 'unknown'),
+                "qr_codes": pdf_stickers,
+                "integration_result": integration_result,
+                "shipment_result": success,
+                "new_supplies": list(new_supplies_map.values())
+            }
 
-            logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов")
+            logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов, "
+                       f"создано {len(new_supplies_map)} новых поставок")
             return response_data
 
         except HTTPException:
@@ -1005,3 +1034,148 @@ class SuppliesService:
         except Exception as e:
             logger.error(f"Неожиданная ошибка при отгрузке фактического количества: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+
+    async def _create_and_transfer_orders(self, selected_orders: List[dict], target_article: str, user: dict) -> Dict[str, str]:
+        """
+        Создает новые поставки и перемещает в них заказы.
+        Возвращает маппинг account -> new_supply_id
+        """
+        logger.info(f"Создание новых поставок для артикула {target_article}")
+        
+        # Группируем заказы по аккаунтам
+        orders_by_account = defaultdict(list)
+        for order in selected_orders:
+            account = order["account"]
+            orders_by_account[account].append(order)
+        
+        new_supplies_map = {}
+        wb_tokens = get_wb_tokens()
+        
+        for account, orders in orders_by_account.items():
+            # Создаем имя поставки
+            timestamp = datetime.now().strftime("%d.%m.%Y_%H:%M")
+            supply_name = f"Факт_{target_article}_{timestamp}_{user.get('username', 'auto')}"
+            
+            logger.info(f"Создание поставки '{supply_name}' для аккаунта {account} с {len(orders)} заказами")
+            
+            # Создаем поставку
+            supplies_api = Supplies(account, wb_tokens[account])
+            create_response = await supplies_api.create_supply(supply_name)
+            
+            if create_response.get("errors"):
+                raise HTTPException(status_code=500, detail=f"Ошибка создания поставки для {account}: {create_response['errors']}")
+                
+            new_supply_id = create_response.get("id")
+            if not new_supply_id:
+                raise HTTPException(status_code=500, detail=f"Не получен ID новой поставки для аккаунта {account}")
+            
+            logger.info(f"Создана поставка {new_supply_id} для аккаунта {account}")
+            
+            # Перемещаем заказы
+            for order in orders:
+                order_id = order["order_id"]
+                transfer_response = await supplies_api.add_order_to_supply(new_supply_id, order_id)
+
+                logger.debug(f"Заказ {order_id} перемещен в поставку {new_supply_id}")
+            
+            new_supplies_map[account] = new_supply_id
+        
+        return new_supplies_map
+
+    async def _deliver_new_supplies(self, new_supplies_map: Dict[str, str]):
+        """
+        Переводит новые поставки в статус доставки.
+        """
+        logger.info(f"Перевод {len(new_supplies_map)} новых поставок в статус доставки")
+        
+        wb_tokens = get_wb_tokens()
+        
+        for account, supply_id in new_supplies_map.items():
+            supplies_api = Supplies(account, wb_tokens[account])
+            await supplies_api.deliver_supply(supply_id)
+            
+            logger.info(f"Поставка {supply_id} переведена в статус доставки")
+
+    def _update_orders_with_new_supplies(self, selected_orders: List[dict], new_supplies_map: Dict[str, str]) -> List[dict]:
+        """
+        Обновляет заказы с новыми supply_id.
+        """
+        updated_orders = []
+        
+        for order in selected_orders:
+            account = order["account"]
+            if account in new_supplies_map:
+                updated_order = order.copy()
+                updated_order["supply_id"] = new_supplies_map[account]
+                updated_orders.append(updated_order)
+            else:
+                updated_orders.append(order)  # Fallback
+        
+        return updated_orders
+
+    async def _generate_pdf_stickers_for_new_supplies(self, new_supplies_map: Dict[str, str], target_article: str, 
+                                                     updated_selected_orders: List[dict]) -> str:
+        """
+        Генерирует PDF со стикерами для новых поставок, переиспользуя логику из роутера.
+        
+        Args:
+            new_supplies_map: Маппинг account -> new_supply_id
+            target_article: Артикул (wild) для всех заказов
+            updated_selected_orders: Обновленные заказы с новыми supply_id
+            
+        Returns:
+            str: Base64 строка PDF файла со стикерами
+        """
+        logger.info(f'Генерация PDF стикеров для новых поставок с артикулом: {target_article}')
+        
+        # Группируем заказы по новым поставкам
+        supplies_data = defaultdict(list)
+        for order in updated_selected_orders:
+            supply_id = order["supply_id"]
+            account = order["account"]
+            
+            # Проверяем, что это новая поставка
+            if account in new_supplies_map and new_supplies_map[account] == supply_id:
+                supplies_data[supply_id].append({
+                    "account": account,
+                    "order_id": order["order_id"]
+                })
+        
+        if not supplies_data:
+            logger.warning("Нет данных для генерации PDF стикеров новых поставок")
+            return ""
+        
+        # Подготавливаем данные в формате WildFilterRequest
+        from src.supplies.schema import WildFilterRequest, WildSupplyItem, WildOrderItem
+        
+        wild_supply_items = []
+        for supply_id, orders in supplies_data.items():
+            if orders:
+                account = orders[0]["account"]
+                wild_supply_items.append(
+                    WildSupplyItem(
+                        account=account,
+                        supply_id=supply_id,
+                        orders=[WildOrderItem(order_id=order["order_id"]) for order in orders]
+                    )
+                )
+        
+        wild_filter = WildFilterRequest(
+            wild=target_article,
+            supplies=wild_supply_items
+        )
+        
+        # Переиспользуем точно ту же логику что и в роутере generate_stickers_by_wild
+        logger.info(f"Генерация PDF стикеров для {len(wild_supply_items)} новых поставок")
+        result_stickers = await self.filter_and_fetch_stickers_by_wild(wild_filter)
+        
+        # Импортируем функцию для создания PDF
+        from src.service.service_pdf import collect_images_sticker_to_pdf
+        pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
+        
+        # Конвертируем PDF в base64 для передачи
+        import base64
+        pdf_base64 = base64.b64encode(pdf_sticker.getvalue()).decode('utf-8')
+        
+        logger.info(f"PDF стикеры сгенерированы успешно для артикула {target_article}")
+        return pdf_base64

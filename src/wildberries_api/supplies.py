@@ -81,8 +81,8 @@ class Supplies(Account):
         :return: Ответ от WB API
         """
         response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
-        logger.info(f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response.status_code}")
-        return response.status_code
+        logger.info(f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response}")
+        return response
 
 
 

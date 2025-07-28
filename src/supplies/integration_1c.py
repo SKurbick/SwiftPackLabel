@@ -310,10 +310,7 @@ class OneCIntegration:
                 ) for account, order_ids in accounts_orders.items()
             ]
             await asyncio.gather(*tasks)
-            # result =  await self.send_to_1c(self.build_final_structure(result_structure))
-            result = False
-            return result
-
+            return await self.send_to_1c(self.build_final_structure(result_structure))
         except Exception as e:
             logger.error(f"Ошибка при форматировании данных для 1C: {str(e)}")
             raise
