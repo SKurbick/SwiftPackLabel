@@ -1001,14 +1001,17 @@ class SuppliesService:
             # 4. Подготавливаем данные для 1C и shipment_goods
             delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_selected_orders)
             
-            # 5. Обновляем БД висячих поставок
-            # await self.update_hanging_supplies_shipped_orders_batch(grouped_orders)
+            # 5. Обновляем висячие поставки и получаем product_reserves_id
+            shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders)
             
-            # 6. Отправляем в 1C и shipment_goods
+            # 6. Отправляем данные в shipment API с product_reserves_id
+            await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response)
+            
+            # 7. Отправляем в 1C и shipment_goods
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
                                                                        order_wild_map, user)
             
-            # 7. Генерируем PDF со стикерами для новых поставок
+            # 8. Генерируем PDF со стикерами для новых поставок
             pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article, updated_selected_orders)
             
             response_data = {
@@ -1098,7 +1101,7 @@ class SuppliesService:
 
     def _update_orders_with_new_supplies(self, selected_orders: List[dict], new_supplies_map: Dict[str, str]) -> List[dict]:
         """
-        Обновляет заказы с новыми supply_id.
+        Обновляет заказы с новыми supply_id и сохраняет исходную висячую поставку.
         """
         updated_orders = []
         
@@ -1106,12 +1109,253 @@ class SuppliesService:
             account = order["account"]
             if account in new_supplies_map:
                 updated_order = order.copy()
+                # Сохраняем исходную висячую поставку перед заменой
+                updated_order["original_hanging_supply_id"] = updated_order.get("supply_id")
+                # Обновляем supply_id на новую поставку
                 updated_order["supply_id"] = new_supplies_map[account]
                 updated_orders.append(updated_order)
             else:
                 updated_orders.append(order)  # Fallback
         
         return updated_orders
+
+    async def _update_hanging_supplies_shipped_quantities(self, grouped_orders: Dict[str, List[dict]]) -> List[Dict[str, Any]]:
+        """
+        Отправляет данные об отгруженных количествах для висячих поставок в API add_shipped_goods.
+        
+        Args:
+            grouped_orders: Заказы, сгруппированные по исходным висячим поставкам
+            
+        Returns:
+            List[Dict[str, Any]]: Ответ от API с product_reserves_id для каждой поставки
+        """
+        logger.info(f"Отправка данных об отгруженных количествах для {len(grouped_orders)} висячих поставок")
+        
+        shipped_goods_data = self._prepare_shipped_goods_data(grouped_orders)
+        
+        if not shipped_goods_data:
+            logger.warning("Нет данных для отправки в API add_shipped_goods")
+            return []
+        
+        return await self._send_shipped_goods_to_api(shipped_goods_data)
+    
+    def _prepare_shipped_goods_data(self, grouped_orders: Dict[str, List[dict]]) -> List[Dict[str, Any]]:
+        """
+        Подготавливает данные об отгруженных количествах для API.
+        
+        Args:
+            grouped_orders: Заказы, сгруппированные по исходным висячим поставкам
+            
+        Returns:
+            List[Dict[str, Any]]: Подготовленные данные для API
+        """
+        shipped_goods_data = []
+        
+        for supply_id, orders in grouped_orders.items():
+            if not orders:
+                continue
+                
+            quantity_shipped = len(orders)
+            
+            shipped_goods_item = {
+                "supply_id": supply_id,
+                "quantity_shipped": quantity_shipped
+            }
+            
+            shipped_goods_data.append(shipped_goods_item)
+            logger.debug(f"Подготовлены данные для поставки {supply_id}: отгружено {quantity_shipped} заказов")
+        
+        return shipped_goods_data
+    
+    async def _send_shipped_goods_to_api(self, shipped_goods_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Отправляет данные об отгруженных количествах в API.
+        
+        Args:
+            shipped_goods_data: Подготовленные данные для отправки в API
+            
+        Returns:
+            List[Dict[str, Any]]: Ответ от API с product_reserves_id для каждой поставки
+        """
+        try:
+            api_url = settings.SHIPPED_GOODS_API_URL
+
+            logger.info(f"Отправка запроса на URL: {api_url}")
+            logger.debug(f"Данные для отправки: {json.dumps(shipped_goods_data, ensure_ascii=False, indent=2)}")
+
+
+
+            response = await self.async_client.post(
+                url=api_url,
+                json=shipped_goods_data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response:
+                logger.info(f"Успешная отправка данных об отгруженных количествах. Ответ: {response}")
+                # Ожидаем ответ в формате: [{"supply_id": "string", "product_reserves_id": 0}]
+                try:
+                    response_data = json.loads(response) if isinstance(response, str) else response
+                    if isinstance(response_data, list):
+                        return response_data
+                    logger.error(f"Неожиданный формат ответа от API add_shipped_goods: {response_data}")
+                    return []
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.error(f"Ошибка парсинга ответа от API add_shipped_goods: {e}")
+                    return []
+            else:
+                logger.error("Получен пустой ответ от API add_shipped_goods")
+                return []
+
+        except Exception as e:
+            logger.error(f"Ошибка при отправке данных об отгруженных количествах: {str(e)}")
+            # Не пробрасываем исключение, так как это не критично для основного процесса
+            return []
+
+    async def _send_enhanced_shipment_data(self, updated_selected_orders: List[dict], 
+                                         shipped_goods_response: List[Dict[str, Any]]) -> None:
+        """
+        Отправляет данные об отгрузке в API с добавлением product_reserves_id из ответа shipped_goods API.
+        
+        Args:
+            updated_selected_orders: Обновленные заказы с новыми supply_id
+            shipped_goods_response: Ответ от API add_shipped_goods с product_reserves_id
+        """
+        logger.info(f"Отправка расширенных данных об отгрузке для {len(updated_selected_orders)} заказов")
+        
+        reserves_mapping = self._create_reserves_mapping(shipped_goods_response)
+        delivery_supplies, order_wild_map = self._prepare_delivery_data(updated_selected_orders)
+        shipment_data = await self._get_base_shipment_data(delivery_supplies, order_wild_map)
+        enhanced_shipment_data = self._enhance_with_reserves(shipment_data, updated_selected_orders, reserves_mapping)
+        await self._filter_and_send_shipment_data(enhanced_shipment_data)
+    
+    def _create_reserves_mapping(self, shipped_goods_response: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Создает маппинг supply_id -> product_reserves_id из ответа shipped_goods API.
+        
+        Args:
+            shipped_goods_response: Ответ от API add_shipped_goods
+            
+        Returns:
+            Dict[str, int]: Маппинг supply_id -> product_reserves_id
+        """
+        reserves_mapping = {}
+        for item in shipped_goods_response:
+            if isinstance(item, dict) and 'supply_id' in item and 'product_reserves_id' in item:
+                reserves_mapping[item['supply_id']] = item['product_reserves_id']
+        
+        logger.debug(f"Маппинг резервов: {reserves_mapping}")
+        return reserves_mapping
+    
+    def _prepare_delivery_data(self, updated_selected_orders: List[dict]) -> Tuple[List, Dict[str, str]]:
+        """
+        Подготавливает данные для создания DeliverySupplyInfo объектов.
+        
+        Args:
+            updated_selected_orders: Обновленные заказы с новыми supply_id
+            
+        Returns:
+            Tuple[List, Dict[str, str]]: delivery_supplies и order_wild_map
+        """
+        delivery_supplies = []
+        order_wild_map = {}
+        
+        # Группируем заказы по supply_id для создания DeliverySupplyInfo
+        orders_by_supply = defaultdict(list)
+        for order in updated_selected_orders:
+            supply_id = order.get("supply_id")
+            account = order.get("account")
+            orders_by_supply[(supply_id, account)].append(order.get("order_id"))
+            # Сохраняем маппинг order_id -> wild для order_wild_map
+            order_wild_map[str(order.get("order_id"))] = order.get("article")
+        
+        # Создаем объекты DeliverySupplyInfo
+        for (supply_id, account), order_ids in orders_by_supply.items():
+            delivery_supply = type('DeliverySupplyInfo', (), {
+                'supply_id': supply_id,
+                'account': account,
+                'order_ids': order_ids
+            })()
+            delivery_supplies.append(delivery_supply)
+        
+        return delivery_supplies, order_wild_map
+    
+    async def _get_base_shipment_data(self, delivery_supplies: List, order_wild_map: Dict[str, str]) -> List[Dict[str, Any]]:
+        """
+        Получает базовые данные для отгрузки через существующий метод prepare_shipment_data.
+        
+        Args:
+            delivery_supplies: Список объектов DeliverySupplyInfo
+            order_wild_map: Маппинг order_id -> wild
+            
+        Returns:
+            List[Dict[str, Any]]: Базовые данные для отгрузки
+        """
+        return await self.prepare_shipment_data(
+            delivery_supplies, 
+            order_wild_map, 
+            "system_hanging_shipment",  # author для висячих поставок
+            warehouse_id=1,
+            delivery_type="ФБС"
+        )
+    
+    def _enhance_with_reserves(self, shipment_data: List[Dict[str, Any]], 
+                              updated_selected_orders: List[dict], 
+                              reserves_mapping: Dict[str, int]) -> List[Dict[str, Any]]:
+        """
+        Добавляет product_reserves_id к данным отгрузки.
+        
+        Args:
+            shipment_data: Базовые данные для отгрузки
+            updated_selected_orders: Обновленные заказы с новыми supply_id
+            reserves_mapping: Маппинг supply_id -> product_reserves_id
+            
+        Returns:
+            List[Dict[str, Any]]: Обогащенные данные с product_reserves_id
+        """
+        enhanced_shipment_data = []
+        
+        for item in shipment_data:
+            enhanced_item = item.copy()
+            
+            # Ищем соответствующий заказ для получения original_hanging_supply_id
+            supply_id = item.get("supply_id")
+            matching_order = next(
+                (order for order in updated_selected_orders if order.get("supply_id") == supply_id), 
+                None
+            )
+            
+            if matching_order:
+                original_supply_id = matching_order.get("original_hanging_supply_id")
+                if original_supply_id and original_supply_id in reserves_mapping:
+                    enhanced_item["product_reserves_id"] = reserves_mapping[original_supply_id]
+                    logger.debug(f"Добавлен product_reserves_id={reserves_mapping[original_supply_id]} для supply_id {supply_id}")
+            
+            enhanced_shipment_data.append(enhanced_item)
+        
+        return enhanced_shipment_data
+    
+    async def _filter_and_send_shipment_data(self, enhanced_shipment_data: List[Dict[str, Any]]) -> None:
+        """
+        Фильтрует и отправляет обогащенные данные отгрузки в API.
+        
+        Args:
+            enhanced_shipment_data: Обогащенные данные с product_reserves_id
+        """
+        if not enhanced_shipment_data:
+            logger.warning("Нет данных для отправки в shipment API")
+            return
+
+        shipment_repository = ShipmentOfGoods(self.db)
+        filter_wild = await shipment_repository.filter_wilds()
+        
+        filtered_shipment_data = [item for item in enhanced_shipment_data if item['product_id'] in filter_wild]
+        logger.info(f"Отфильтровано записей для висячих: {len(enhanced_shipment_data)} -> {len(filtered_shipment_data)}")
+        
+        if filtered_shipment_data:
+            await self._send_shipment_data_to_api(filtered_shipment_data)
+        else:
+            logger.warning("Нет данных для отправки в shipment API после фильтрации")
 
     async def _generate_pdf_stickers_for_new_supplies(self, new_supplies_map: Dict[str, str], target_article: str, 
                                                      updated_selected_orders: List[dict]) -> str:

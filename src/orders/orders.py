@@ -1,7 +1,7 @@
 import asyncio
 import datetime
 import json
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Tuple
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
@@ -13,6 +13,8 @@ from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAc
     OrderDetail, WildInfo, SupplyInfo
 from src.wildberries_api.supplies import Supplies
 from collections import defaultdict
+from src.response import AsyncHttpClient
+from src.settings import settings
 
 
 class OrdersService:
@@ -26,6 +28,7 @@ class OrdersService:
         """
         self.db = db
         self.article_db = ArticleDB(db) if db else None
+        self.async_client = AsyncHttpClient(timeout=30, retries=3, delay=5)
 
     async def get_all_new_orders(self) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -522,6 +525,190 @@ class OrdersService:
             order_data_json = json.dumps(order_data)
             await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
             logger.info(f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами, оператор: {operator}")
+
+    @staticmethod
+    def _group_orders_by_product_and_account(
+        filtered_orders: Dict[str, List[OrderDetail]], 
+        supply_by_account: Dict[str, str]
+    ) -> tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, str]]]:
+        """
+        Группирует заказы по артикулам и аккаунтам для подсчета количества.
+        
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            
+        Returns:
+            tuple: (product_quantities, product_supply_ids)
+                - product_quantities: {wild_code: {account: quantity}}
+                - product_supply_ids: {wild_code: {account: supply_id}}
+        """
+        product_quantities = defaultdict(lambda: defaultdict(int))
+        product_supply_ids = defaultdict(dict)
+        
+        for orders in filtered_orders.values():
+            for order in orders:
+                wild_code = order.article
+                account = order.account
+                supply_id = supply_by_account.get(account)
+                
+                if supply_id:
+                    product_quantities[wild_code][account] += 1
+                    product_supply_ids[wild_code][account] = supply_id
+        
+        return product_quantities, product_supply_ids
+
+    @staticmethod
+    def _generate_reservation_dates() -> Tuple[str, str]:
+        """
+        Генерирует даты для резервации товаров.
+        
+        Returns:
+            tuple: (reserve_date, expires_at)
+                - reserve_date: Дата резервации в формате "YYYY-MM-DD"
+                - expires_at: Дата истечения в формате "YYYY-MM-DD HH:MM:SS.ffffff"
+        """
+        current_date = datetime.datetime.now()
+        reserve_date = current_date.strftime("%Y-%m-%d")
+        expires_at = (current_date + timedelta(days=settings.PRODUCT_RESERVATION_EXPIRES_DAYS)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        
+        return reserve_date, expires_at
+
+    @staticmethod
+    def _build_reservation_items(
+        product_quantities: Dict[str, Dict[str, int]], 
+        product_supply_ids: Dict[str, Dict[str, str]], 
+        reserve_date: str, 
+        expires_at: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Формирует элементы для резервации товаров.
+        
+        Args:
+            product_quantities: Количество товаров по артикулам и аккаунтам
+            product_supply_ids: ID поставок по артикулам и аккаунтам
+            reserve_date: Дата резервации
+            expires_at: Дата истечения резерва
+            
+        Returns:
+            List[Dict[str, Any]]: Список элементов для резервации
+        """
+        reservation_items = []
+        
+        for wild_code, accounts_data in product_quantities.items():
+            for account, quantity in accounts_data.items():
+                supply_id = product_supply_ids[wild_code][account]
+                
+                reservation_item = {
+                    "product_id": wild_code,
+                    "warehouse_id": settings.PRODUCT_RESERVATION_WAREHOUSE_ID,
+                    "ordered": quantity,
+                    "account": account,
+                    "delivery_type": settings.PRODUCT_RESERVATION_DELIVERY_TYPE,
+                    "supply_id": supply_id,
+                    "reserve_date": reserve_date,
+                    "expires_at": expires_at
+                }
+                
+                reservation_items.append(reservation_item)
+        
+        return reservation_items
+
+    async def _send_reservation_request(self, reservation_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Отправляет HTTP запрос на создание резерва товаров.
+        
+        Args:
+            reservation_items: Список элементов для резервации
+            
+        Returns:
+            Dict[str, Any]: Результат HTTP запроса
+        """
+        reservation_url = settings.PRODUCT_RESERVATION_API_URL
+        
+        logger.info(f"Отправка запроса на создание резерва для {len(reservation_items)} позиций товаров на URL: {reservation_url}")
+        logger.debug(f"Данные для создания резерва: {json.dumps(reservation_items, ensure_ascii=False, indent=2)}")
+
+        try:
+            response = await self.async_client.post(
+                url=reservation_url,
+                json=reservation_items,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response:
+                logger.info(f"Успешное создание резерва товаров для висячих поставок. Ответ: {response}")
+                return {
+                    "success": True,
+                    "message": "Резерв товаров успешно создан",
+                    "reserved_items": len(reservation_items),
+                    "response": response,
+                    "reservation_data": reservation_items
+                }
+            else:
+                logger.error("Получен пустой ответ от сервиса создания резерва")
+                return {
+                    "success": False,
+                    "message": "Пустой ответ от сервиса создания резерва",
+                    "reserved_items": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Ошибка HTTP запроса при создании резерва: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Ошибка HTTP запроса: {str(e)}",
+                "reserved_items": 0,
+                "error_details": str(e)
+            }
+
+    async def _reserve_products_for_hanging_supplies(
+        self, 
+        filtered_orders: Dict[str, List[OrderDetail]], 
+        supply_by_account: Dict[str, str], 
+        operator: str = 'unknown'
+    ) -> Dict[str, Any]:
+        """
+        Координирует процесс создания резерва товаров для висячих поставок.
+        
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            operator: Имя пользователя (оператора), создавшего висячую поставку
+            
+        Returns:
+            Dict[str, Any]: Результат операции резервации
+        """
+        try:
+            logger.info(f"Начало процесса создания резерва товаров для висячих поставок. Оператор: {operator}")
+
+            product_quantities, product_supply_ids = self._group_orders_by_product_and_account(
+                filtered_orders, supply_by_account
+            )
+
+            reserve_date, expires_at = self._generate_reservation_dates()
+
+            reservation_items = self._build_reservation_items(
+                product_quantities, product_supply_ids, reserve_date, expires_at
+            )
+
+            if not reservation_items:
+                logger.warning("Нет элементов для резервации товаров")
+                return {"success": False, "message": "Нет данных для резервации"}
+
+            result = await self._send_reservation_request(reservation_items)
+            
+            logger.info(f"Процесс создания резерва товаров завершен. Результат: {result.get('success', False)}")
+            return result
+                
+        except Exception as e:
+            logger.error(f"Критическая ошибка при создании резерва товаров для висячих поставок: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Критическая ошибка создания резерва: {str(e)}",
+                "reserved_items": 0,
+                "error_details": str(e)
+            }
             
     async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn, operator: str = 'unknown') -> SupplyAccountWildOut:
         """
@@ -542,8 +729,14 @@ class OrdersService:
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
                                            order_supply_mapping)
         
-        # Если поставки висячие, сохраняем информацию в БД
+        # Если поставки висячие, сохраняем информацию в БД и резервируем товары
         if input_data.is_hanging and self.db:
             await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
+            
+            # Резервируем товары для висячих поставок
+            reservation_result = await self._reserve_products_for_hanging_supplies(
+                filtered_orders_by_sku, supply_by_account, operator
+            )
+            logger.info(f"Результат резервации товаров: {reservation_result}")
             
         return self._prepare_result(orders_added_by_article, order_supply_mapping)

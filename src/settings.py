@@ -59,7 +59,15 @@ class Settings(BaseSettings):
     
     # Настройки API отгрузки
     SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/update")
-
+    
+    # Настройки резервации товаров для висячих поставок
+    PRODUCT_RESERVATION_API_URL: str = os.getenv("PRODUCT_RESERVATION_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/create_reserve")
+    PRODUCT_RESERVATION_WAREHOUSE_ID: int = int(os.getenv("PRODUCT_RESERVATION_WAREHOUSE_ID", 1))
+    PRODUCT_RESERVATION_DELIVERY_TYPE: str = os.getenv("PRODUCT_RESERVATION_DELIVERY_TYPE", "ФБС")
+    PRODUCT_RESERVATION_EXPIRES_DAYS: int = int(os.getenv("PRODUCT_RESERVATION_EXPIRES_DAYS", 10))
+    
+    # Настройки отправки данных об отгрузке висячих поставок
+    SHIPPED_GOODS_API_URL: str = os.getenv("SHIPPED_GOODS_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/add_shipped_goods")
 
 @lru_cache()
 def get_settings() -> Settings:
