@@ -37,9 +37,9 @@ class StockDB:
             Если количество не является целым числом, возвращается 0.
         """
 
-        query = """SELECT product_id ,physical_quantity from current_balances WHERE product_id = ANY($1)"""
+        query = """SELECT product_id ,available_quantity from current_balances WHERE product_id = ANY($1)"""
         result = await self.db.fetch(query, wilds)
-        return {res['product_id']: int(res['physical_quantity'])
+        return {res['product_id']: int(res['available_quantity'])
                 for res in result}
 
 
