@@ -879,8 +879,18 @@ class SuppliesService:
     async def _process_shipment(self, grouped_orders: Dict[str, List[dict]],
                                 delivery_supplies: List[DeliverySupplyInfo],
                                 order_wild_map: Dict[str, str],
-                                user: dict) -> Tuple[Dict, bool]:
-        """Обрабатывает интеграцию с 1C и сохранение отгрузок."""
+                                user: dict,
+                                skip_shipment_api: bool = False) -> Tuple[Dict, bool]:
+        """
+        Обрабатывает интеграцию с 1C и сохранение отгрузок.
+        
+        Args:
+            grouped_orders: Заказы, сгруппированные по поставкам
+            delivery_supplies: Данные поставок для доставки
+            order_wild_map: Соответствие заказов и артикулов
+            user: Данные пользователя
+            skip_shipment_api: Если True, пропускает отправку в shipment API (для висячих поставок)
+        """
         await self.update_hanging_supplies_shipped_orders_batch(grouped_orders)
 
         integration = OneCIntegration()
@@ -890,7 +900,11 @@ class SuppliesService:
         if not integration_success:
             logger.error(f"Ошибка интеграции с 1C: {integration_result}")
 
-        shipment_result = await self.save_shipments(delivery_supplies, order_wild_map, user.get('username', 'unknown'))
+        if not skip_shipment_api:
+            shipment_result = await self.save_shipments(delivery_supplies, order_wild_map, user.get('username', 'unknown'))
+        else:
+            shipment_result = True  # Считаем успешным, так как данные уже отправлены в shipment API
+            logger.info("Пропуск отправки в shipment API - данные уже отправлены через _send_enhanced_shipment_data")
 
         return integration_result, integration_success and shipment_result
 
@@ -1005,11 +1019,12 @@ class SuppliesService:
             shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders)
             
             # 6. Отправляем данные в shipment API с product_reserves_id
-            await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response)
+            logger.info(f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
+            await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
             
-            # 7. Отправляем в 1C и shipment_goods
+            # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
-                                                                       order_wild_map, user)
+                                                                       order_wild_map, user, skip_shipment_api=True)
             
             # 8. Генерируем PDF со стикерами для новых поставок
             pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article, updated_selected_orders)
@@ -1213,19 +1228,21 @@ class SuppliesService:
             return []
 
     async def _send_enhanced_shipment_data(self, updated_selected_orders: List[dict], 
-                                         shipped_goods_response: List[Dict[str, Any]]) -> None:
+                                         shipped_goods_response: List[Dict[str, Any]], 
+                                         user: dict) -> None:
         """
         Отправляет данные об отгрузке в API с добавлением product_reserves_id из ответа shipped_goods API.
         
         Args:
             updated_selected_orders: Обновленные заказы с новыми supply_id
             shipped_goods_response: Ответ от API add_shipped_goods с product_reserves_id
+            user: Данные пользователя для определения автора
         """
         logger.info(f"Отправка расширенных данных об отгрузке для {len(updated_selected_orders)} заказов")
         
         reserves_mapping = self._create_reserves_mapping(shipped_goods_response)
         delivery_supplies, order_wild_map = self._prepare_delivery_data(updated_selected_orders)
-        shipment_data = await self._get_base_shipment_data(delivery_supplies, order_wild_map)
+        shipment_data = await self._get_base_shipment_data(delivery_supplies, order_wild_map, user)
         enhanced_shipment_data = self._enhance_with_reserves(shipment_data, updated_selected_orders, reserves_mapping)
         await self._filter_and_send_shipment_data(enhanced_shipment_data)
     
@@ -1280,13 +1297,14 @@ class SuppliesService:
         
         return delivery_supplies, order_wild_map
     
-    async def _get_base_shipment_data(self, delivery_supplies: List, order_wild_map: Dict[str, str]) -> List[Dict[str, Any]]:
+    async def _get_base_shipment_data(self, delivery_supplies: List, order_wild_map: Dict[str, str], user: dict) -> List[Dict[str, Any]]:
         """
         Получает базовые данные для отгрузки через существующий метод prepare_shipment_data.
         
         Args:
             delivery_supplies: Список объектов DeliverySupplyInfo
             order_wild_map: Маппинг order_id -> wild
+            user: Данные пользователя для определения автора
             
         Returns:
             List[Dict[str, Any]]: Базовые данные для отгрузки
@@ -1294,7 +1312,7 @@ class SuppliesService:
         return await self.prepare_shipment_data(
             delivery_supplies, 
             order_wild_map, 
-            "system_hanging_shipment",  # author для висячих поставок
+            user.get('username', 'unknown'),  # Используем реального пользователя вместо 'system_hanging_shipment'
             warehouse_id=1,
             delivery_type="ФБС"
         )
