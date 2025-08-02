@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 from src.utils import format_date
 from datetime import datetime
 
@@ -141,3 +141,25 @@ class SupplyIdWithShippedBodySchema(BaseSchema):
     
     supplies: List[SupplyId]
     shipped_count: int = Field(description="Фактическое количество товаров для отгрузки из висячих поставок")
+
+
+class SupplyOrderItem(BaseModel):
+    """Схема для элемента поставки с заказами."""
+    account: str
+    supply_id: str
+    order_ids: List[int]
+
+
+class MoveOrdersRequest(BaseSchema):
+    """Схема запроса для перемещения заказов между поставками."""
+    orders: Dict[str, List[SupplyOrderItem]] = Field(description="Заказы сгруппированные по wild-кодам")
+    remove_count: int = Field(description="Количество заказов для перемещения")
+
+
+class MoveOrdersResponse(BaseSchema):
+    """Схема ответа для перемещения заказов."""
+    success: bool
+    message: str
+    removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
+    processed_supplies: int = Field(description="Количество обработанных поставок")
+    processed_wilds: int = Field(description="Количество обработанных wild-кодов")

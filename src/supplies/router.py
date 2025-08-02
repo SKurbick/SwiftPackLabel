@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Body, status, HTTPException
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, SupplyIdWithShippedBodySchema
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -228,4 +228,48 @@ async def shipment_hanging_actual_quantity(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при отгрузке фактического количества висячих поставок: {str(e)}"
+        )
+
+
+@supply.post("/move-orders",
+             status_code=status.HTTP_200_OK,
+             response_model=MoveOrdersResponse,
+             summary="Перемещение заказов между поставками",
+             description="Перемещает сборочные задания из одной поставки в другую")
+async def move_orders_between_supplies(
+        request_data: MoveOrdersRequest = Body(..., description="Данные о заказах для перемещения"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> MoveOrdersResponse:
+    """
+    Перемещает сборочные задания между поставками.
+    
+    Args:
+        request_data: Данные о заказах сгруппированные по wild-кодам
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+        
+    Returns:
+        MoveOrdersResponse: Результат операции перемещения
+    """
+    logger.info(f"Запрос на перемещение заказов от {user.get('username', 'unknown')}")
+    logger.info(f"Получен запрос на перемещение {request_data.remove_count} заказов из {len(request_data.orders)} wild-кодов")
+    
+    try:
+        supply_service = SuppliesService(db)
+        result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
+        
+        return MoveOrdersResponse(
+            success=result.get("success", True),
+            message=result.get("message", "Операция перемещения заказов выполнена"),
+            removed_order_ids=result.get("removed_order_ids", []),
+            processed_supplies=result.get("processed_supplies", 0),
+            processed_wilds=result.get("processed_wilds", 0)
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при перемещении заказов: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при перемещении заказов: {str(e)}"
         )

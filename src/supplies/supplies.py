@@ -747,6 +747,54 @@ class SuppliesService:
         update_data = self._prepare_shipment_data(grouped_orders, timestamp)
         await self._execute_batch_update(update_data)
 
+    async def move_orders_between_supplies_implementation(self, request_data, user: dict) -> Dict[str, Any]:
+        """
+        Заглушка для перемещения заказов между поставками.
+        
+        Args:
+            request_data: Данные запроса с заказами для перемещения
+            user: Данные пользователя
+            
+        Returns:
+            Dict[str, Any]: Результат операции (пока заглушка)
+        """
+        logger.info(f"ЗАГЛУШКА: Начало перемещения заказов от пользователя {user.get('username', 'unknown')}")
+        
+        # Собираем все order_ids из запроса
+        all_order_ids = []
+        processed_supplies = 0
+        processed_wilds = len(request_data.orders)
+        
+        for wild_code, supply_items in request_data.orders.items():
+            logger.info(f"ЗАГЛУШКА: Обработка wild-кода: {wild_code}")
+            for supply_item in supply_items:
+                logger.info(f"ЗАГЛУШКА: Поставка {supply_item.supply_id}, кабинет {supply_item.account}")
+                logger.info(f"ЗАГЛУШКА: Order IDs: {supply_item.order_ids}")
+                all_order_ids.extend(supply_item.order_ids)
+                processed_supplies += 1
+        
+        # Ограничиваем количество возвращаемых заказов параметром remove_count
+        removed_order_ids = all_order_ids[:request_data.remove_count]
+        
+        logger.info(f"ЗАГЛУШКА: Всего заказов получено: {len(all_order_ids)}")
+        logger.info(f"ЗАГЛУШКА: К удалению: {len(removed_order_ids)} (limit: {request_data.remove_count})")
+        logger.info(f"ЗАГЛУШКА: Обработано поставок: {processed_supplies}, wild-кодов: {processed_wilds}")
+        
+        # TODO: Здесь будет основная логика перемещения заказов:
+        # 1. Валидация существования поставок и заказов
+        # 2. Удаление заказов из исходных поставок через WB API
+        # 3. Создание новой поставки или добавление в существующую
+        # 4. Обновление данных в БД
+        # 5. Логирование изменений
+        
+        return {
+            "success": True,
+            "message": f"ЗАГЛУШКА: Операция перемещения выполнена. Обработано {len(removed_order_ids)} заказов",
+            "removed_order_ids": removed_order_ids,
+            "processed_supplies": processed_supplies,
+            "processed_wilds": processed_wilds
+        }
+
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
         """Группирует заказы по поставкам и создает маппинг заказов."""
         supply_orders = defaultdict(lambda: {"order_ids": [], "account": None})
