@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict
 from src.utils import format_date
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pydantic import BaseModel, field_validator, ConfigDict, Field
 from src.orders.schema import SupplyInfo
@@ -17,7 +17,10 @@ class BaseSchema(BaseModel):
 
 class BaseResponseSchema(BaseSchema):
     """Базовая схема для ответов с автоматическим timestamp."""
-    cached_at: datetime = Field(default_factory=datetime.utcnow, description="Время получения данных")
+    cached_at: datetime = Field(
+        default_factory=lambda: datetime.utcnow() + timedelta(hours=3),
+        description="Время получения данных"
+    )
 
 
 class OrderSchema(BaseModel):

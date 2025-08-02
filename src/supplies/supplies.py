@@ -747,59 +747,353 @@ class SuppliesService:
         update_data = self._prepare_shipment_data(grouped_orders, timestamp)
         await self._execute_batch_update(update_data)
 
+    async def _prepare_and_execute_fetch(self, request_data, wb_tokens: dict) -> Tuple[List, List]:
+        """
+        Подготавливает задачи и выполняет параллельные запросы к WB API.
+        
+        Args:
+            request_data: Данные запроса
+            wb_tokens: Токены WB для аккаунтов
+            
+        Returns:
+            Tuple[List, List]: (results, task_metadata)
+        """
+        # Подготовка задач для параллельного выполнения
+        tasks = []
+        task_metadata = []
+        
+        for wild_code, wild_item in request_data.orders.items():
+            for supply_item in wild_item.supplies:
+                account = supply_item.account
+                
+                if account not in wb_tokens:
+                    logger.error(f"Токен для аккаунта {account} не найден")
+                    continue
+                
+                # Создаем задачу для получения заказов
+                supplies_api = Supplies(account, wb_tokens[account])
+                task = supplies_api.get_supply_orders(supply_item.supply_id)
+                tasks.append(task)
+                task_metadata.append((wild_code, account, supply_item.supply_id))
+        
+        # Параллельное выполнение всех запросов
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        return results, task_metadata
+
+    def _process_fetch_results(self, results: List, task_metadata: List) -> Dict[Tuple[str, str], List[dict]]:
+        """
+        Обрабатывает результаты запросов и фильтрует заказы по артикулу.
+        
+        Args:
+            results: Результаты выполнения запросов
+            task_metadata: Метаданные задач
+            
+        Returns:
+            Dict[Tuple[str, str], List[dict]]: Заказы по ключу (wild_code, account)
+        """
+        orders_by_wild_account = {}
+        
+        for (wild_code, account, supply_id), result in zip(task_metadata, results):
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка получения заказов для {wild_code}, {account}: {str(result)}")
+                continue
+                
+            try:
+                if account in result and supply_id in result[account]:
+                    all_orders = result[account][supply_id]['orders']
+                    
+                    # Фильтруем заказы по артикулу и добавляем метаданные
+                    filtered_orders = []
+                    for order in all_orders:
+                        order_article = process_local_vendor_code(order.get('article', ''))
+                        
+                        if order_article == wild_code:
+                            enriched_order = {
+                                **order,
+                                'wild_code': wild_code,
+                                'account': account,
+                                'original_supply_id': supply_id,
+                                'timestamp': datetime.fromisoformat(
+                                    order['createdAt'].replace('Z', '+00:00')
+                                ).timestamp()
+                            }
+                            filtered_orders.append(enriched_order)
+                    
+                    key = (wild_code, account)
+                    if key not in orders_by_wild_account:
+                        orders_by_wild_account[key] = []
+                    orders_by_wild_account[key].extend(filtered_orders)
+                    
+                    logger.info(f"Получено {len(filtered_orders)} заказов с артикулом {wild_code} из кабинета {account}")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка обработки результата для {wild_code}, {account}: {str(e)}")
+        
+        return orders_by_wild_account
+
+    async def _fetch_orders_from_supplies(self, request_data, wb_tokens: dict) -> Dict[Tuple[str, str], List[dict]]:
+        """
+        Получает все заказы из исходных поставок параллельно.
+        
+        Args:
+            request_data: Данные запроса
+            wb_tokens: Токены WB для аккаунтов
+            
+        Returns:
+            Dict[Tuple[str, str], List[dict]]: Заказы по ключу (wild_code, account)
+        """
+        results, task_metadata = await self._prepare_and_execute_fetch(request_data, wb_tokens)
+        return self._process_fetch_results(results, task_metadata)
+
+    def _select_orders_for_move(self, request_data, orders_by_wild_account: Dict[Tuple[str, str], List[dict]]) -> Tuple[List[dict], Set[Tuple[str, str]]]:
+        """
+        Отбирает заказы для перемещения по времени создания.
+        
+        Args:
+            request_data: Данные запроса
+            orders_by_wild_account: Заказы по ключу (wild_code, account)
+            
+        Returns:
+            Tuple: (selected_orders_for_move, participating_combinations)
+        """
+        selected_orders_for_move = []
+        participating_combinations = set()
+        
+        for wild_code, wild_item in request_data.orders.items():
+            # Собираем все заказы для данного wild_code из всех аккаунтов
+            wild_orders = []
+            for account in set(supply_item.account for supply_item in wild_item.supplies):
+                key = (wild_code, account)
+                if key in orders_by_wild_account:
+                    wild_orders.extend(orders_by_wild_account[key])
+            
+            # Сортировка по времени создания (новейшие первые, согласно вашему изменению)
+            wild_orders.sort(key=lambda x: -x['timestamp'])
+            
+            # Выбор первых remove_count заказов
+            selected_count = min(wild_item.remove_count, len(wild_orders))
+            selected_orders = wild_orders[:selected_count]
+            
+            # Добавляем в список для перемещения
+            selected_orders_for_move.extend(selected_orders)
+            
+            # Запоминаем какие комбинации (wild_code, account) реально участвуют
+            for order in selected_orders:
+                participating_combinations.add((order['wild_code'], order['account']))
+            
+            logger.info(f"Wild {wild_code}: отобрано {len(selected_orders)} из {len(wild_orders)} заказов")
+        
+        return selected_orders_for_move, participating_combinations
+
+    async def _prepare_and_execute_create_supplies(self, participating_combinations: Set[Tuple[str, str]], wb_tokens: dict) -> Tuple[List, List]:
+        """
+        Подготавливает задачи и выполняет параллельное создание поставок в WB API.
+        
+        Args:
+            participating_combinations: Комбинации (wild_code, account)
+            wb_tokens: Токены WB для аккаунтов
+            
+        Returns:
+            Tuple[List, List]: (results, task_metadata)
+        """
+        # Подготовка задач для параллельного создания поставок
+        tasks = []
+        task_metadata = []
+        
+        for wild_code, account in participating_combinations:
+            supply_full_name = f"Висячая_FBS_{wild_code}_{datetime.now().strftime('%d.%m.%Y_%H:%M')}_{account}"
+            supplies_api = Supplies(account, wb_tokens[account])
+            task = supplies_api.create_supply(supply_full_name)
+            tasks.append(task)
+            task_metadata.append((wild_code, account))
+        
+        # Параллельное выполнение всех запросов
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        return results, task_metadata
+
+    async def _process_create_supplies_results(self, results: List, task_metadata: List, user: dict) -> Dict[Tuple[str, str], str]:
+        """
+        Обрабатывает результаты создания поставок и формирует маппинг.
+        
+        Args:
+            results: Результаты выполнения запросов на создание поставок
+            task_metadata: Метаданные задач
+            user: Данные пользователя для указания оператора
+            
+        Returns:
+            Dict[Tuple[str, str], str]: Новые поставки по ключу (wild_code, account)
+        """
+        new_supplies = {}
+        
+        for (wild_code, account), result in zip(task_metadata, results):
+            if isinstance(result, Exception):
+                logger.error(f"Исключение при создании поставки для {wild_code}, {account}: {str(result)}")
+                continue
+                
+            try:
+                if 'id' in result:
+                    new_supply_id = result['id']
+                    new_supplies[(wild_code, account)] = new_supply_id
+                    logger.info(f"Создана поставка {new_supply_id} для {wild_code} в кабинете {account}")
+                    
+                    # Сохраняем как висячую поставку в БД
+                    await self._save_as_hanging_supply(new_supply_id, account, wild_code, user)
+                else:
+                    logger.error(f"Ошибка создания поставки для {wild_code}, {account}: {result}")
+            except Exception as e:
+                logger.error(f"Ошибка обработки результата создания поставки для {wild_code}, {account}: {str(e)}")
+        
+        return new_supplies
+
+    async def _save_as_hanging_supply(self, supply_id: str, account: str, wild_code: str, user: dict):
+        """
+        Сохраняет созданную поставку как висячую в БД.
+        
+        Args:
+            supply_id: ID созданной поставки
+            account: Аккаунт Wildberries
+            wild_code: Артикул (wild) для которого создана поставка
+            user: Данные пользователя для указания оператора
+        """
+        try:
+            hanging_supplies = HangingSupplies(self.db)
+            order_data = {
+                "orders": [], 
+                "wild_code": wild_code, 
+                "created_for_move": True,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            order_data_json = json.dumps(order_data)
+            operator = user.get('username', 'move_orders_system')
+            
+            await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
+            logger.info(f"Сохранена висячая поставка {supply_id} для {wild_code} в аккаунте {account}, оператор: {operator}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении висячей поставки {supply_id} для {wild_code} в аккаунте {account}: {str(e)}")
+
+    async def _create_new_supplies(self, participating_combinations: Set[Tuple[str, str]], wb_tokens: dict, user: dict) -> Dict[Tuple[str, str], str]:
+        """
+        Создает новые поставки для участвующих комбинаций параллельно.
+        
+        Args:
+            participating_combinations: Комбинации (wild_code, account)
+            wb_tokens: Токены WB для аккаунтов
+            
+        Returns:
+            Dict[Tuple[str, str], str]: Новые поставки по ключу (wild_code, account)
+        """
+        results, task_metadata = await self._prepare_and_execute_create_supplies(participating_combinations, wb_tokens)
+        return await self._process_create_supplies_results(results, task_metadata, user)
+
+    async def _move_orders_to_supplies(self, selected_orders_for_move: List[dict], new_supplies: Dict[Tuple[str, str], str], wb_tokens: dict) -> List[int]:
+        """
+        Перемещает отобранные заказы в новые поставки параллельно.
+        
+        Args:
+            selected_orders_for_move: Отобранные заказы для перемещения
+            new_supplies: Новые поставки по ключу (wild_code, account)
+            wb_tokens: Токены WB для аккаунтов
+            
+        Returns:
+            List[int]: ID успешно перемещенных заказов
+        """
+        # Подготовка задач для параллельного перемещения
+        tasks = []
+        task_metadata = []
+        
+        for order in selected_orders_for_move:
+            wild_code = order['wild_code']
+            account = order['account']
+            order_id = order['id']
+            
+            # Находим новую поставку для этой комбинации
+            new_supply_id = new_supplies.get((wild_code, account))
+            if not new_supply_id:
+                logger.warning(f"Не найдена новая поставка для {wild_code}, {account}")
+                continue
+            
+            # Создаем задачу для добавления заказа в поставку
+            supplies_api = Supplies(account, wb_tokens[account])
+            task = supplies_api.add_order_to_supply(new_supply_id, order_id)
+            tasks.append(task)
+            task_metadata.append((order_id, order['original_supply_id'], new_supply_id))
+        
+        # Параллельное выполнение всех запросов
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Обработка результатов
+        moved_order_ids = []
+        
+        for (order_id, original_supply_id, new_supply_id), result in zip(task_metadata, results):
+            if isinstance(result, Exception):
+                logger.error(f"Исключение при перемещении заказа {order_id}: {str(result)}")
+                continue
+                
+            # Добавляем все заказы в список перемещенных
+            moved_order_ids.append(order_id)
+            logger.info(f"Заказ {order_id} перемещен из {original_supply_id} в {new_supply_id}")
+        
+        return moved_order_ids
+
     async def move_orders_between_supplies_implementation(self, request_data, user: dict) -> Dict[str, Any]:
         """
-        Заглушка для перемещения заказов между поставками.
+        Перемещение заказов между поставками.
         
         Args:
             request_data: Данные запроса с заказами для перемещения
             user: Данные пользователя
             
         Returns:
-            Dict[str, Any]: Результат операции (пока заглушка)
+            Dict[str, Any]: Результат операции перемещения
         """
-        logger.info(f"ЗАГЛУШКА: Начало перемещения заказов от пользователя {user.get('username', 'unknown')}")
-        
-        # Собираем все order_ids из запроса с учетом remove_count для каждого wild
-        all_removed_order_ids = []
-        processed_supplies = 0
-        processed_wilds = len(request_data.orders)
-        
-        for wild_code, wild_item in request_data.orders.items():
-            logger.info(f"ЗАГЛУШКА: Обработка wild-кода: {wild_code}, remove_count: {wild_item.remove_count}")
-            
-            # Собираем все заказы для данного wild-кода
-            wild_order_ids = []
-            for supply_item in wild_item.supplies:
-                logger.info(f"ЗАГЛУШКА: Поставка {supply_item.supply_id}, кабинет {supply_item.account}")
-                logger.info(f"ЗАГЛУШКА: Order IDs: {supply_item.order_ids}")
-                wild_order_ids.extend(supply_item.order_ids)
-                processed_supplies += 1
-            
-            # Ограничиваем количество для данного wild-кода
-            wild_removed_orders = wild_order_ids[:wild_item.remove_count]
-            all_removed_order_ids.extend(wild_removed_orders)
-            
-            logger.info(f"ЗАГЛУШКА: Wild {wild_code}: всего заказов {len(wild_order_ids)}, к удалению {len(wild_removed_orders)}")
-        
-        total_removed = len(all_removed_order_ids)
-        logger.info(f"ЗАГЛУШКА: Общий итог - к удалению: {total_removed} заказов")
-        logger.info(f"ЗАГЛУШКА: Обработано поставок: {processed_supplies}, wild-кодов: {processed_wilds}")
-        
-        # TODO: Здесь будет основная логика перемещения заказов:
-        # 1. Валидация существования поставок и заказов
-        # 2. Удаление заказов из исходных поставок через WB API (с учетом remove_count для каждого wild)
-        # 3. Создание новой поставки или добавление в существующую
-        # 4. Обновление данных в БД
-        # 5. Логирование изменений
-        
+        logger.info(f"Начало перемещения заказов от пользователя {user.get('username', 'unknown')}")
+
+        # 1. Получение токенов WB
+        wb_tokens = get_wb_tokens()
+
+        # 2. Получаем данные о всех заказах из исходных поставок (параллельно)
+        orders_by_wild_account = await self._fetch_orders_from_supplies(request_data, wb_tokens)
+
+        # 3. Отбираем заказы для перемещения по времени создания
+        selected_orders_for_move, participating_combinations = self._select_orders_for_move(request_data, orders_by_wild_account)
+
+        # 4. Проверяем что есть заказы для перемещения
+        if not selected_orders_for_move:
+            return {
+                "success": False,
+                "message": "Не найдено заказов для перемещения",
+                "removed_order_ids": [],
+                "processed_supplies": 0,
+                "processed_wilds": 0
+            }
+
+        logger.info(f"Всего отобрано {len(selected_orders_for_move)} заказов для перемещения")
+        logger.info(f"Участвующие комбинации (wild, account): {participating_combinations}")
+
+        # 5. Создаем поставки для участвующих комбинаций (параллельно)
+        new_supplies = await self._create_new_supplies(participating_combinations, wb_tokens, user)
+
+        # 6. Если не удалось создать поставки
+        if not new_supplies:
+            raise HTTPException(status_code=500, detail="Не удалось создать поставки для перемещения")
+
+        logger.info(f"Успешно создано {len(new_supplies)} поставок")
+
+        # 7. Перемещаем отобранные заказы в новые поставки (параллельно)
+        moved_order_ids = await self._move_orders_to_supplies(selected_orders_for_move, new_supplies, wb_tokens)
+
+        # 8. Возврат результата
+        logger.info(f"Перемещение завершено. Успешно перемещено {len(moved_order_ids)} заказов")
+
         return {
             "success": True,
-            "message": f"ЗАГЛУШКА: Операция перемещения выполнена. Обработано {total_removed} заказов",
-            "removed_order_ids": all_removed_order_ids,
-            "processed_supplies": processed_supplies,
-            "processed_wilds": processed_wilds
-        }
+            "message": f"Операция перемещения выполнена. Перемещено {len(moved_order_ids)} заказов",
+            "removed_order_ids": moved_order_ids,
+            "processed_supplies": len(new_supplies),
+            "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),}
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
         """Группирует заказы по поставкам и создает маппинг заказов."""
