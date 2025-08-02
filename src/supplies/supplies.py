@@ -760,37 +760,43 @@ class SuppliesService:
         """
         logger.info(f"ЗАГЛУШКА: Начало перемещения заказов от пользователя {user.get('username', 'unknown')}")
         
-        # Собираем все order_ids из запроса
-        all_order_ids = []
+        # Собираем все order_ids из запроса с учетом remove_count для каждого wild
+        all_removed_order_ids = []
         processed_supplies = 0
         processed_wilds = len(request_data.orders)
         
-        for wild_code, supply_items in request_data.orders.items():
-            logger.info(f"ЗАГЛУШКА: Обработка wild-кода: {wild_code}")
-            for supply_item in supply_items:
+        for wild_code, wild_item in request_data.orders.items():
+            logger.info(f"ЗАГЛУШКА: Обработка wild-кода: {wild_code}, remove_count: {wild_item.remove_count}")
+            
+            # Собираем все заказы для данного wild-кода
+            wild_order_ids = []
+            for supply_item in wild_item.supplies:
                 logger.info(f"ЗАГЛУШКА: Поставка {supply_item.supply_id}, кабинет {supply_item.account}")
                 logger.info(f"ЗАГЛУШКА: Order IDs: {supply_item.order_ids}")
-                all_order_ids.extend(supply_item.order_ids)
+                wild_order_ids.extend(supply_item.order_ids)
                 processed_supplies += 1
+            
+            # Ограничиваем количество для данного wild-кода
+            wild_removed_orders = wild_order_ids[:wild_item.remove_count]
+            all_removed_order_ids.extend(wild_removed_orders)
+            
+            logger.info(f"ЗАГЛУШКА: Wild {wild_code}: всего заказов {len(wild_order_ids)}, к удалению {len(wild_removed_orders)}")
         
-        # Ограничиваем количество возвращаемых заказов параметром remove_count
-        removed_order_ids = all_order_ids[:request_data.remove_count]
-        
-        logger.info(f"ЗАГЛУШКА: Всего заказов получено: {len(all_order_ids)}")
-        logger.info(f"ЗАГЛУШКА: К удалению: {len(removed_order_ids)} (limit: {request_data.remove_count})")
+        total_removed = len(all_removed_order_ids)
+        logger.info(f"ЗАГЛУШКА: Общий итог - к удалению: {total_removed} заказов")
         logger.info(f"ЗАГЛУШКА: Обработано поставок: {processed_supplies}, wild-кодов: {processed_wilds}")
         
         # TODO: Здесь будет основная логика перемещения заказов:
         # 1. Валидация существования поставок и заказов
-        # 2. Удаление заказов из исходных поставок через WB API
+        # 2. Удаление заказов из исходных поставок через WB API (с учетом remove_count для каждого wild)
         # 3. Создание новой поставки или добавление в существующую
         # 4. Обновление данных в БД
         # 5. Логирование изменений
         
         return {
             "success": True,
-            "message": f"ЗАГЛУШКА: Операция перемещения выполнена. Обработано {len(removed_order_ids)} заказов",
-            "removed_order_ids": removed_order_ids,
+            "message": f"ЗАГЛУШКА: Операция перемещения выполнена. Обработано {total_removed} заказов",
+            "removed_order_ids": all_removed_order_ids,
             "processed_supplies": processed_supplies,
             "processed_wilds": processed_wilds
         }

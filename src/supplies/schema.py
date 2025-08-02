@@ -150,10 +150,15 @@ class SupplyOrderItem(BaseModel):
     order_ids: List[int]
 
 
+class WildOrdersItem(BaseModel):
+    """Схема для заказов по wild-коду с количеством для удаления."""
+    supplies: List[SupplyOrderItem] = Field(description="Список поставок для данного wild-кода")
+    remove_count: int = Field(description="Количество заказов для перемещения для данного wild-кода")
+
+
 class MoveOrdersRequest(BaseSchema):
     """Схема запроса для перемещения заказов между поставками."""
-    orders: Dict[str, List[SupplyOrderItem]] = Field(description="Заказы сгруппированные по wild-кодам")
-    remove_count: int = Field(description="Количество заказов для перемещения")
+    orders: Dict[str, WildOrdersItem] = Field(description="Заказы сгруппированные по wild-кодам с индивидуальным remove_count")
 
 
 class MoveOrdersResponse(BaseSchema):

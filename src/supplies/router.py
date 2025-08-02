@@ -253,7 +253,8 @@ async def move_orders_between_supplies(
         MoveOrdersResponse: Результат операции перемещения
     """
     logger.info(f"Запрос на перемещение заказов от {user.get('username', 'unknown')}")
-    logger.info(f"Получен запрос на перемещение {request_data.remove_count} заказов из {len(request_data.orders)} wild-кодов")
+    total_remove_count = sum(wild_item.remove_count for wild_item in request_data.orders.values())
+    logger.info(f"Получен запрос на перемещение {total_remove_count} заказов из {len(request_data.orders)} wild-кодов")
     
     try:
         supply_service = SuppliesService(db)
