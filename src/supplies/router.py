@@ -24,17 +24,19 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
         hanging_only: bool = False,
+        is_delivery: bool = False,
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> SupplyIdResponseSchema:
     """
-    Получить список поставок с фильтрацией по висячим.
+    Получить список поставок с фильтрацией по висячим и доставке.
     
     Примечание: Cache middleware проверяет глобальный кэш ПЕРЕД авторизацией.
     Эта функция вызывается только если нет кэша или нужно обновление.
     
     Args:
         hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+        is_delivery: Если True - фильтровать поставки в доставке, если False - все поставки (пока не используется)
         db: Соединение с базой данных
         user: Текущий пользователь
     Returns:
