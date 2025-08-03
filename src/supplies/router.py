@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, Body, status, HTTPException
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
-from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse
+from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
+    SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -13,6 +14,8 @@ from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
 from src.supplies.integration_1c import OneCIntegration
 from src.cache import global_cached
+from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
+from src.cache.global_cache import global_cache
 
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
@@ -20,9 +23,9 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
 @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
-    hanging_only: bool = False,
-    db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+        hanging_only: bool = False,
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
 ) -> SupplyIdResponseSchema:
     """
     Получить список поставок с фильтрацией по висячим.
@@ -145,7 +148,7 @@ async def deliver_supplies(
         response_content = {
             "success": integration_success and shipment_result,
             "message": "Все операции выполнены успешно" if (integration_success and shipment_result)
-                      else "Возникли ошибки при обработке",
+            else "Возникли ошибки при обработке",
             "integration_result": integration_result,
             "shipment_result": shipment_result
         }
@@ -199,7 +202,8 @@ async def deliver_supplies_hanging(
              summary="Отгрузка фактического количества висячих поставок",
              description="Отгружает фактическое количество товаров из висячих поставок")
 async def shipment_hanging_actual_quantity(
-        supply_data: SupplyIdWithShippedBodySchema = Body(..., description="Данные висячих поставок с фактическим количеством для отгрузки"),
+        supply_data: SupplyIdWithShippedBodySchema = Body(...,
+                                                          description="Данные висячих поставок с фактическим количеством для отгрузки"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> JSONResponse:
@@ -213,16 +217,17 @@ async def shipment_hanging_actual_quantity(
         JSONResponse: Результат отгрузки фактического количества
     """
     logger.info(f"Запрос на отгрузку фактического количества висячих поставок от {user.get('username', 'unknown')}")
-    logger.info(f"Получен запрос для {len(supply_data.supplies)} висячих поставок с фактическим количеством={supply_data.shipped_count}")
-    
+    logger.info(
+        f"Получен запрос для {len(supply_data.supplies)} висячих поставок с фактическим количеством={supply_data.shipped_count}")
+
     try:
         supply_service = SuppliesService(db)
         result = await supply_service.shipment_hanging_actual_quantity_implementation(supply_data, user)
-        
+
         return JSONResponse(
             content=result,
             status_code=status.HTTP_201_CREATED)
-        
+
     except Exception as e:
         logger.error(f"Ошибка при отгрузке фактического количества висячих поставок: {str(e)}")
         raise HTTPException(
@@ -255,11 +260,11 @@ async def move_orders_between_supplies(
     logger.info(f"Запрос на перемещение заказов от {user.get('username', 'unknown')}")
     total_remove_count = sum(wild_item.remove_count for wild_item in request_data.orders.values())
     logger.info(f"Получен запрос на перемещение {total_remove_count} заказов из {len(request_data.orders)} wild-кодов")
-    
+
     try:
         supply_service = SuppliesService(db)
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
-        
+
         return MoveOrdersResponse(
             success=result.get("success", True),
             message=result.get("message", "Операция перемещения заказов выполнена"),
@@ -267,10 +272,41 @@ async def move_orders_between_supplies(
             processed_supplies=result.get("processed_supplies", 0),
             processed_wilds=result.get("processed_wilds", 0)
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка при перемещении заказов: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при перемещении заказов: {str(e)}"
+        )
+
+
+@supply.post("/clean-empty-supplies",
+             status_code=status.HTTP_200_OK,
+             summary="Очистка пустых поставок",
+             description="Находит и удаляет поставки без заказов после двойной проверки")
+async def clean_empty_supplies(
+        user: dict = Depends(get_current_user)
+) -> JSONResponse:
+    """
+    Обработка пустых поставок:
+    1. Находит текущие пустые поставки
+    2. Сравнивает с ранее сохраненными
+    3. Удаляет поставки пустые два раза подряд
+    4. Обновляет список отслеживаемых
+    """
+    logger.info(f"Запуск очистки пустых поставок от {user.get('username')}")
+
+    try:
+
+        cleaner = EmptySupplyCleaner(global_cache.redis)
+        result = await cleaner.process_empty_supplies()
+
+        return JSONResponse(content=result, status_code=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Ошибка очистки пустых поставок: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка очистки: {str(e)}"
         )

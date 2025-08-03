@@ -67,7 +67,7 @@ class Supplies(Account):
         """
         response = await self.async_client.delete(f"{self.url}/{supply_id}", headers=self.headers)
         logger.info(f"Удаление поставки {supply_id} для аккаунта {self.account}. Ответ: {response}")
-        return parse_json(response)
+        return response
 
     async def deliver_supply(self, supply_id: str):
         """

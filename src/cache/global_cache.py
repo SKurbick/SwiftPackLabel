@@ -309,6 +309,14 @@ class GlobalCache:
                     
                     logger.info(f"Кэш поставок прогрет успешно: обычные={len(supplies_data_normal)}, висячие={len(supplies_data_hanging)}")
                     
+                    # Запускаем очистку пустых поставок
+                    try:
+                        from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
+                        cleaner = EmptySupplyCleaner(self.redis_client)
+                        await cleaner.auto_clean_empty_supplies()
+                    except Exception as e:
+                        logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
+                    
                     # Запускаем фоновую синхронизацию висячих поставок с полученными данными
                     try:
                         sync_hanging_supplies_with_data.delay(supplies)
