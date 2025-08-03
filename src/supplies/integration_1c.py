@@ -25,7 +25,7 @@ class OneCIntegration:
 
     def __init__(self):
         """Инициализация класса интеграции с 1C."""
-        self.async_client = AsyncHttpClient(timeout=240)
+        self.async_client = AsyncHttpClient(timeout=240,retries=3,delay=5)
 
     @staticmethod
     def convert_price(price) -> float:
