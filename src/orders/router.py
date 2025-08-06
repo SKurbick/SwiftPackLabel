@@ -14,7 +14,7 @@ orders = APIRouter(prefix='/orders', tags=['Orders'])
 
 
 @orders.get("/", response_model=Dict[str, GroupedOrderInfo], status_code=status.HTTP_200_OK)
-@global_cached(key="orders_all", cache_only=True)
+# @global_cached(key="orders_all", cache_only=True)
 async def get_orders(
         request: Request,
         db: AsyncGenerator = Depends(get_db_connection),
