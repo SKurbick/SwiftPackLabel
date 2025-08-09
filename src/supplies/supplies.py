@@ -192,7 +192,7 @@ class SuppliesService:
                 "count": len(orders['orders']),
                 "orders": [
                     OrderSchema(order_id=data["id"], nm_id=data["nmId"],
-                                local_vendor_code=process_local_vendor_code(data["article"]))
+                                local_vendor_code=process_local_vendor_code(data["article"]),createdAt=data["createdAt"])
                     for data in orders["orders"]]}
 
     async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
@@ -370,7 +370,7 @@ class SuppliesService:
             orders_list = []
             orders_list.extend(
                 OrderSchema(order_id=order_detail.get('id'), nm_id=order_detail.get('nmId'),
-                            local_vendor_code=wild_filter.wild)
+                            local_vendor_code=wild_filter.wild,createdAt=order_detail.get('createdAt'))
                 for order_detail in orders_details if order_detail.get('id') in [order.order_id
                                                                                  for order in supply_item.orders])
             if not orders_list:
@@ -1213,7 +1213,8 @@ class SuppliesService:
                 OrderSchema(
                     order_id=order["order_id"],
                     local_vendor_code=order["article"],
-                    nm_id=order["nm_id"]
+                    nm_id=order["nm_id"],
+                    createdAt=order["createdAt"]
                 )
                 for order in orders
             ]

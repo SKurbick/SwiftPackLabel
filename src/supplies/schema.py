@@ -12,7 +12,7 @@ class BaseSchema(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         str_strip_whitespace=True,
-        str_min_length=0,)
+        str_min_length=0, )
 
 
 class BaseResponseSchema(BaseSchema):
@@ -29,6 +29,7 @@ class OrderSchema(BaseModel):
     local_vendor_code: str
     order_id: int
     nm_id: int
+    createdAt: Optional[str] = None
 
 
 class StickerSchema(OrderSchema):
@@ -59,7 +60,8 @@ class SupplyId(SupplyBase):
 class SupplyIdResult(SupplyBase):
     """Схема для обработанных данных о поставке с датой в нужном формате."""
 
-    shipped_count: Optional[int] = Field(None, description="Количество отгруженных товаров (только для висячих поставок)")
+    shipped_count: Optional[int] = Field(None,
+                                         description="Количество отгруженных товаров (только для висячих поставок)")
 
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:
@@ -67,11 +69,11 @@ class SupplyIdResult(SupplyBase):
         import re
         if not isinstance(v, str):
             return str(v)
-        
+
         # Check if date is already in DD.MM.YYYY format (from cache)
         if re.match(r'^\d{2}\.\d{2}\.\d{4}$', v):
             return v
-            
+
         # If it's ISO format, convert it
         try:
             return format_date(v)
@@ -128,7 +130,7 @@ class DeliverySupplyInfo(SupplyInfo):
     Расширенная схема SupplyInfo для использования в API доставки.
     Добавляет валидацию, что список order_ids не должен быть пустым.
     """
-    
+
     @field_validator("order_ids")
     def validate_order_ids(cls, order_ids: List[int]) -> List[int]:
         """
@@ -141,7 +143,7 @@ class DeliverySupplyInfo(SupplyInfo):
 
 class SupplyIdWithShippedBodySchema(BaseSchema):
     """Схема для тела запроса с списком висячих поставок и фактическим количеством для отгрузки."""
-    
+
     supplies: List[SupplyId]
     shipped_count: int = Field(description="Фактическое количество товаров для отгрузки из висячих поставок")
 
@@ -161,7 +163,8 @@ class WildOrdersItem(BaseModel):
 
 class MoveOrdersRequest(BaseSchema):
     """Схема запроса для перемещения заказов между поставками."""
-    orders: Dict[str, WildOrdersItem] = Field(description="Заказы сгруппированные по wild-кодам с индивидуальным remove_count")
+    orders: Dict[str, WildOrdersItem] = Field(
+        description="Заказы сгруппированные по wild-кодам с индивидуальным remove_count")
 
 
 class MoveOrdersResponse(BaseSchema):
