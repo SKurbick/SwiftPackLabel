@@ -66,3 +66,44 @@ class ShipmentOfGoods:
         query = """SELECT id from products"""
         result =  await self.db.fetch(query)
         return [i['id'] for i in result]
+        
+    async def get_weekly_supply_ids(self) -> List[Dict[str, str]]:
+        """
+        Получает уникальные supply_id из отгрузок за текущую неделю.
+        Возвращает данные в формате, совместимом с get_information_to_supplies().
+        
+        Returns:
+            List[Dict[str, str]]: Список словарей с supply_id и account для каждой поставки
+        """
+        query = """
+        SELECT DISTINCT supply_id, account
+        FROM public.shipment_of_goods
+        WHERE created_at >= CURRENT_DATE
+          AND created_at < CURRENT_DATE + INTERVAL '1 week'
+        ORDER BY supply_id
+        """
+        
+        try:
+            result = await self.db.fetch(query)
+            logger.info(f"Получено {len(result)} уникальных поставок из отгрузок за неделю")
+            
+            # Группируем по аккаунтам для совместимости с существующей логикой
+            grouped_by_account = {}
+            for row in result:
+                account = row['account']
+                supply_id = row['supply_id']
+                
+                if account not in grouped_by_account:
+                    grouped_by_account[account] = []
+                
+                # Простой формат только с id для последующего обогащения
+                grouped_by_account[account].append({
+                    'id': supply_id
+                })
+            
+            # Возвращаем в том же формате, что get_information_to_supplies()
+            return [grouped_by_account]
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении поставок из отгрузок: {str(e)}")
+            return []

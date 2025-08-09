@@ -21,7 +21,7 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-@global_cached(key="supplies_all", cache_only=True)
+# @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
@@ -36,14 +36,15 @@ async def get_supplies(
     
     Args:
         hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
-        is_delivery: Если True - фильтровать поставки в доставке, если False - все поставки (пока не используется)
+        is_delivery: Если True - получать поставки из отгрузок за неделю (таблица shipment_of_goods), 
+                    если False - получать из WB API
         db: Соединение с базой данных
         user: Текущий пользователь
     Returns:
         SupplyIdResponseSchema: Список поставок с их деталями
     """
     logger.info("get_supplies function called (no cache available)")
-    return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only)
+    return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only, is_delivery=is_delivery)
 
 
 @supply.post("/upload_stickers",

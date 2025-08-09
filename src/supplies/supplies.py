@@ -86,6 +86,57 @@ class SuppliesService:
             tasks.append(Supplies(account, token).get_supplies_filter_done())
         return await asyncio.gather(*tasks)
 
+    async def get_information_to_supply_details(self, basic_supplies_ids: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Обогащает базовые supply_ids полной информацией из WB API.
+        Args:
+            basic_supplies_ids: Базовые данные о поставках из БД (только supply_id и account)
+        Returns:
+            List[Dict[str, Any]]: Полные данные о поставках с информацией из WB API
+        """
+        logger.info(f"Обогащение {len(basic_supplies_ids)} базовых поставок информацией из WB API")
+
+        if not basic_supplies_ids:
+            return []
+
+        enriched_supplies = []
+        wb_tokens = get_wb_tokens()
+
+        for account_data in basic_supplies_ids:
+            for account, supplies_list in account_data.items():
+                # Создаем задачи для параллельного получения информации о поставках
+                tasks = []
+                for supply_info in supplies_list:
+                    if supply_id := supply_info.get('id'):
+                        supplies_api = Supplies(account, wb_tokens[account])
+                        tasks.append(supplies_api.get_information_to_supply(supply_id))
+
+                if not tasks:
+                    continue
+
+                # Выполняем все запросы параллельно
+                wb_supplies_info = await asyncio.gather(*tasks)
+
+                # Обрабатываем результаты
+                account_supplies = []
+                for i, wb_supply_info in enumerate(wb_supplies_info):
+                    supply_id = supplies_list[i].get('id')
+
+                    if wb_supply_info and not wb_supply_info.get('errors'):
+                        enriched_supply = {
+                            'id': supply_id,
+                            'name': wb_supply_info.get('name', f'Supply_{supply_id}'),
+                            'createdAt': wb_supply_info.get('createdAt', ''),
+                            'done': wb_supply_info.get('done', False)
+                        }
+                        account_supplies.append(enriched_supply)
+
+                if account_supplies:
+                    enriched_supplies.append({account: account_supplies})
+
+        logger.info(f"Обогащено {len(enriched_supplies)} групп поставок информацией из WB API")
+        return enriched_supplies
+
     @staticmethod
     async def get_information_orders_to_supplies(supply_ids: List[dict]) -> List[Dict[str, Dict]]:
         logger.info(f'Получение информации о заказах по конкретным поставкам,количество поставок : {len(supply_ids)}')
@@ -198,23 +249,37 @@ class SuppliesService:
 
         return filtered_supplies
 
-    async def get_list_supplies(self, hanging_only: bool = False) -> SupplyIdResponseSchema:
+    async def get_list_supplies(self, hanging_only: bool = False, is_delivery: bool = False) -> SupplyIdResponseSchema:
         """
-        Получить список поставок с фильтрацией по висячим.
+        Получить список поставок с фильтрацией по висячим и доставке.
         Args:
             hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
+            is_delivery: Если True - получать поставки из отгрузок за неделю, если False - из WB API
         Returns:
             SupplyIdResponseSchema: Список поставок с их деталями
         """
-        logger.info(f"Получение данных о поставках, hanging_only={hanging_only}")
-        supplies_ids: List[Any] = await self.get_information_to_supplies()
+        logger.info(f"Получение данных о поставках, hanging_only={hanging_only}, is_delivery={is_delivery}")
+
+        # Выбор источника данных в зависимости от is_delivery
+        if is_delivery:
+            logger.info("Получение поставок из отгрузок за неделю")
+            basic_supplies_ids: List[Any] = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
+            supplies_ids: List[Any] = await self.get_information_to_supply_details(basic_supplies_ids)
+        else:
+            logger.info("Получение поставок из WB API")
+            supplies_ids: List[Any] = await self.get_information_to_supplies()
         supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
         result: List = []
         supplies_ids: Dict[str, List] = {key: value for d in supplies_ids for key, value in d.items()}
         for account, value in supplies.items():
             for supply_id, orders in value.items():
-                supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                if not is_delivery:
+                    supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
                                                      for data in supplies_ids[account] if not data['done']}
+                else:
+                    supply: Dict[str, Dict[str, Any]] = {
+                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                        for data in supplies_ids[account]}
                 result.append(self.create_supply_result(supply, supply_id, account, orders))
 
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
@@ -1370,6 +1435,9 @@ class SuppliesService:
             logger.info(f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
             await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
             
+            # 6.1. Сохраняем информацию о новых "фактических" поставках как висячих поставок
+            await self._save_new_supplies_as_hanging(new_supplies_map, target_article, user)
+            
             # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
                                                                        order_wild_map, user, skip_shipment_api=True)
@@ -1789,3 +1857,34 @@ class SuppliesService:
         
         logger.info(f"PDF стикеры сгенерированы успешно для артикула {target_article}")
         return pdf_base64
+
+    async def _save_new_supplies_as_hanging(self, new_supplies_map: Dict[str, str], target_article: str, user: dict) -> None:
+        """
+        Сохраняет новые фактические поставки как висячие поставки параллельно.
+        
+        Args:
+            new_supplies_map: Маппинг аккаунт -> новый supply_id
+            target_article: Артикул товара
+            user: Данные пользователя
+        """
+        if not new_supplies_map:
+            logger.info("Нет новых поставок для сохранения как висячие")
+            return
+        
+        logger.info(f"Сохранение {len(new_supplies_map)} новых фактических поставок как висячих поставок")
+        
+        # Создаем задачи для параллельного выполнения
+        tasks = [
+            self._save_as_hanging_supply(
+                supply_id=new_supply_id,
+                account=account,
+                wild_code=target_article,
+                user=user
+            )
+            for account, new_supply_id in new_supplies_map.items()
+        ]
+        
+        # Выполняем все задачи параллельно
+        await asyncio.gather(*tasks)
+        
+        logger.info(f"Сохранено {len(new_supplies_map)} новых фактических поставок как висячие")

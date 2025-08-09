@@ -81,8 +81,11 @@ class Supplies(Account):
         :return: Ответ от WB API
         """
         response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
-        logger.info(f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response}")
+        logger.info(
+            f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response}")
         return response
 
-
-
+    async def get_information_to_supply(self, supply_id):
+        response = await self.async_client.get(f"{self.url}/{supply_id}", headers=self.headers)
+        logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
+        return parse_json(response)
