@@ -1,7 +1,7 @@
 from typing import List, Dict
 
 from starlette.responses import StreamingResponse, JSONResponse
-from fastapi import APIRouter, Depends, Body, status, HTTPException
+from fastapi import APIRouter, Depends, Body, status, HTTPException,Path,Query
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
@@ -312,4 +312,54 @@ async def clean_empty_supplies(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка очистки: {str(e)}"
+        )
+
+
+@supply.get("/barcode/{supply_id}",
+            status_code=status.HTTP_200_OK,
+            response_description="PNG стикер для для поставки",
+            responses={200: {"content": {"image/png": {}},
+                             "description": "PNG файл поставки"},
+                       404: {"description": "Поставка не найдено"},
+                       422: {"description": "Ошибка валидации параметров"}})
+async def get_order_sticker(
+        supply_id: str = Path(..., description="Номер Поставки"),
+        account: str = Query(..., description="Наименование аккаунта"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> StreamingResponse:
+    """
+    Получить PNG стикер для конкретного сборочного задания.
+
+    Args:
+        order_id: Номер сборочного задания
+        account: Наименование аккаунта
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+
+    Returns:
+        StreamingResponse: PNG файл стикера
+    """
+    try:
+        supply_service = SuppliesService()
+        png_buffer = await supply_service.get_single_supply_sticker(supply_id, account)
+        filename = f'sticker_{supply_id}.png'
+
+        return StreamingResponse(
+            png_buffer,
+            media_type="image/png",
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}'
+            }
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )

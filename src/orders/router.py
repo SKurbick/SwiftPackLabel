@@ -8,7 +8,8 @@ from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNam
 from src.cache import global_cached
 from typing import Dict
 
-from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body, Path
+from starlette.responses import StreamingResponse
 
 orders = APIRouter(prefix='/orders', tags=['Orders'])
 
@@ -87,4 +88,57 @@ async def add_fact_orders_and_supply_name(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Произошла ошибка при создании поставок: {str(e)}",
+        )
+
+
+@orders.get("/sticker/{order_id}",
+           status_code=status.HTTP_200_OK,
+           response_description="PNG стикер для сборочного задания",
+           responses={200: {"content": {"image/png": {}},
+                           "description": "PNG файл стикера"},
+                     404: {"description": "Сборочное задание не найдено"},
+                     422: {"description": "Ошибка валидации параметров"}})
+async def get_order_sticker(
+        order_id: int = Path(..., description="Номер сборочного задания"),
+        account: str = Query(..., description="Наименование аккаунта"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> StreamingResponse:
+    """
+    Получить PNG стикер для конкретного сборочного задания.
+    
+    Args:
+        order_id: Номер сборочного задания
+        account: Наименование аккаунта
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+        
+    Returns:
+        StreamingResponse: PNG файл стикера
+    """
+    try:
+        orders_service = OrdersService(db)
+        png_buffer = await orders_service.get_single_order_sticker(order_id, account)
+        
+        # Safe filename
+        safe_account = "".join(c for c in account if c.isalnum() or c in "._-")
+        filename = f'sticker_{order_id}.png'
+        
+        return StreamingResponse(
+            png_buffer,
+            media_type="image/png",
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}'
+            }
+        )
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )

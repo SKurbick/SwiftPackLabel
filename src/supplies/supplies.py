@@ -7,6 +7,8 @@ from datetime import datetime
 from collections import defaultdict
 from PIL import Image
 
+from io import BytesIO
+
 from src.settings import settings
 from src.logger import app_logger as logger
 from src.supplies.integration_1c import OneCIntegration
@@ -192,7 +194,8 @@ class SuppliesService:
                 "count": len(orders['orders']),
                 "orders": [
                     OrderSchema(order_id=data["id"], nm_id=data["nmId"],
-                                local_vendor_code=process_local_vendor_code(data["article"]),createdAt=data["createdAt"])
+                                local_vendor_code=process_local_vendor_code(data["article"]),
+                                createdAt=data["createdAt"])
                     for data in orders["orders"]]}
 
     async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
@@ -274,8 +277,9 @@ class SuppliesService:
         for account, value in supplies.items():
             for supply_id, orders in value.items():
                 if not is_delivery:
-                    supply: Dict[str, Dict[str, Any]] = {data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
-                                                     for data in supplies_ids[account] if not data['done']}
+                    supply: Dict[str, Dict[str, Any]] = {
+                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                        for data in supplies_ids[account] if not data['done']}
                 else:
                     supply: Dict[str, Dict[str, Any]] = {
                         data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
@@ -370,7 +374,7 @@ class SuppliesService:
             orders_list = []
             orders_list.extend(
                 OrderSchema(order_id=order_detail.get('id'), nm_id=order_detail.get('nmId'),
-                            local_vendor_code=wild_filter.wild,createdAt=order_detail.get('createdAt'))
+                            local_vendor_code=wild_filter.wild, createdAt=order_detail.get('createdAt'))
                 for order_detail in orders_details if order_detail.get('id') in [order.order_id
                                                                                  for order in supply_item.orders])
             if not orders_list:
@@ -826,24 +830,24 @@ class SuppliesService:
         # Подготовка задач для параллельного выполнения
         tasks = []
         task_metadata = []
-        
+
         for wild_code, wild_item in request_data.orders.items():
             for supply_item in wild_item.supplies:
                 account = supply_item.account
-                
+
                 if account not in wb_tokens:
                     logger.error(f"Токен для аккаунта {account} не найден")
                     continue
-                
+
                 # Создаем задачу для получения заказов
                 supplies_api = Supplies(account, wb_tokens[account])
                 task = supplies_api.get_supply_orders(supply_item.supply_id)
                 tasks.append(task)
                 task_metadata.append((wild_code, account, supply_item.supply_id))
-        
+
         # Параллельное выполнение всех запросов
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         return results, task_metadata
 
     def _process_fetch_results(self, results: List, task_metadata: List) -> Dict[Tuple[str, str], List[dict]]:
@@ -858,21 +862,21 @@ class SuppliesService:
             Dict[Tuple[str, str], List[dict]]: Заказы по ключу (wild_code, account)
         """
         orders_by_wild_account = {}
-        
+
         for (wild_code, account, supply_id), result in zip(task_metadata, results):
             if isinstance(result, Exception):
                 logger.error(f"Ошибка получения заказов для {wild_code}, {account}: {str(result)}")
                 continue
-                
+
             try:
                 if account in result and supply_id in result[account]:
                     all_orders = result[account][supply_id]['orders']
-                    
+
                     # Фильтруем заказы по артикулу и добавляем метаданные
                     filtered_orders = []
                     for order in all_orders:
                         order_article = process_local_vendor_code(order.get('article', ''))
-                        
+
                         if order_article == wild_code:
                             enriched_order = {
                                 **order,
@@ -884,17 +888,18 @@ class SuppliesService:
                                 ).timestamp()
                             }
                             filtered_orders.append(enriched_order)
-                    
+
                     key = (wild_code, account)
                     if key not in orders_by_wild_account:
                         orders_by_wild_account[key] = []
                     orders_by_wild_account[key].extend(filtered_orders)
-                    
-                    logger.info(f"Получено {len(filtered_orders)} заказов с артикулом {wild_code} из кабинета {account}")
-                    
+
+                    logger.info(
+                        f"Получено {len(filtered_orders)} заказов с артикулом {wild_code} из кабинета {account}")
+
             except Exception as e:
                 logger.error(f"Ошибка обработки результата для {wild_code}, {account}: {str(e)}")
-        
+
         return orders_by_wild_account
 
     async def _fetch_orders_from_supplies(self, request_data, wb_tokens: dict) -> Dict[Tuple[str, str], List[dict]]:
@@ -911,7 +916,8 @@ class SuppliesService:
         results, task_metadata = await self._prepare_and_execute_fetch(request_data, wb_tokens)
         return self._process_fetch_results(results, task_metadata)
 
-    def _select_orders_for_move(self, request_data, orders_by_wild_account: Dict[Tuple[str, str], List[dict]]) -> Tuple[List[dict], Set[Tuple[str, str]]]:
+    def _select_orders_for_move(self, request_data, orders_by_wild_account: Dict[Tuple[str, str], List[dict]]) -> Tuple[
+        List[dict], Set[Tuple[str, str]]]:
         """
         Отбирает заказы для перемещения по времени создания.
         
@@ -924,7 +930,7 @@ class SuppliesService:
         """
         selected_orders_for_move = []
         participating_combinations = set()
-        
+
         for wild_code, wild_item in request_data.orders.items():
             # Собираем все заказы для данного wild_code из всех аккаунтов
             wild_orders = []
@@ -932,26 +938,27 @@ class SuppliesService:
                 key = (wild_code, account)
                 if key in orders_by_wild_account:
                     wild_orders.extend(orders_by_wild_account[key])
-            
+
             # Сортировка по времени создания (новейшие первые, согласно вашему изменению)
             wild_orders.sort(key=lambda x: -x['timestamp'])
-            
+
             # Выбор первых remove_count заказов
             selected_count = min(wild_item.remove_count, len(wild_orders))
             selected_orders = wild_orders[:selected_count]
-            
+
             # Добавляем в список для перемещения
             selected_orders_for_move.extend(selected_orders)
-            
+
             # Запоминаем какие комбинации (wild_code, account) реально участвуют
             for order in selected_orders:
                 participating_combinations.add((order['wild_code'], order['account']))
-            
+
             logger.info(f"Wild {wild_code}: отобрано {len(selected_orders)} из {len(wild_orders)} заказов")
-        
+
         return selected_orders_for_move, participating_combinations
 
-    async def _prepare_and_execute_create_supplies(self, participating_combinations: Set[Tuple[str, str]], wb_tokens: dict) -> Tuple[List, List]:
+    async def _prepare_and_execute_create_supplies(self, participating_combinations: Set[Tuple[str, str]],
+                                                   wb_tokens: dict) -> Tuple[List, List]:
         """
         Подготавливает задачи и выполняет параллельное создание поставок в WB API.
         
@@ -965,20 +972,21 @@ class SuppliesService:
         # Подготовка задач для параллельного создания поставок
         tasks = []
         task_metadata = []
-        
+
         for wild_code, account in participating_combinations:
             supply_full_name = f"Висячая_FBS_{wild_code}_{datetime.now().strftime('%d.%m.%Y_%H:%M')}_{account}"
             supplies_api = Supplies(account, wb_tokens[account])
             task = supplies_api.create_supply(supply_full_name)
             tasks.append(task)
             task_metadata.append((wild_code, account))
-        
+
         # Параллельное выполнение всех запросов
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         return results, task_metadata
 
-    async def _process_create_supplies_results(self, results: List, task_metadata: List, user: dict) -> Dict[Tuple[str, str], str]:
+    async def _process_create_supplies_results(self, results: List, task_metadata: List, user: dict) -> Dict[
+        Tuple[str, str], str]:
         """
         Обрабатывает результаты создания поставок и формирует маппинг.
         
@@ -991,25 +999,25 @@ class SuppliesService:
             Dict[Tuple[str, str], str]: Новые поставки по ключу (wild_code, account)
         """
         new_supplies = {}
-        
+
         for (wild_code, account), result in zip(task_metadata, results):
             if isinstance(result, Exception):
                 logger.error(f"Исключение при создании поставки для {wild_code}, {account}: {str(result)}")
                 continue
-                
+
             try:
                 if 'id' in result:
                     new_supply_id = result['id']
                     new_supplies[(wild_code, account)] = new_supply_id
                     logger.info(f"Создана поставка {new_supply_id} для {wild_code} в кабинете {account}")
-                    
+
                     # Сохраняем как висячую поставку в БД
                     await self._save_as_hanging_supply(new_supply_id, account, wild_code, user)
                 else:
                     logger.error(f"Ошибка создания поставки для {wild_code}, {account}: {result}")
             except Exception as e:
                 logger.error(f"Ошибка обработки результата создания поставки для {wild_code}, {account}: {str(e)}")
-        
+
         return new_supplies
 
     async def _save_as_hanging_supply(self, supply_id: str, account: str, wild_code: str, user: dict):
@@ -1025,21 +1033,24 @@ class SuppliesService:
         try:
             hanging_supplies = HangingSupplies(self.db)
             order_data = {
-                "orders": [], 
-                "wild_code": wild_code, 
+                "orders": [],
+                "wild_code": wild_code,
                 "created_for_move": True,
                 "created_at": datetime.utcnow().isoformat()
             }
             order_data_json = json.dumps(order_data)
             operator = user.get('username', 'move_orders_system')
-            
-            await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
-            logger.info(f"Сохранена висячая поставка {supply_id} для {wild_code} в аккаунте {account}, оператор: {operator}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении висячей поставки {supply_id} для {wild_code} в аккаунте {account}: {str(e)}")
 
-    async def _create_new_supplies(self, participating_combinations: Set[Tuple[str, str]], wb_tokens: dict, user: dict) -> Dict[Tuple[str, str], str]:
+            await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
+            logger.info(
+                f"Сохранена висячая поставка {supply_id} для {wild_code} в аккаунте {account}, оператор: {operator}")
+
+        except Exception as e:
+            logger.error(
+                f"Ошибка при сохранении висячей поставки {supply_id} для {wild_code} в аккаунте {account}: {str(e)}")
+
+    async def _create_new_supplies(self, participating_combinations: Set[Tuple[str, str]], wb_tokens: dict,
+                                   user: dict) -> Dict[Tuple[str, str], str]:
         """
         Создает новые поставки для участвующих комбинаций параллельно.
         
@@ -1053,7 +1064,8 @@ class SuppliesService:
         results, task_metadata = await self._prepare_and_execute_create_supplies(participating_combinations, wb_tokens)
         return await self._process_create_supplies_results(results, task_metadata, user)
 
-    async def _move_orders_to_supplies(self, selected_orders_for_move: List[dict], new_supplies: Dict[Tuple[str, str], str], wb_tokens: dict) -> List[int]:
+    async def _move_orders_to_supplies(self, selected_orders_for_move: List[dict],
+                                       new_supplies: Dict[Tuple[str, str], str], wb_tokens: dict) -> List[int]:
         """
         Перемещает отобранные заказы в новые поставки параллельно.
         
@@ -1068,39 +1080,39 @@ class SuppliesService:
         # Подготовка задач для параллельного перемещения
         tasks = []
         task_metadata = []
-        
+
         for order in selected_orders_for_move:
             wild_code = order['wild_code']
             account = order['account']
             order_id = order['id']
-            
+
             # Находим новую поставку для этой комбинации
             new_supply_id = new_supplies.get((wild_code, account))
             if not new_supply_id:
                 logger.warning(f"Не найдена новая поставка для {wild_code}, {account}")
                 continue
-            
+
             # Создаем задачу для добавления заказа в поставку
             supplies_api = Supplies(account, wb_tokens[account])
             task = supplies_api.add_order_to_supply(new_supply_id, order_id)
             tasks.append(task)
             task_metadata.append((order_id, order['original_supply_id'], new_supply_id))
-        
+
         # Параллельное выполнение всех запросов
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Обработка результатов
         moved_order_ids = []
-        
+
         for (order_id, original_supply_id, new_supply_id), result in zip(task_metadata, results):
             if isinstance(result, Exception):
                 logger.error(f"Исключение при перемещении заказа {order_id}: {str(result)}")
                 continue
-                
+
             # Добавляем все заказы в список перемещенных
             moved_order_ids.append(order_id)
             logger.info(f"Заказ {order_id} перемещен из {original_supply_id} в {new_supply_id}")
-        
+
         return moved_order_ids
 
     async def move_orders_between_supplies_implementation(self, request_data, user: dict) -> Dict[str, Any]:
@@ -1123,7 +1135,8 @@ class SuppliesService:
         orders_by_wild_account = await self._fetch_orders_from_supplies(request_data, wb_tokens)
 
         # 3. Отбираем заказы для перемещения по времени создания
-        selected_orders_for_move, participating_combinations = self._select_orders_for_move(request_data, orders_by_wild_account)
+        selected_orders_for_move, participating_combinations = self._select_orders_for_move(request_data,
+                                                                                            orders_by_wild_account)
 
         # 4. Проверяем что есть заказы для перемещения
         if not selected_orders_for_move:
@@ -1158,7 +1171,7 @@ class SuppliesService:
             "message": f"Операция перемещения выполнена. Перемещено {len(moved_order_ids)} заказов",
             "removed_order_ids": moved_order_ids,
             "processed_supplies": len(new_supplies),
-            "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),}
+            "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}), }
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
         """Группирует заказы по поставкам и создает маппинг заказов."""
@@ -1315,7 +1328,8 @@ class SuppliesService:
             logger.error(f"Ошибка интеграции с 1C: {integration_result}")
 
         if not skip_shipment_api:
-            shipment_result = await self.save_shipments(delivery_supplies, order_wild_map, user.get('username', 'unknown'))
+            shipment_result = await self.save_shipments(delivery_supplies, order_wild_map,
+                                                        user.get('username', 'unknown'))
         else:
             shipment_result = True  # Считаем успешным, так как данные уже отправлены в shipment API
             logger.info("Пропуск отправки в shipment API - данные уже отправлены через _send_enhanced_shipment_data")
@@ -1345,7 +1359,7 @@ class SuppliesService:
         individual_files = [item["file"] for items in qr_codes.values() for item in items if "file" in item]
         if not individual_files:
             return ""
-        
+
         try:
             # Конвертируем все в байты
             image_bytes = []
@@ -1356,22 +1370,22 @@ class SuppliesService:
                 else:
                     # уже байты
                     image_bytes.append(img_data)
-            
+
             # Открываем изображения
             images = [Image.open(io.BytesIO(img_byte)) for img_byte in image_bytes]
-            
+
             # Размеры (предполагаем что все изображения одинакового размера)
             width = images[0].width
             height = images[0].height
-            
+
             # Конвертируем 5мм в пиксели (используем стандартное разрешение 72 DPI)
             # 5мм = 5 * 72 / 25.4 ≈ 14.17 пикселей
             separator_height = int(5 * 72 / 25.4)
-            
+
             # Создаем объединенное изображение с учетом разделителей
             total_height = height * len(images) + separator_height * (len(images) - 1)
             combined = Image.new('RGB', (width, total_height), 'white')
-            
+
             # Размещаем изображения друг за другом вертикально с разделителями
             current_y = 0
             for i, img in enumerate(images):
@@ -1380,21 +1394,21 @@ class SuppliesService:
                 # Добавляем разделитель после каждого изображения кроме последнего
                 if i < len(images) - 1:
                     current_y += separator_height
-            
+
             # Сохраняем в байты и конвертируем в base64
             output = io.BytesIO()
             combined.save(output, format='PNG')
             result_bytes = output.getvalue()
             result_base64 = base64.b64encode(result_bytes).decode('utf-8')
-            
+
             # Очищаем память
             for img in images:
                 img.close()
             combined.close()
             output.close()
-            
+
             return result_base64
-            
+
         except Exception as e:
             logger.error(f"Ошибка объединения QR-кодов: {e}")
             return ""
@@ -1415,37 +1429,39 @@ class SuppliesService:
         try:
             target_article, all_orders = await self._validate_and_get_data(supply_data)
             selected_orders, grouped_orders = self._select_and_group_orders(all_orders, supply_data.shipped_count)
-            
+
             # 1. Создаем новые поставки и перемещаем заказы
             new_supplies_map = await self._create_and_transfer_orders(selected_orders, target_article, user)
-            
+
             # 2. Переводим новые поставки в статус доставки
             await self._deliver_new_supplies(new_supplies_map)
-            
+
             # 3. Обновляем данные заказов с новыми supply_id
             updated_selected_orders = self._update_orders_with_new_supplies(selected_orders, new_supplies_map)
             updated_grouped_orders = self.group_selected_orders_by_supply(updated_selected_orders)
-            
+
             # 4. Подготавливаем данные для 1C и shipment_goods
             delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_selected_orders)
-            
+
             # 5. Обновляем висячие поставки и получаем product_reserves_id
             shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders)
-            
+
             # 6. Отправляем данные в shipment API с product_reserves_id
-            logger.info(f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
+            logger.info(
+                f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
             await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
-            
+
             # 6.1. Сохраняем информацию о новых "фактических" поставках как висячих поставок
             await self._save_new_supplies_as_hanging(new_supplies_map, target_article, user)
-            
+
             # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
                                                                        order_wild_map, user, skip_shipment_api=True)
-            
+
             # 8. Генерируем PDF со стикерами для новых поставок
-            pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article, updated_selected_orders)
-            
+            pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article,
+                                                                              updated_selected_orders)
+
             response_data = {
                 "success": success,
                 "message": "Отгрузка фактического количества выполнена успешно" if success else "Операция выполнена с ошибками",
@@ -1461,7 +1477,7 @@ class SuppliesService:
             }
 
             logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов, "
-                       f"создано {len(new_supplies_map)} новых поставок")
+                        f"создано {len(new_supplies_map)} новых поставок")
             return response_data
 
         except HTTPException:
@@ -1470,51 +1486,53 @@ class SuppliesService:
             logger.error(f"Неожиданная ошибка при отгрузке фактического количества: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
 
-    async def _create_and_transfer_orders(self, selected_orders: List[dict], target_article: str, user: dict) -> Dict[str, str]:
+    async def _create_and_transfer_orders(self, selected_orders: List[dict], target_article: str, user: dict) -> Dict[
+        str, str]:
         """
         Создает новые поставки и перемещает в них заказы.
         Возвращает маппинг account -> new_supply_id
         """
         logger.info(f"Создание новых поставок для артикула {target_article}")
-        
+
         # Группируем заказы по аккаунтам
         orders_by_account = defaultdict(list)
         for order in selected_orders:
             account = order["account"]
             orders_by_account[account].append(order)
-        
+
         new_supplies_map = {}
         wb_tokens = get_wb_tokens()
-        
+
         for account, orders in orders_by_account.items():
             # Создаем имя поставки
             timestamp = datetime.now().strftime("%d.%m.%Y_%H:%M")
             supply_name = f"Факт_{target_article}_{timestamp}_{user.get('username', 'auto')}"
-            
+
             logger.info(f"Создание поставки '{supply_name}' для аккаунта {account} с {len(orders)} заказами")
-            
+
             # Создаем поставку
             supplies_api = Supplies(account, wb_tokens[account])
             create_response = await supplies_api.create_supply(supply_name)
-            
+
             if create_response.get("errors"):
-                raise HTTPException(status_code=500, detail=f"Ошибка создания поставки для {account}: {create_response['errors']}")
-                
+                raise HTTPException(status_code=500,
+                                    detail=f"Ошибка создания поставки для {account}: {create_response['errors']}")
+
             new_supply_id = create_response.get("id")
             if not new_supply_id:
                 raise HTTPException(status_code=500, detail=f"Не получен ID новой поставки для аккаунта {account}")
-            
+
             logger.info(f"Создана поставка {new_supply_id} для аккаунта {account}")
-            
+
             # Перемещаем заказы
             for order in orders:
                 order_id = order["order_id"]
                 transfer_response = await supplies_api.add_order_to_supply(new_supply_id, order_id)
 
                 logger.debug(f"Заказ {order_id} перемещен в поставку {new_supply_id}")
-            
+
             new_supplies_map[account] = new_supply_id
-        
+
         return new_supplies_map
 
     async def _deliver_new_supplies(self, new_supplies_map: Dict[str, str]):
@@ -1522,21 +1540,22 @@ class SuppliesService:
         Переводит новые поставки в статус доставки.
         """
         logger.info(f"Перевод {len(new_supplies_map)} новых поставок в статус доставки")
-        
+
         wb_tokens = get_wb_tokens()
-        
+
         for account, supply_id in new_supplies_map.items():
             supplies_api = Supplies(account, wb_tokens[account])
             await supplies_api.deliver_supply(supply_id)
-            
+
             logger.info(f"Поставка {supply_id} переведена в статус доставки")
 
-    def _update_orders_with_new_supplies(self, selected_orders: List[dict], new_supplies_map: Dict[str, str]) -> List[dict]:
+    def _update_orders_with_new_supplies(self, selected_orders: List[dict], new_supplies_map: Dict[str, str]) -> List[
+        dict]:
         """
         Обновляет заказы с новыми supply_id и сохраняет исходную висячую поставку.
         """
         updated_orders = []
-        
+
         for order in selected_orders:
             account = order["account"]
             if account in new_supplies_map:
@@ -1548,10 +1567,11 @@ class SuppliesService:
                 updated_orders.append(updated_order)
             else:
                 updated_orders.append(order)  # Fallback
-        
+
         return updated_orders
 
-    async def _update_hanging_supplies_shipped_quantities(self, grouped_orders: Dict[str, List[dict]]) -> List[Dict[str, Any]]:
+    async def _update_hanging_supplies_shipped_quantities(self, grouped_orders: Dict[str, List[dict]]) -> List[
+        Dict[str, Any]]:
         """
         Отправляет данные об отгруженных количествах для висячих поставок в API add_shipped_goods.
         
@@ -1562,15 +1582,15 @@ class SuppliesService:
             List[Dict[str, Any]]: Ответ от API с product_reserves_id для каждой поставки
         """
         logger.info(f"Отправка данных об отгруженных количествах для {len(grouped_orders)} висячих поставок")
-        
+
         shipped_goods_data = self._prepare_shipped_goods_data(grouped_orders)
-        
+
         if not shipped_goods_data:
             logger.warning("Нет данных для отправки в API add_shipped_goods")
             return []
-        
+
         return await self._send_shipped_goods_to_api(shipped_goods_data)
-    
+
     def _prepare_shipped_goods_data(self, grouped_orders: Dict[str, List[dict]]) -> List[Dict[str, Any]]:
         """
         Подготавливает данные об отгруженных количествах для API.
@@ -1582,23 +1602,23 @@ class SuppliesService:
             List[Dict[str, Any]]: Подготовленные данные для API
         """
         shipped_goods_data = []
-        
+
         for supply_id, orders in grouped_orders.items():
             if not orders:
                 continue
-                
+
             quantity_shipped = len(orders)
-            
+
             shipped_goods_item = {
                 "supply_id": supply_id,
                 "quantity_shipped": quantity_shipped
             }
-            
+
             shipped_goods_data.append(shipped_goods_item)
             logger.debug(f"Подготовлены данные для поставки {supply_id}: отгружено {quantity_shipped} заказов")
-        
+
         return shipped_goods_data
-    
+
     async def _send_shipped_goods_to_api(self, shipped_goods_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Отправляет данные об отгруженных количествах в API.
@@ -1614,8 +1634,6 @@ class SuppliesService:
 
             logger.info(f"Отправка запроса на URL: {api_url}")
             logger.debug(f"Данные для отправки: {json.dumps(shipped_goods_data, ensure_ascii=False, indent=2)}")
-
-
 
             response = await self.async_client.post(
                 url=api_url,
@@ -1644,9 +1662,9 @@ class SuppliesService:
             # Не пробрасываем исключение, так как это не критично для основного процесса
             return []
 
-    async def _send_enhanced_shipment_data(self, updated_selected_orders: List[dict], 
-                                         shipped_goods_response: List[Dict[str, Any]], 
-                                         user: dict) -> None:
+    async def _send_enhanced_shipment_data(self, updated_selected_orders: List[dict],
+                                           shipped_goods_response: List[Dict[str, Any]],
+                                           user: dict) -> None:
         """
         Отправляет данные об отгрузке в API с добавлением product_reserves_id из ответа shipped_goods API.
         
@@ -1656,13 +1674,13 @@ class SuppliesService:
             user: Данные пользователя для определения автора
         """
         logger.info(f"Отправка расширенных данных об отгрузке для {len(updated_selected_orders)} заказов")
-        
+
         reserves_mapping = self._create_reserves_mapping(shipped_goods_response)
         delivery_supplies, order_wild_map = self._prepare_delivery_data(updated_selected_orders)
         shipment_data = await self._get_base_shipment_data(delivery_supplies, order_wild_map, user)
         enhanced_shipment_data = self._enhance_with_reserves(shipment_data, updated_selected_orders, reserves_mapping)
         await self._filter_and_send_shipment_data(enhanced_shipment_data)
-    
+
     def _create_reserves_mapping(self, shipped_goods_response: List[Dict[str, Any]]) -> Dict[str, int]:
         """
         Создает маппинг supply_id -> product_reserves_id из ответа shipped_goods API.
@@ -1677,10 +1695,10 @@ class SuppliesService:
         for item in shipped_goods_response:
             if isinstance(item, dict) and 'supply_id' in item and 'product_reserves_id' in item:
                 reserves_mapping[item['supply_id']] = item['product_reserves_id']
-        
+
         logger.debug(f"Маппинг резервов: {reserves_mapping}")
         return reserves_mapping
-    
+
     def _prepare_delivery_data(self, updated_selected_orders: List[dict]) -> Tuple[List, Dict[str, str]]:
         """
         Подготавливает данные для создания DeliverySupplyInfo объектов.
@@ -1693,7 +1711,7 @@ class SuppliesService:
         """
         delivery_supplies = []
         order_wild_map = {}
-        
+
         # Группируем заказы по supply_id для создания DeliverySupplyInfo
         orders_by_supply = defaultdict(list)
         for order in updated_selected_orders:
@@ -1702,7 +1720,7 @@ class SuppliesService:
             orders_by_supply[(supply_id, account)].append(order.get("order_id"))
             # Сохраняем маппинг order_id -> wild для order_wild_map
             order_wild_map[str(order.get("order_id"))] = order.get("article")
-        
+
         # Создаем объекты DeliverySupplyInfo
         for (supply_id, account), order_ids in orders_by_supply.items():
             delivery_supply = type('DeliverySupplyInfo', (), {
@@ -1711,10 +1729,11 @@ class SuppliesService:
                 'order_ids': order_ids
             })()
             delivery_supplies.append(delivery_supply)
-        
+
         return delivery_supplies, order_wild_map
-    
-    async def _get_base_shipment_data(self, delivery_supplies: List, order_wild_map: Dict[str, str], user: dict) -> List[Dict[str, Any]]:
+
+    async def _get_base_shipment_data(self, delivery_supplies: List, order_wild_map: Dict[str, str], user: dict) -> \
+            List[Dict[str, Any]]:
         """
         Получает базовые данные для отгрузки через существующий метод prepare_shipment_data.
         
@@ -1727,16 +1746,16 @@ class SuppliesService:
             List[Dict[str, Any]]: Базовые данные для отгрузки
         """
         return await self.prepare_shipment_data(
-            delivery_supplies, 
-            order_wild_map, 
+            delivery_supplies,
+            order_wild_map,
             user.get('username', 'unknown'),  # Используем реального пользователя вместо 'system_hanging_shipment'
             warehouse_id=1,
             delivery_type="ФБС"
         )
-    
-    def _enhance_with_reserves(self, shipment_data: List[Dict[str, Any]], 
-                              updated_selected_orders: List[dict], 
-                              reserves_mapping: Dict[str, int]) -> List[Dict[str, Any]]:
+
+    def _enhance_with_reserves(self, shipment_data: List[Dict[str, Any]],
+                               updated_selected_orders: List[dict],
+                               reserves_mapping: Dict[str, int]) -> List[Dict[str, Any]]:
         """
         Добавляет product_reserves_id к данным отгрузки.
         
@@ -1749,27 +1768,28 @@ class SuppliesService:
             List[Dict[str, Any]]: Обогащенные данные с product_reserves_id
         """
         enhanced_shipment_data = []
-        
+
         for item in shipment_data:
             enhanced_item = item.copy()
-            
+
             # Ищем соответствующий заказ для получения original_hanging_supply_id
             supply_id = item.get("supply_id")
             matching_order = next(
-                (order for order in updated_selected_orders if order.get("supply_id") == supply_id), 
+                (order for order in updated_selected_orders if order.get("supply_id") == supply_id),
                 None
             )
-            
+
             if matching_order:
                 original_supply_id = matching_order.get("original_hanging_supply_id")
                 if original_supply_id and original_supply_id in reserves_mapping:
                     enhanced_item["product_reserves_id"] = reserves_mapping[original_supply_id]
-                    logger.debug(f"Добавлен product_reserves_id={reserves_mapping[original_supply_id]} для supply_id {supply_id}")
-            
+                    logger.debug(
+                        f"Добавлен product_reserves_id={reserves_mapping[original_supply_id]} для supply_id {supply_id}")
+
             enhanced_shipment_data.append(enhanced_item)
-        
+
         return enhanced_shipment_data
-    
+
     async def _filter_and_send_shipment_data(self, enhanced_shipment_data: List[Dict[str, Any]]) -> None:
         """
         Фильтрует и отправляет обогащенные данные отгрузки в API.
@@ -1783,17 +1803,18 @@ class SuppliesService:
 
         shipment_repository = ShipmentOfGoods(self.db)
         filter_wild = await shipment_repository.filter_wilds()
-        
+
         filtered_shipment_data = [item for item in enhanced_shipment_data if item['product_id'] in filter_wild]
-        logger.info(f"Отфильтровано записей для висячих: {len(enhanced_shipment_data)} -> {len(filtered_shipment_data)}")
-        
+        logger.info(
+            f"Отфильтровано записей для висячих: {len(enhanced_shipment_data)} -> {len(filtered_shipment_data)}")
+
         if filtered_shipment_data:
             await self._send_shipment_data_to_api(filtered_shipment_data)
         else:
             logger.warning("Нет данных для отправки в shipment API после фильтрации")
 
-    async def _generate_pdf_stickers_for_new_supplies(self, new_supplies_map: Dict[str, str], target_article: str, 
-                                                     updated_selected_orders: List[dict]) -> str:
+    async def _generate_pdf_stickers_for_new_supplies(self, new_supplies_map: Dict[str, str], target_article: str,
+                                                      updated_selected_orders: List[dict]) -> str:
         """
         Генерирует PDF со стикерами для новых поставок, переиспользуя логику из роутера.
         
@@ -1806,27 +1827,27 @@ class SuppliesService:
             str: Base64 строка PDF файла со стикерами
         """
         logger.info(f'Генерация PDF стикеров для новых поставок с артикулом: {target_article}')
-        
+
         # Группируем заказы по новым поставкам
         supplies_data = defaultdict(list)
         for order in updated_selected_orders:
             supply_id = order["supply_id"]
             account = order["account"]
-            
+
             # Проверяем, что это новая поставка
             if account in new_supplies_map and new_supplies_map[account] == supply_id:
                 supplies_data[supply_id].append({
                     "account": account,
                     "order_id": order["order_id"]
                 })
-        
+
         if not supplies_data:
             logger.warning("Нет данных для генерации PDF стикеров новых поставок")
             return ""
-        
+
         # Подготавливаем данные в формате WildFilterRequest
         from src.supplies.schema import WildFilterRequest, WildSupplyItem, WildOrderItem
-        
+
         wild_supply_items = []
         for supply_id, orders in supplies_data.items():
             if orders:
@@ -1838,28 +1859,29 @@ class SuppliesService:
                         orders=[WildOrderItem(order_id=order["order_id"]) for order in orders]
                     )
                 )
-        
+
         wild_filter = WildFilterRequest(
             wild=target_article,
             supplies=wild_supply_items
         )
-        
+
         # Переиспользуем точно ту же логику что и в роутере generate_stickers_by_wild
         logger.info(f"Генерация PDF стикеров для {len(wild_supply_items)} новых поставок")
         result_stickers = await self.filter_and_fetch_stickers_by_wild(wild_filter)
-        
+
         # Импортируем функцию для создания PDF
         from src.service.service_pdf import collect_images_sticker_to_pdf
         pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
-        
+
         # Конвертируем PDF в base64 для передачи
         import base64
         pdf_base64 = base64.b64encode(pdf_sticker.getvalue()).decode('utf-8')
-        
+
         logger.info(f"PDF стикеры сгенерированы успешно для артикула {target_article}")
         return pdf_base64
 
-    async def _save_new_supplies_as_hanging(self, new_supplies_map: Dict[str, str], target_article: str, user: dict) -> None:
+    async def _save_new_supplies_as_hanging(self, new_supplies_map: Dict[str, str], target_article: str,
+                                            user: dict) -> None:
         """
         Сохраняет новые фактические поставки как висячие поставки параллельно.
         
@@ -1871,9 +1893,9 @@ class SuppliesService:
         if not new_supplies_map:
             logger.info("Нет новых поставок для сохранения как висячие")
             return
-        
+
         logger.info(f"Сохранение {len(new_supplies_map)} новых фактических поставок как висячих поставок")
-        
+
         # Создаем задачи для параллельного выполнения
         tasks = [
             self._save_as_hanging_supply(
@@ -1884,8 +1906,52 @@ class SuppliesService:
             )
             for account, new_supply_id in new_supplies_map.items()
         ]
-        
+
         # Выполняем все задачи параллельно
         await asyncio.gather(*tasks)
-        
+
         logger.info(f"Сохранено {len(new_supplies_map)} новых фактических поставок как висячие")
+
+    async def get_single_supply_sticker(self, supply_id: str, account: str) -> BytesIO:
+        """
+                Get PNG sticker for supply.
+
+                Args:
+                    supply_id: Order ID
+                    account: Account name
+
+                Returns:
+                    BytesIO: PNG sticker data
+                """
+        try:
+            # Get tokens
+            tokens = get_wb_tokens()
+            if account not in tokens:
+                raise ValueError(f"Account not found: {account}")
+
+            # Create WB orders client
+            wb_orders = Supplies(account, tokens[account])
+
+            # Get sticker data
+            sticker_data = await wb_orders.get_sticker_by_supply_ids(supply_id)
+
+            # Validate response
+            if not sticker_data:
+                raise ValueError(f"No sticker data for order {supply_id}")
+
+            # Get base64 data
+            sticker_base64 = sticker_data.get("file")
+            if not sticker_base64:
+                raise ValueError(f"Sticker data corrupted for order {sticker_data}")
+
+            # Decode base64 to PNG
+            png_data = base64.b64decode(sticker_base64)
+            png_buffer = BytesIO(png_data)
+            png_buffer.seek(0)
+
+            return png_buffer
+
+        except ValueError:
+            raise
+        except Exception as e:
+            raise Exception(f"Sticker error: {str(e)}")

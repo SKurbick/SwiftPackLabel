@@ -89,3 +89,8 @@ class Supplies(Account):
         response = await self.async_client.get(f"{self.url}/{supply_id}", headers=self.headers)
         logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
         return parse_json(response)
+
+    async def get_sticker_by_supply_ids(self,supply_id):
+        response = await self.async_client.get(f"{self.url}/{supply_id}/barcode?type=png", headers=self.headers)
+        logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
+        return parse_json(response)

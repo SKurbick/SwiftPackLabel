@@ -21,46 +21,46 @@ class Orders(Account):
         return parse_json(response)
 
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
-        logger.info(f"Начинаем получение стикеров для поставки {supply}, аккаунт {self.account}, заказов: {len(order_ids)}")
-        logger.debug(f"ID заказов: {order_ids}")
+        logger.info(f"Getting stickers for supply {supply}, account {self.account}, orders count: {len(order_ids)}")
+        logger.debug(f"Order IDs: {order_ids}")
         
         url_with_params = f"{self.url}/stickers?type=png&width=58&height=40"
         batches = [order_ids[i:i + 99] for i in range(0, len(order_ids), 99)]
-        logger.info(f"Разделено на {len(batches)} батчей по 99 заказов")
+        logger.info(f"Split into {len(batches)} batches of 99 orders each")
 
         sticker_batches = await asyncio.gather(
             *[self.async_client.post(url_with_params, headers=self.headers, data=json.dumps({"orders": batch}))
               for batch in batches])
         
-        logger.info(f"Получены ответы от {len(sticker_batches)} батчей")
+        logger.info(f"Received responses from {len(sticker_batches)} batches")
 
         result = {}
         for i, response in enumerate(sticker_batches):
             if not response:
-                logger.warning(f"Пустой ответ от батча {i+1}")
+                logger.warning(f"Empty response from batch {i+1}")
                 continue
 
             try:
                 response_json = parse_json(response)
-                logger.debug(f"Батч {i+1}: получено стикеров - {len(response_json.get('stickers', []))}")
+                logger.debug(f"Batch {i+1}: received stickers - {len(response_json.get('stickers', []))}")
             except Exception as e:
-                logger.error(f"Ошибка при парсинге ответа батча {i+1}: {str(e)}")
-                logger.error(f"Сырой ответ: {response}")
+                logger.error(f"Error parsing response from batch {i+1}: {str(e)}")
+                logger.error(f"Raw response: {response}")
                 continue
 
             if not result:
                 result = {self.account: {supply: response_json}}
-                logger.debug(f"Инициализирован результат для аккаунта {self.account}, поставки {supply}")
+                logger.debug(f"Initialized result for account {self.account}, supply {supply}")
             else:
                 result[self.account][supply]['stickers'].extend(response_json['stickers'])
-                logger.debug(f"Добавлено {len(response_json['stickers'])} стикеров к существующему результату")
+                logger.debug(f"Added {len(response_json['stickers'])} stickers to existing result")
 
         total_stickers = len(result.get(self.account, {}).get(supply, {}).get('stickers', []))
-        logger.info(f"Завершено получение стикеров. Итого стикеров: {total_stickers}")
+        logger.info(f"Completed getting stickers. Total stickers: {total_stickers}")
         return result
 
     async def get_new_orders(self):
-        """Получает новые заказы от WB API."""
+        """Gets new orders from WB API."""
         orders = []
         next_value = 0
         while True:
@@ -69,14 +69,14 @@ class Orders(Account):
             data = parse_json(response)
             orders.extend(data.get("orders", []))
             next_value = data.get("next")
-            logger.info(f"Получены {len(orders)} новых заказов and next {next_value}, account {self.account}")
+            logger.info(f"Got {len(orders)} new orders and next {next_value}, account {self.account}")
             if not next_value:
                 break
 
         return orders
 
     async def get_orders(self):
-        """Получает все заказы от WB API."""
+        """Gets all orders from WB API."""
         orders = []
         next_value = 0
         while True:
@@ -85,7 +85,7 @@ class Orders(Account):
             data = parse_json(response)
             orders.extend(data.get("orders", []))
             next_value = data.get("next")
-            logger.info(f"Получены {len(orders)} заказов and next {next_value}, account {self.account}")
+            logger.info(f"Got {len(orders)} orders and next {next_value}, account {self.account}")
             if not next_value:
                 break
 

@@ -2,6 +2,8 @@ import asyncio
 import datetime
 import json
 from typing import List, Dict, Any, Set, Tuple
+from io import BytesIO
+import base64
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
@@ -740,3 +742,61 @@ class OrdersService:
             logger.info(f"Результат резервации товаров: {reservation_result}")
             
         return self._prepare_result(orders_added_by_article, order_supply_mapping)
+
+    async def get_single_order_sticker(self, order_id: int, account: str) -> BytesIO:
+        """
+        Get PNG sticker for specific order.
+        
+        Args:
+            order_id: Order ID
+            account: Account name
+            
+        Returns:
+            BytesIO: PNG sticker data
+        """
+        try:
+            # Get tokens
+            tokens = get_wb_tokens()
+            if account not in tokens:
+                raise ValueError(f"Account not found: {account}")
+            
+            # Create WB orders client
+            wb_orders = Orders(account, tokens[account])
+            
+            # Get sticker data
+            sticker_data = await wb_orders.get_stickers_to_orders("single_order", [order_id])
+            
+            # Validate response
+            if not sticker_data or account not in sticker_data:
+                raise ValueError(f"No sticker data for order {order_id}")
+            
+            stickers = sticker_data[account]["single_order"].get("stickers", [])
+            if not stickers:
+                raise ValueError(f"No stickers for order {order_id}")
+            
+            # Find target sticker
+            target_sticker = None
+            for sticker in stickers:
+                if sticker.get("orderId") == order_id:
+                    target_sticker = sticker
+                    break
+            
+            if not target_sticker:
+                raise ValueError(f"Order {order_id} sticker not found")
+            
+            # Get base64 data
+            sticker_base64 = target_sticker.get("file")
+            if not sticker_base64:
+                raise ValueError(f"Sticker data corrupted for order {order_id}")
+            
+            # Decode base64 to PNG
+            png_data = base64.b64decode(sticker_base64)
+            png_buffer = BytesIO(png_data)
+            png_buffer.seek(0)
+            
+            return png_buffer
+            
+        except ValueError:
+            raise
+        except Exception as e:
+            raise Exception(f"Sticker error: {str(e)}")
