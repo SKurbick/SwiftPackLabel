@@ -266,6 +266,8 @@ class OneCIntegration:
 
         logger.info(f"Отправка данных в 1C: {len(str(request_body))} байт")
 
+        logger.info(f"Отправка данных в 1C: {request_body} байт")
+
         if not settings.ONEC_USER or not settings.ONEC_PASSWORD:
             return {"status_code": 500, "message": "Отсутствуют учетные данные для 1C"}
 
