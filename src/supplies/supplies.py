@@ -48,7 +48,8 @@ class SuppliesService:
                 "partB": order.partB,
                 "category": name_and_photo.get(order.nm_id, {"category": "НЕТ Категории"})["category"],
                 "subject_name": name_and_photo.get(order.nm_id, {"subject_name": "НЕТ Наименования"})["subject_name"],
-                "photo_link": name_and_photo.get(order.nm_id, {"photo_link": "НЕТ ФОТО"})["photo_link"]}
+                "photo_link": name_and_photo.get(order.nm_id, {"photo_link": "НЕТ ФОТО"})["photo_link"],
+                "createdAt": order.createdAt}
 
     @staticmethod
     def _change_category_name(result: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -78,7 +79,8 @@ class SuppliesService:
                 else:
                     result[order.local_vendor_code].append(self.format_data_to_result(supply, order, name_and_photo))
         # self._change_category_name(result)
-        return dict(sorted(result.items(), key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]), ))
+        data = {k: sorted(v, key=lambda x: x['createdAt'],reverse=True) for k, v in result.items()}
+        return dict(sorted(data.items(), key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]), ))
 
     @staticmethod
     async def get_information_to_supplies() -> List[Dict]:
