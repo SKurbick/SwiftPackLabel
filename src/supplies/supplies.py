@@ -79,7 +79,7 @@ class SuppliesService:
                 else:
                     result[order.local_vendor_code].append(self.format_data_to_result(supply, order, name_and_photo))
         # self._change_category_name(result)
-        data = {k: sorted(v, key=lambda x: x['createdAt'],reverse=True) for k, v in result.items()}
+        data = {k: sorted(v, key=lambda x: x.get('createdAt', ''), reverse=True) for k, v in result.items()}
         return dict(sorted(data.items(), key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]), ))
 
     @staticmethod
@@ -297,6 +297,8 @@ class SuppliesService:
         for supply in supply_ids.supplies:
             tasks.append(Supplies(supply.account, get_wb_tokens()[supply.account]).get_supply_orders(supply.supply_id))
         result: Dict[str, Dict] = self.group_result(await asyncio.gather(*tasks))
+        self._enrich_orders_with_created_at(supply_ids, result)
+        
         for supply in supply_ids.supplies:
             supply_orders: Set[int] = {order.order_id for order in supply.orders}
             check_orders: Set[int] = {order.get("id") for order in
@@ -316,6 +318,33 @@ class SuppliesService:
                     raise HTTPException(status_code=409,
                                         detail=f'Есть различия между поставками {diff} в кабинете {supply.account}'
                                                f' Номер поставки : {supply.supply_id}')
+
+    @staticmethod
+    def _enrich_orders_with_created_at(supply_ids: SupplyIdBodySchema, wb_result: Dict[str, Dict]) -> None:
+        """
+        Обогащает заказы значениями createdAt из данных WB API
+        
+        Args:
+            supply_ids: Схема с поставками и заказами для обогащения
+            wb_result: Результат от WB API с полными данными заказов
+        """
+        order_dates = {
+            order['id']: order['createdAt'] 
+            for account_data in wb_result.values() 
+            for supply_data in account_data.values() 
+            for order in supply_data.get('orders', [])
+            if order.get('id') and order.get('createdAt')
+        }
+
+        enriched_count = 0
+        for supply in supply_ids.supplies:
+            for order in supply.orders:
+                if not order.createdAt and order.order_id in order_dates:
+                    order.createdAt = order_dates[order.order_id]
+                    enriched_count += 1
+        
+        if enriched_count > 0:
+            logger.info(f"Обогащено {enriched_count} заказов данными createdAt")
 
     async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema) -> Dict[str, List[Dict[str, Any]]]:
         logger.info('Инициализация получение документов (Стикеры и Лист подбора)')
