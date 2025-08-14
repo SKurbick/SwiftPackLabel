@@ -79,7 +79,7 @@ class ShipmentOfGoods:
         SELECT DISTINCT supply_id, account
         FROM public.shipment_of_goods
         WHERE created_at >= CURRENT_DATE
-          AND created_at < CURRENT_DATE + INTERVAL '1 week'
+          AND created_at < CURRENT_DATE + INTERVAL '1 week' AND delivery_type = 'ФБС'
         ORDER BY supply_id
         """
         
