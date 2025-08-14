@@ -200,6 +200,7 @@ class OrdersService:
         elapsed_time = self._calculate_elapsed_time(created_at)
         return {
             "id": supply.get("id"),
+            "nm_id": nm_id,
             "article": local_vendor_code,
             "photo": photo,
             "subject_name": subject_name,

@@ -23,6 +23,7 @@ class BaseResponseSchema(BaseSchema):
 class OrderDetail(BaseSchema):
     """Модель заказа с детальной информацией."""
     id: int
+    nm_id:int
     article: str
     photo: str = "Нет фото"
     subject_name: str = "Нет наименования"
