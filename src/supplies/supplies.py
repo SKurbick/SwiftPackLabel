@@ -1986,3 +1986,123 @@ class SuppliesService:
             raise
         except Exception as e:
             raise Exception(f"Sticker error: {str(e)}")
+
+    async def get_multiple_supply_stickers(self, supplies_map: Dict[str, str]) -> BytesIO:
+        """
+        Get PNG stickers for multiple supplies from different accounts and combine them into a single PNG file.
+
+        Args:
+            supplies_map: Dictionary mapping supply_id to account_name
+
+        Returns:
+            BytesIO: Combined PNG file with all stickers arranged vertically
+        """
+        try:
+            # Get tokens
+            tokens = get_wb_tokens()
+
+            if missing_accounts := [
+                account
+                for account in supplies_map.values()
+                if account not in tokens
+            ]:
+                raise ValueError(f"Accounts not found: {missing_accounts}")
+
+            # Group supplies by account for optimization
+            account_supplies = {}
+            for supply_id, account in supplies_map.items():
+                if account not in account_supplies:
+                    account_supplies[account] = []
+                account_supplies[account].append(supply_id)
+
+            # Create tasks for each supply with its specific account
+            sticker_tasks = []
+            supply_account_pairs = []
+
+            logger.info(f"Fetching stickers for {len(supplies_map)} supplies from {len(account_supplies)} accounts in parallel")
+
+            for supply_id, account in supplies_map.items():
+                wb_supplies = Supplies(account, tokens[account])
+                task = wb_supplies.get_sticker_by_supply_ids(supply_id)
+                sticker_tasks.append(task)
+                supply_account_pairs.append((supply_id, account))
+
+            # Fetch all stickers in parallel using asyncio.gather
+            sticker_responses = await asyncio.gather(*sticker_tasks, return_exceptions=True)
+
+            # Process responses and collect valid PNG data
+            png_images = []
+            successful_supplies = []
+
+            for (supply_id, account), response in zip(supply_account_pairs, sticker_responses):
+                if isinstance(response, Exception):
+                    logger.error(f"Error fetching sticker for supply {supply_id} (account: {account}): {response}")
+                    continue
+
+                if not response or not response.get("file"):
+                    logger.warning(f"No sticker data for supply {supply_id} (account: {account})")
+                    continue
+
+                try:
+                    # Decode base64 to PNG data
+                    png_data = base64.b64decode(response["file"])
+                    png_images.append(png_data)
+                    successful_supplies.append(f"{supply_id} ({account})")
+                    logger.debug(f"Successfully processed sticker for supply {supply_id} (account: {account})")
+                except Exception as e:
+                    logger.error(f"Error decoding sticker for supply {supply_id} (account: {account}): {e}")
+                    continue
+
+            if not png_images:
+                raise ValueError("No valid stickers found for any of the provided supplies")
+
+            # Combine PNG images vertically
+            combined_image = self._combine_png_images_vertically(png_images)
+
+            # Convert combined image back to BytesIO
+            output_buffer = BytesIO()
+            combined_image.save(output_buffer, format='PNG')
+            output_buffer.seek(0)
+
+            logger.info(f"Successfully combined {len(png_images)} stickers for supplies: {successful_supplies}")
+            return output_buffer
+
+        except ValueError:
+            raise
+        except Exception as e:
+            raise Exception(f"Multiple stickers error: {str(e)}")
+
+    def _combine_png_images_vertically(self, png_data_list: List[bytes]) -> Image.Image:
+        """
+        Combine multiple PNG images vertically into a single image.
+
+        Args:
+            png_data_list: List of PNG image data as bytes
+
+        Returns:
+            PIL.Image: Combined image
+        """
+        try:
+            # Open all images
+            images = [Image.open(BytesIO(png_data)) for png_data in png_data_list]
+            
+            # Calculate total height and max width
+            total_height = sum(img.height for img in images)
+            max_width = max(img.width for img in images)
+            
+            # Create new image with combined dimensions
+            combined_image = Image.new('RGB', (max_width, total_height), 'white')
+            
+            # Paste images one by one
+            y_offset = 0
+            for img in images:
+                # Center the image horizontally if it's narrower than max_width
+                x_offset = (max_width - img.width) // 2
+                combined_image.paste(img, (x_offset, y_offset))
+                y_offset += img.height
+            
+            return combined_image
+            
+        except Exception as e:
+            logger.error(f"Error combining PNG images: {e}")
+            raise Exception(f"Image combination error: {str(e)}")

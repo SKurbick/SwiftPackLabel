@@ -174,3 +174,8 @@ class MoveOrdersResponse(BaseSchema):
     removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
     processed_supplies: int = Field(description="Количество обработанных поставок")
     processed_wilds: int = Field(description="Количество обработанных wild-кодов")
+
+
+class SupplyBarcodeListRequest(BaseSchema):
+    """Схема запроса для получения штрихкодов списка поставок."""
+    supplies: Dict[str, str] = Field(description="Словарь поставок: {supply_id: account_name}")

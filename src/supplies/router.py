@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Body, status, HTTPException,Path,Query
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
-    SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse
+    SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -315,35 +315,34 @@ async def clean_empty_supplies(
         )
 
 
-@supply.get("/barcode/{supply_id}",
-            status_code=status.HTTP_200_OK,
-            response_description="PNG стикер для для поставки",
-            responses={200: {"content": {"image/png": {}},
-                             "description": "PNG файл поставки"},
-                       404: {"description": "Поставка не найдено"},
-                       422: {"description": "Ошибка валидации параметров"}})
-async def get_order_sticker(
-        supply_id: str = Path(..., description="Номер Поставки"),
-        account: str = Query(..., description="Наименование аккаунта"),
+@supply.post("/barcode",
+             status_code=status.HTTP_200_OK,
+             response_description="PNG файл с объединенными стикерами поставок",
+             responses={200: {"content": {"image/png": {}},
+                              "description": "PNG файл с объединенными стикерами поставок"},
+                        404: {"description": "Поставки не найдены"},
+                        422: {"description": "Ошибка валидации параметров"}})
+async def get_supply_stickers(
+        request: SupplyBarcodeListRequest = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> StreamingResponse:
     """
-    Получить PNG стикер для конкретного сборочного задания.
+    Получить PNG файл с объединенными стикерами для списка поставок.
 
     Args:
-        order_id: Номер сборочного задания
-        account: Наименование аккаунта
+        request: Словарь поставок с привязкой к аккаунтам {supply_id: account_name}
         db: Соединение с базой данных
         user: Данные текущего пользователя
 
     Returns:
-        StreamingResponse: PNG файл стикера
+        StreamingResponse: PNG файл с объединенными стикерами
     """
     try:
         supply_service = SuppliesService()
-        png_buffer = await supply_service.get_single_supply_sticker(supply_id, account)
-        filename = f'sticker_{supply_id}.png'
+        png_buffer = await supply_service.get_multiple_supply_stickers(request.supplies)
+        
+        filename = f'stickers_{len(request.supplies)}_supplies.png'
 
         return StreamingResponse(
             png_buffer,
