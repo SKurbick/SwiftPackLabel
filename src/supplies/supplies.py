@@ -141,6 +141,54 @@ class SuppliesService:
         logger.info(f"Обогащено {len(enriched_supplies)} групп поставок информацией из WB API")
         return enriched_supplies
 
+    def _exclude_wb_active_from_db_supplies(self, db_supplies: List[Dict], wb_active_supplies: List[Dict]) -> List[Dict]:
+        """
+        Исключает из БД поставок те, которые есть среди активных WB поставок.
+        
+        Args:
+            db_supplies: Поставки из базы данных (из get_weekly_supply_ids)
+            wb_active_supplies: Активные поставки из WB API (из get_information_to_supplies)
+        
+        Returns:
+            List[Dict]: Отфильтрованные поставки из БД (только те, которых нет в активных WB)
+        """
+        # Создаем множество активных поставок (supply_id, account)
+        wb_active_set = set()
+        for account_data in wb_active_supplies:
+            for account, supplies_list in account_data.items():
+                for supply in supplies_list:
+                    wb_active_set.add((supply['id'], account))
+        
+        logger.info(f"Найдено {len(wb_active_set)} активных поставок в WB API для исключения")
+        
+        # Фильтруем БД поставки
+        filtered_supplies = []
+        excluded_count = 0
+        total_count = 0
+        
+        for account_data in db_supplies:
+            filtered_account_data = {}
+            for account, supplies_list in account_data.items():
+                filtered_supplies_list = []
+                for supply in supplies_list:
+                    total_count += 1
+                    if (supply['id'], account) not in wb_active_set:
+                        filtered_supplies_list.append(supply)
+                    else:
+                        excluded_count += 1
+                        logger.debug(f"Исключена поставка {supply['id']} из аккаунта {account} (найдена в активных WB)")
+                
+                if filtered_supplies_list:
+                    filtered_account_data[account] = filtered_supplies_list
+            
+            if filtered_account_data:
+                filtered_supplies.append(filtered_account_data)
+        
+        logger.info(f"Обработано {total_count} поставок из БД, исключено {excluded_count}, "
+                    f"осталось {total_count - excluded_count} для дальнейшей обработки")
+        
+        return filtered_supplies
+
     @staticmethod
     async def get_information_orders_to_supplies(supply_ids: List[dict]) -> List[Dict[str, Dict]]:
         logger.info(f'Получение информации о заказах по конкретным поставкам,количество поставок : {len(supply_ids)}')
@@ -267,9 +315,11 @@ class SuppliesService:
 
         # Выбор источника данных в зависимости от is_delivery
         if is_delivery:
-            logger.info("Получение поставок из отгрузок за неделю")
+            logger.info("Получение поставок из отгрузок за неделю, исключая активные WB поставки")
+            wb_active_supplies_ids: List[Any] = await self.get_information_to_supplies()
             basic_supplies_ids: List[Any] = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
-            supplies_ids: List[Any] = await self.get_information_to_supply_details(basic_supplies_ids)
+            filtered_basic_supplies_ids = self._exclude_wb_active_from_db_supplies(basic_supplies_ids, wb_active_supplies_ids)
+            supplies_ids: List[Any] = await self.get_information_to_supply_details(filtered_basic_supplies_ids)
         else:
             logger.info("Получение поставок из WB API")
             supplies_ids: List[Any] = await self.get_information_to_supplies()
@@ -293,12 +343,15 @@ class SuppliesService:
 
     async def check_current_orders(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False):
         logger.info("Проверка поставок на соответствие наличия заказов (сверка заказов по поставкам)")
-        tasks: List = []
-        for supply in supply_ids.supplies:
-            tasks.append(Supplies(supply.account, get_wb_tokens()[supply.account]).get_supply_orders(supply.supply_id))
+        tasks: List = [
+            Supplies(
+                supply.account, get_wb_tokens()[supply.account]
+            ).get_supply_orders(supply.supply_id)
+            for supply in supply_ids.supplies
+        ]
         result: Dict[str, Dict] = self.group_result(await asyncio.gather(*tasks))
         self._enrich_orders_with_created_at(supply_ids, result)
-        
+
         for supply in supply_ids.supplies:
             supply_orders: Set[int] = {order.order_id for order in supply.orders}
             check_orders: Set[int] = {order.get("id") for order in
