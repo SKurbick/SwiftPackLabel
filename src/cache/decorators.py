@@ -107,8 +107,8 @@ def _serialize_params(args: tuple, kwargs: dict) -> str:
         # Фильтруем специальные объекты, которые не нужно включать в ключ
         filtered_kwargs = {}
         for k, v in kwargs.items():
-            # Пропускаем объекты соединения с БД, запросы, пользователей и заглушки
-            if k in ['db', 'request', 'user', 'is_delivery']:
+            # Пропускаем объекты соединения с БД, запросы, пользователей
+            if k in ['db', 'request', 'user']:
                 continue
             # Включаем None значения для корректного кэширования
             filtered_kwargs[k] = v
