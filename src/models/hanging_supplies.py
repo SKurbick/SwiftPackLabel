@@ -21,6 +21,9 @@ class HangingSupplies:
         changes_log (jsonb): Лог изменений в составе поставки
         created_at (timestamptz): Время создания записи, по умолчанию CURRENT_TIMESTAMP
         operator (varchar): Оператор, создавший поставку
+        is_fictitious_delivered (boolean): Флаг фиктивной доставки
+        fictitious_delivered_at (timestamptz): Время перевода в фиктивную доставку
+        fictitious_delivery_operator (varchar): Оператор фиктивной доставки
     """
 
     def __init__(self, db):
@@ -63,6 +66,7 @@ class HangingSupplies:
             query = """
             SELECT * FROM public.hanging_supplies
             ORDER BY created_at DESC
+            LIMIT 1000
             """
             result = await self.db.fetch(query)
             return [dict(row) for row in result]
@@ -400,3 +404,158 @@ class HangingSupplies:
         except Exception as e:
             logger.error(f"Ошибка при получении order_data для поставок: {str(e)}")
             return {}
+
+    async def mark_as_fictitious_delivered(self, supply_id: str, account: str, operator: str = 'unknown') -> bool:
+        """
+        Помечает висячую поставку как переведенную в фиктивную доставку.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            operator: Оператор, переводивший в фиктивную доставку
+            
+        Returns:
+            bool: True если обновление прошло успешно, False иначе
+        """
+        try:
+            query = """
+            UPDATE public.hanging_supplies 
+            SET is_fictitious_delivered = true,
+                fictitious_delivered_at = CURRENT_TIMESTAMP,
+                fictitious_delivery_operator = $3
+            WHERE supply_id = $1 AND account = $2 AND is_fictitious_delivered = false
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account, operator)
+            success = result is not None
+            if success:
+                logger.info(f"Поставка {supply_id} ({account}) помечена как фиктивно доставленная оператором {operator}")
+            else:
+                logger.warning(f"Поставка {supply_id} ({account}) не найдена или уже помечена как фиктивно доставленная")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка пометки поставки {supply_id} ({account}) как фиктивно доставленной: {str(e)}")
+            return False
+
+    async def get_fictitious_delivered_supplies(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Получает список фиктивно доставленных висячих поставок.
+        
+        Args:
+            limit: Максимальное количество записей для возврата
+            
+        Returns:
+            List[Dict[str, Any]]: Список фиктивно доставленных поставок
+        """
+        try:
+            query = """
+            SELECT 
+                supply_id,
+                account,
+                operator,
+                created_at,
+                fictitious_delivered_at,
+                fictitious_delivery_operator,
+                jsonb_array_length(COALESCE(order_data->'orders', '[]'::jsonb)) as orders_count,
+                jsonb_array_length(COALESCE(shipped_orders, '[]'::jsonb)) as shipped_count
+            FROM public.hanging_supplies 
+            WHERE is_fictitious_delivered = true
+            ORDER BY fictitious_delivered_at DESC
+            LIMIT $1
+            """
+            result = await self.db.fetch(query, limit)
+            return [dict(row) for row in result]
+        except Exception as e:
+            logger.error(f"Ошибка получения фиктивно доставленных поставок: {str(e)}")
+            return []
+
+    async def is_fictitious_delivered(self, supply_id: str, account: str) -> bool:
+        """
+        Проверяет, помечена ли поставка как фиктивно доставленная.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            bool: True если поставка помечена как фиктивно доставленная, False иначе
+        """
+        try:
+            query = """
+            SELECT is_fictitious_delivered 
+            FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            return result['is_fictitious_delivered'] if result else False
+        except Exception as e:
+            logger.error(f"Ошибка проверки фиктивной доставки для поставки {supply_id} ({account}): {str(e)}")
+            return False
+
+    async def get_fictitious_delivery_info(self, supply_id: str, account: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает информацию о фиктивной доставке поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            Optional[Dict[str, Any]]: Информация о фиктивной доставке или None
+        """
+        try:
+            query = """
+            SELECT 
+                is_fictitious_delivered,
+                fictitious_delivered_at,
+                fictitious_delivery_operator
+            FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2 AND is_fictitious_delivered = true
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о фиктивной доставке для поставки {supply_id} ({account}): {str(e)}")
+            return None
+
+    async def get_weekly_fictitious_supplies_ids(self, is_fictitious_delivered: bool = True) -> List[Dict[str, str]]:
+        """
+        Получает уникальные supply_id из фиктивно доставленных висячих поставок за 3 дня.
+        Возвращает данные в формате, совместимом с get_information_to_supplies().
+        
+        Args:
+            is_fictitious_delivered: Фильтр по статусу фиктивной доставки
+        
+        Returns:
+            List[Dict[str, str]]: Список словарей с supply_id и account для каждой поставки
+        """
+        query = """
+        SELECT DISTINCT supply_id, account
+        FROM public.hanging_supplies
+        WHERE created_at >= CURRENT_DATE - INTERVAL '7 day'
+        AND created_at < CURRENT_DATE + INTERVAL '1 day'
+        AND is_fictitious_delivered = $1
+        ORDER BY supply_id;
+        """
+        
+        try:
+            result = await self.db.fetch(query, is_fictitious_delivered)
+            logger.info(f"Получено {len(result)} уникальных висячих поставок с is_fictitious_delivered={is_fictitious_delivered} за 3 дня")
+
+            grouped_by_account = {}
+            for row in result:
+                account = row['account']
+                supply_id = row['supply_id']
+                
+                if account not in grouped_by_account:
+                    grouped_by_account[account] = []
+
+                grouped_by_account[account].append({
+                    'id': supply_id
+                })
+
+            return [grouped_by_account] if grouped_by_account else []
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении висячих поставок с is_fictitious_delivered={is_fictitious_delivered}: {str(e)}")
+            return []

@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from src.utils import format_date
 from datetime import datetime, timedelta
 
@@ -62,6 +62,8 @@ class SupplyIdResult(SupplyBase):
 
     shipped_count: Optional[int] = Field(None,
                                          description="Количество отгруженных товаров (только для висячих поставок)")
+    is_fictitious_delivered: Optional[bool] = Field(None,
+                                                    description="Флаг фиктивной доставки (только для висячих поставок)")
 
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:
@@ -179,3 +181,50 @@ class MoveOrdersResponse(BaseSchema):
 class SupplyBarcodeListRequest(BaseSchema):
     """Схема запроса для получения штрихкодов списка поставок."""
     supplies: Dict[str, str] = Field(description="Словарь поставок: {supply_id: account_name}")
+
+
+class FictitiousDeliveryRequest(BaseSchema):
+    """Схема запроса для перевода фиктивной поставки в доставку."""
+    supplies: Dict[str, str] = Field(description="Объект поставок {supply_id: account} (может содержать одну или несколько поставок)")
+    
+    @field_validator('supplies')
+    @classmethod
+    def validate_supplies(cls, v):
+        """Валидация объекта поставок."""
+        if not v or len(v) == 0:
+            raise ValueError("Объект supplies не может быть пустым")
+        
+        if not isinstance(v, dict):
+            raise ValueError("Поле supplies должно быть объектом")
+            
+        for supply_id_key, account_value in v.items():
+            if not isinstance(supply_id_key, str) or not isinstance(account_value, str):
+                raise ValueError("Все ключи и значения в supplies должны быть строками")
+            if not supply_id_key.strip() or not account_value.strip():
+                raise ValueError("supply_id и account не могут быть пустыми строками")
+        
+        return v
+
+
+class FictitiousDeliveryResponse(BaseSchema):
+    """Схема ответа для перевода фиктивных поставок в доставку."""
+    success: bool = Field(description="Успешность операции")
+    message: str = Field(description="Сообщение о результате операции")
+    operator: str = Field(description="Оператор, выполнивший операцию")
+    total_processed: int = Field(description="Общее количество обработанных поставок")
+    successful_count: int = Field(description="Количество успешно обработанных")
+    failed_count: int = Field(description="Количество неудачных")
+    results: List[Dict[str, Any]] = Field(description="Детальные результаты по каждой поставке")
+    processing_time_seconds: float = Field(description="Время обработки в секундах")
+
+
+class FictitiousDeliveryInfo(BaseSchema):
+    """Схема информации о фиктивной доставке."""
+    supply_id: str = Field(description="ID поставки")
+    account: str = Field(description="Аккаунт Wildberries")
+    operator: Optional[str] = Field(None, description="Оператор, создавший поставку")
+    created_at: datetime = Field(description="Время создания поставки")
+    fictitious_delivered_at: Optional[datetime] = Field(None, description="Время перевода в фиктивную доставку")
+    fictitious_delivery_operator: Optional[str] = Field(None, description="Оператор фиктивной доставки")
+    orders_count: int = Field(description="Количество заказов в поставке")
+    shipped_count: int = Field(description="Количество отгруженных заказов")

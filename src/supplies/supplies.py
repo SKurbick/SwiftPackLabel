@@ -2,6 +2,7 @@ import asyncio
 import json
 import base64
 import io
+import time
 from typing import List, Dict, Any, Set, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
@@ -141,6 +142,34 @@ class SuppliesService:
         logger.info(f"Обогащено {len(enriched_supplies)} групп поставок информацией из WB API")
         return enriched_supplies
 
+    def _merge_supplies_data(self, basic_supplies: List[Dict], fictitious_supplies: List[Dict]) -> List[Dict]:
+        """
+        Объединяет данные поставок из разных источников по аккаунтам.
+        
+        Args:
+            basic_supplies: Поставки из shipment_of_goods
+            fictitious_supplies: Поставки из hanging_supplies
+            
+        Returns:
+            List[Dict]: Объединенные данные поставок
+        """
+        merged_accounts = {}
+        for supplies_group in basic_supplies:
+            if isinstance(supplies_group, dict):
+                for account, supplies_list in supplies_group.items():
+                    if account not in merged_accounts:
+                        merged_accounts[account] = []
+                    merged_accounts[account].extend(supplies_list)
+
+        for supplies_group in fictitious_supplies:
+            if isinstance(supplies_group, dict):
+                for account, supplies_list in supplies_group.items():
+                    if account not in merged_accounts:
+                        merged_accounts[account] = []
+                    merged_accounts[account].extend(supplies_list)
+
+        return [merged_accounts] if merged_accounts else []
+
     def _exclude_wb_active_from_db_supplies(self, db_supplies: List[Dict], wb_active_supplies: List[Dict]) -> List[Dict]:
         """
         Исключает из БД поставок те, которые есть среди активных WB поставок.
@@ -260,7 +289,6 @@ class SuppliesService:
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
 
-        # target_wilds = {'wild1512', 'wild355', 'wild354', 'wild102', 'wild659', 'wild399'}
         target_wilds = {}
         filtered_supplies = []
         for supply in supplies_data:
@@ -291,6 +319,9 @@ class SuppliesService:
                     else:
                         supply["shipped_count"] = 0
 
+                    # Добавляем информацию о фиктивной доставке
+                    supply["is_fictitious_delivered"] = hanging_supply_data.get('is_fictitious_delivered', False)
+
                     has_target_wild = any(
                         order.local_vendor_code in target_wilds
                         for order in supply.get('orders', [])
@@ -315,10 +346,12 @@ class SuppliesService:
 
         # Выбор источника данных в зависимости от is_delivery
         if is_delivery:
-            logger.info("Получение поставок из отгрузок за неделю, исключая активные WB поставки")
+            logger.info("Получение поставок из отгрузок за неделю и фиктивно доставленных висячих поставок, исключая активные WB поставки")
             wb_active_supplies_ids: List[Any] = await self.get_information_to_supplies()
             basic_supplies_ids: List[Any] = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
-            filtered_basic_supplies_ids = self._exclude_wb_active_from_db_supplies(basic_supplies_ids, wb_active_supplies_ids)
+            fictitious_supplies_ids: List[Any] = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(is_fictitious_delivered=True)
+            all_db_supplies_ids = self._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
+            filtered_basic_supplies_ids = self._exclude_wb_active_from_db_supplies(all_db_supplies_ids, wb_active_supplies_ids)
             supplies_ids: List[Any] = await self.get_information_to_supply_details(filtered_basic_supplies_ids)
         else:
             logger.info("Получение поставок из WB API")
@@ -530,6 +563,245 @@ class SuppliesService:
         tasks = [Supplies(supply.account, wb_tokens.get(supply.account, "")).deliver_supply(supply.supply_id)
                  for supply in supply_ids]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _create_fictitious_delivery_response(self, success: bool, message: str, supply_id: str, account: str, 
+                                           delivery_response=None, marked_as_fictitious: bool = False, 
+                                           operator: str = 'unknown') -> Dict[str, Any]:
+        """
+        Создает стандартный ответ для операций с фиктивными поставками.
+        
+        Args:
+            success: Успешность операции
+            message: Сообщение о результате
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            delivery_response: Ответ от WB API
+            marked_as_fictitious: Была ли поставка помечена как фиктивная
+            operator: Оператор
+            
+        Returns:
+            Dict[str, Any]: Стандартизированный ответ
+        """
+        return {
+            "success": success,
+            "message": message,
+            "supply_id": supply_id,
+            "account": account,
+            "delivery_response": delivery_response,
+            "marked_as_fictitious": marked_as_fictitious,
+            "operator": operator
+        }
+
+    async def _validate_fictitious_delivery_preconditions(self, supply_id: str, account: str, operator: str) -> Dict[str, Any]:
+        """
+        Проверяет предварительные условия для фиктивной доставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            operator: Оператор
+            
+        Returns:
+            Dict[str, Any]: Результат валидации или None если все проверки пройдены
+        """
+        
+        if not self.db:
+            raise ValueError("Отсутствует подключение к базе данных")
+            
+        hanging_supplies = HangingSupplies(self.db)
+        
+        # Проверяем, существует ли поставка
+        hanging_supply = await hanging_supplies.get_hanging_supply_by_id(supply_id, account)
+        if not hanging_supply:
+            return self._create_fictitious_delivery_response(
+                success=False,
+                message=f"Висячая поставка {supply_id} для аккаунта {account} не найдена",
+                supply_id=supply_id,
+                account=account,
+                operator=operator
+            )
+        
+        # Проверяем, не была ли уже помечена как фиктивно доставленная
+        is_already_delivered = await hanging_supplies.is_fictitious_delivered(supply_id, account)
+        if is_already_delivered:
+            return self._create_fictitious_delivery_response(
+                success=False,
+                message=f"Поставка {supply_id} ({account}) уже помечена как фиктивно доставленная",
+                supply_id=supply_id,
+                account=account,
+                operator=operator
+            )
+        
+
+    async def _execute_delivery_to_wb(self, supply_id: str, account: str) -> Any:
+        """
+        Выполняет перевод поставки в доставку через WB API.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            Any: Ответ от WB API
+            
+        Raises:
+            ValueError: Если токен для аккаунта не найден
+        """
+        wb_tokens = get_wb_tokens()
+        if account not in wb_tokens:
+            raise ValueError(f"Токен для аккаунта {account} не найден")
+            
+        supplies_api = Supplies(account, wb_tokens[account])
+        return await supplies_api.deliver_supply(supply_id)
+
+    def _is_delivery_successful(self, delivery_response: Any) -> bool:
+        """
+        Проверяет успешность ответа от WB API.
+        
+        Args:
+            delivery_response: Ответ от WB API
+            
+        Returns:
+            bool: True если доставка успешна
+        """
+        if hasattr(delivery_response, 'status_code') and delivery_response.status_code >= 400:
+            return False
+        return True
+
+    async def _mark_supply_as_fictitious_delivered(self, supply_id: str, account: str, operator: str) -> bool:
+        """
+        Помечает поставку как фиктивно доставленную в БД.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            operator: Оператор
+            
+        Returns:
+            bool: True если операция успешна
+        """
+        
+        hanging_supplies = HangingSupplies(self.db)
+        return await hanging_supplies.mark_as_fictitious_delivered(supply_id, account, operator)
+
+    async def _process_successful_delivery(self, supply_id: str, account: str, operator: str, 
+                                         delivery_response: Any) -> Dict[str, Any]:
+        """
+        Обрабатывает успешную доставку поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            operator: Оператор
+            delivery_response: Ответ от WB API
+            
+        Returns:
+            Dict[str, Any]: Результат обработки
+        """
+        marked_success = await self._mark_supply_as_fictitious_delivered(supply_id, account, operator)
+        
+        if marked_success:
+            logger.info(f"Фиктивная поставка {supply_id} ({account}) успешно переведена в доставку и помечена")
+            return self._create_fictitious_delivery_response(
+                success=True,
+                message=f"Фиктивная поставка {supply_id} успешно переведена в доставку",
+                supply_id=supply_id,
+                account=account,
+                delivery_response=delivery_response,
+                marked_as_fictitious=True,
+                operator=operator
+            )
+        else:
+            logger.error(f"Поставка {supply_id} переведена в доставку, но не удалось пометить как фиктивную")
+            return self._create_fictitious_delivery_response(
+                success=False,
+                message="Поставка переведена в доставку, но не удалось пометить как фиктивную",
+                supply_id=supply_id,
+                account=account,
+                delivery_response=delivery_response,
+                marked_as_fictitious=False,
+                operator=operator
+            )
+
+    async def deliver_fictitious_supply(self, supply_id: str, account: str, operator: str = 'unknown') -> Dict[str, Any]:
+        """
+        Переводит фиктивную висячую поставку в статус доставки.
+        
+        Args:
+            supply_id: ID поставки Wildberries
+            account: Аккаунт Wildberries
+            operator: Оператор, выполняющий операцию
+            
+        Returns:
+            Dict[str, Any]: Результат операции
+        """
+        
+        logger.info(f"Начало перевода фиктивной поставки {supply_id} ({account}) в доставку оператором {operator}")
+
+        validation_result = await self._validate_fictitious_delivery_preconditions(supply_id, account, operator)
+        if validation_result:
+            return validation_result
+
+        delivery_response = await self._execute_delivery_to_wb(supply_id, account)
+
+        return await self._process_successful_delivery(supply_id, account, operator, delivery_response)
+
+    async def deliver_fictitious_supplies_batch(self, supplies: Dict[str, str], operator: str = 'unknown') -> Dict[str, Any]:
+        """
+        Переводит объект фиктивных висячих поставок в статус доставки.
+        
+        Args:
+            supplies: Объект поставок {supply_id: account}
+            operator: Оператор, выполняющий операцию
+            
+        Returns:
+            Dict[str, Any]: Результат пакетной операции
+        """
+
+        
+        start_time = time.time()
+        logger.info(f"Начало пакетной обработки {len(supplies)} фиктивных поставок оператором {operator}")
+        
+        results = []
+        successful_count = 0
+        failed_count = 0
+        
+        for supply_id, account in supplies.items():
+            
+            try:
+                result = await self.deliver_fictitious_supply(supply_id, account, operator)
+                if result['success']:
+                    successful_count += 1
+                else:
+                    failed_count += 1
+                results.append(result)
+            except Exception as e:
+                failed_count += 1
+                error_result = self._create_fictitious_delivery_response(
+                    success=False,
+                    message=f"Ошибка обработки: {str(e)}",
+                    supply_id=supply_id,
+                    account=account,
+                    operator=operator
+                )
+                results.append(error_result)
+                logger.error(f"Ошибка при обработке поставки {supply_id} ({account}): {str(e)}")
+        
+        end_time = time.time()
+        processing_time = end_time - start_time
+        
+        logger.info(f"Пакетная обработка завершена: {successful_count} успешных, {failed_count} неудачных, время: {processing_time:.2f}с")
+        
+        return {
+            "success": failed_count == 0,  # Успех только если все поставки обработаны успешно
+            "message": f"Обработано {len(supplies)} поставок: {successful_count} успешных, {failed_count} неудачных",
+            "total_processed": len(supplies),
+            "successful_count": successful_count,
+            "failed_count": failed_count,
+            "results": results,
+            "processing_time_seconds": round(processing_time, 2),
+            "operator": operator
+        }
 
     @staticmethod
     async def prepare_shipment_data(supply_ids: List[DeliverySupplyInfo], order_wild_map: Dict[str, str],

@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, Body, status, HTTPException,Path,Query
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
-    SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest
+    SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest, \
+    FictitiousDeliveryRequest, FictitiousDeliveryResponse
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -21,7 +22,7 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-@global_cached(key="supplies_all", cache_only=True)
+# @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
@@ -197,6 +198,68 @@ async def deliver_supplies_hanging(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при обработке доставки поставок: {str(e)}",
+        ) from e
+
+
+@supply.post("/delivery-fictitious",
+             status_code=status.HTTP_201_CREATED,
+             response_model=FictitiousDeliveryResponse,
+             summary="Перевод фиктивной поставки в статус доставки",
+             description="Переводит фиктивную висячую поставку в статус доставки с отметкой в БД")
+async def deliver_fictitious_supply(
+        request: FictitiousDeliveryRequest = Body(..., description="Данные фиктивной поставки"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> FictitiousDeliveryResponse:
+    """
+    Переводит фиктивные висячие поставки в статус доставки.
+    
+    Функция выполняет следующие операции для каждой поставки:
+    1. Проверяет существование поставки в таблице hanging_supplies
+    2. Вызывает существующий метод deliver_supply для перевода в доставку
+    3. Помечает поставку как фиктивно доставленную в БД
+    
+    Args:
+        request: Данные запроса с объектом supplies {supply_id: account}
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+        
+    Returns:
+        FictitiousDeliveryResponse: Результат операции с подробной информацией
+        
+    Raises:
+        HTTPException: В случае ошибки обработки запроса
+    """
+    logger.info(f"Запрос на перевод фиктивных поставок {list(request.supplies.keys())} "
+                f"в статус доставки от {user.get('username', 'unknown')}")
+
+    try:
+        supply_service = SuppliesService(db)
+        operator = user.get('username', 'unknown')
+
+        # Обработка поставок (одной или нескольких)
+        logger.info(f"Обработка {len(request.supplies)} фиктивных поставок")
+        result = await supply_service.deliver_fictitious_supplies_batch(
+            supplies=request.supplies,
+            operator=operator
+        )
+
+        return FictitiousDeliveryResponse(
+            success=result["success"],
+            message=result["message"],
+            total_processed=result["total_processed"],
+            successful_count=result["successful_count"],
+            failed_count=result["failed_count"],
+            results=result["results"],
+            processing_time_seconds=result["processing_time_seconds"],
+            operator=result["operator"],
+        )
+    except Exception as e:
+        error_detail = f"Произошла ошибка при обработке фиктивных поставок: {str(e)}"
+        logger.error(f"Ошибка при обработке фиктивных поставок {list(request.supplies.keys())}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_detail
         ) from e
 
 
