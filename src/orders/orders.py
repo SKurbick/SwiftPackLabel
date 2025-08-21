@@ -204,7 +204,7 @@ class OrdersService:
             "article": local_vendor_code,
             "photo": photo,
             "subject_name": subject_name,
-            "price": int(supply.get("price", 0) / 100),
+            "price": int(supply.get("convertedPrice", 0) / 100),
             "account": account,
             "created_at": created_at,
             "elapsed_time": elapsed_time
