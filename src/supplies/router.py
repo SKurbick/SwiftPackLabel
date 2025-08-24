@@ -7,7 +7,7 @@ from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
     SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest, \
-    FictitiousDeliveryRequest, FictitiousDeliveryResponse
+    FictitiousDeliveryRequest, FictitiousDeliveryResponse, FictitiousShipmentRequest
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -22,7 +22,7 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-@global_cached(key="supplies_all", cache_only=True)
+# @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
@@ -257,6 +257,73 @@ async def deliver_fictitious_supply(
     except Exception as e:
         error_detail = f"Произошла ошибка при обработке фиктивных поставок: {str(e)}"
         logger.error(f"Ошибка при обработке фиктивных поставок {list(request.supplies.keys())}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_detail
+        ) from e
+
+
+@supply.post("/shipment_of_fictions",
+             status_code=status.HTTP_201_CREATED,
+             response_model=FictitiousDeliveryResponse,
+             summary="Фиктивная отгрузка поставок с указанным количеством",
+             description="Выполняет фиктивную отгрузку указанного количества заказов из поставок")
+async def shipment_of_fictions_supply(
+        request: FictitiousShipmentRequest = Body(..., description="Данные для фиктивной отгрузки"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> FictitiousDeliveryResponse:
+    """
+    Выполняет фиктивную отгрузку заказов из поставок.
+    
+    Алгоритм:
+    1. Получает актуальные данные о заказах через get_information_to_supply_details
+    2. Фильтрует уже фиктивно отгруженные заказы из БД (поле fictitious_shipped_order_ids)
+    3. Сортирует по времени создания (старые сначала)
+    4. Выбирает указанное количество заказов
+    5. Имитирует отгрузку (заглушка)
+    6. Сохраняет отгруженные order_id в fictitious_shipped_order_ids
+    
+    Args:
+        request: Данные запроса с поставками и количеством для отгрузки
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+        
+    Returns:
+        FictitiousDeliveryResponse: Результат операции с подробной информацией
+        
+    Raises:
+        HTTPException: В случае ошибки обработки запроса или недостатка заказов
+    """
+    logger.info(f"Запрос на фиктивную отгрузку {request.shipped_quantity} заказов "
+                f"из {len(request.supplies)} поставок от {user.get('username', 'unknown')}")
+    
+    try:
+        supply_service = SuppliesService(db)
+        operator = user.get('username', 'unknown')
+        
+        result = await supply_service.shipment_fictitious_supplies_with_quantity(
+            supplies=request.supplies,
+            shipped_quantity=request.shipped_quantity,
+            operator=operator
+        )
+        
+        return FictitiousDeliveryResponse(
+            success=result["success"],
+            message=result["message"],
+            total_processed=result["total_processed"],
+            successful_count=result["successful_count"],
+            failed_count=result["failed_count"],
+            results=result["results"],
+            processing_time_seconds=result["processing_time_seconds"],
+            operator=result["operator"]
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_detail = f"Произошла ошибка при фиктивной отгрузке: {str(e)}"
+        logger.error(f"Ошибка фиктивной отгрузки: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=error_detail

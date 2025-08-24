@@ -559,3 +559,90 @@ class HangingSupplies:
         except Exception as e:
             logger.error(f"Ошибка при получении висячих поставок с is_fictitious_delivered={is_fictitious_delivered}: {str(e)}")
             return []
+
+    async def get_fictitious_shipped_order_ids(self, supply_id: str, account: str) -> List[int]:
+        """
+        Получает список фиктивно отгруженных order_id для поставки.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            
+        Returns:
+            List[int]: Список фиктивно отгруженных order_id
+        """
+        try:
+            query = """
+            SELECT fictitious_shipped_order_ids 
+            FROM public.hanging_supplies 
+            WHERE supply_id = $1 AND account = $2
+            """
+            result = await self.db.fetchrow(query, supply_id, account)
+            
+            if result:
+                shipped_data = json.loads(result['fictitious_shipped_order_ids'])
+                
+                if shipped_data:
+                    try:
+                        order_ids = [item['order_id'] for item in shipped_data]
+                        return order_ids
+                    except (KeyError, TypeError) as parse_error:
+                        logger.error(f"Ошибка парсинга fictitious_shipped_order_ids: {parse_error}, данные: {shipped_data}")
+                        return []
+            
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка получения фиктивно отгруженных order_id для поставки {supply_id} ({account}): {str(e)}")
+            return []
+
+    async def add_fictitious_shipped_order_ids(self, supply_id: str, account: str, 
+                                              order_ids: List[int], operator: str) -> bool:
+        """
+        Добавляет новые фиктивно отгруженные order_id в поле fictitious_shipped_order_ids.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт Wildberries
+            order_ids: Список order_id для добавления
+            operator: Оператор, выполняющий операцию
+            
+        Returns:
+            bool: True если обновление прошло успешно, False иначе
+        """
+        try:
+            timestamp = datetime.utcnow().isoformat()
+            new_entries = [
+                {"order_id": order_id,"shipped_at": timestamp,"operator": operator} for order_id in order_ids]
+            
+            query = """
+            UPDATE public.hanging_supplies 
+            SET fictitious_shipped_order_ids = fictitious_shipped_order_ids || $3::jsonb
+            WHERE supply_id = $1 AND account = $2
+            RETURNING id
+            """
+            result = await self.db.fetchrow(query, supply_id, account, json.dumps(new_entries))
+            success = result is not None
+            if success:
+                logger.info(f"Добавлено {len(order_ids)} фиктивно отгруженных order_id для поставки {supply_id} ({account})")
+            else:
+                logger.warning(f"Поставка {supply_id} ({account}) не найдена для добавления фиктивно отгруженных order_id")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка добавления фиктивно отгруженных order_id для поставки {supply_id} ({account}): {str(e)}")
+            return False
+
+    async def get_fictitious_shipped_order_ids_batch(self, supplies: Dict[str, str]) -> Dict[Tuple[str, str], List[int]]:
+        """
+        Получает фиктивно отгруженные order_id для группы поставок.
+        
+        Args:
+            supplies: Словарь поставок {supply_id: account}
+            
+        Returns:
+            Dict[Tuple[str, str], List[int]]: Словарь {(supply_id, account): [order_id1, order_id2, ...]}
+        """
+        result = {}
+        for supply_id, account in supplies.items():
+            shipped_ids = await self.get_fictitious_shipped_order_ids(supply_id, account)
+            result[(supply_id, account)] = shipped_ids
+        return result

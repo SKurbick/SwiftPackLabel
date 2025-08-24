@@ -206,6 +206,30 @@ class FictitiousDeliveryRequest(BaseSchema):
         return v
 
 
+class FictitiousShipmentRequest(BaseSchema):
+    """Схема запроса для фиктивной отгрузки поставок."""
+    supplies: Dict[str, str] = Field(description="Объект поставок {supply_id: account}")
+    shipped_quantity: int = Field(gt=0, description="Количество товара для фиктивной отгрузки")
+    
+    @field_validator('supplies')
+    @classmethod
+    def validate_supplies(cls, v):
+        """Валидация объекта поставок."""
+        if not v or len(v) == 0:
+            raise ValueError("Объект supplies не может быть пустым")
+        
+        if not isinstance(v, dict):
+            raise ValueError("Поле supplies должно быть объектом")
+            
+        for supply_id, account in v.items():
+            if not isinstance(supply_id, str) or not isinstance(account, str):
+                raise ValueError("Все ключи и значения в supplies должны быть строками")
+            if not supply_id.strip() or not account.strip():
+                raise ValueError("supply_id и account не могут быть пустыми строками")
+        
+        return v
+
+
 class FictitiousDeliveryResponse(BaseSchema):
     """Схема ответа для перевода фиктивных поставок в доставку."""
     success: bool = Field(description="Успешность операции")
