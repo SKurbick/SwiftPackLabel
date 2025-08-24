@@ -201,15 +201,16 @@ class PDFService:
         pdf.set_font("DejaVu", size=8)
 
         col_headers = [
-            "№ Сборки", "Наименование", "Товар", "Фото", "Арт.Поставщика", "Артикул",
+            "№", "№ Сборки", "Наименование", "Товар", "Фото", "Арт.Поставщика", "Артикул",
             "№ Поставки", "Кабинет", "Стикер"
         ]
-        col_widths = [30, 50, 40, 30, 25, 30, 30, 20, 30]
+        col_widths = [4, 38, 50, 40, 30, 25, 28, 30, 20, 30]
         row_height = 30
 
         total = sum(len(orders) for orders in data_list.values())
 
         first_page = True
+        row_number = 1
         wild_data = get_information_to_data()
         for _, value in data_list.items():
             for order in value:
@@ -223,7 +224,8 @@ class PDFService:
                         first_page = False
                         pdf.set_font("DejaVu", "", 8)
 
-                self._draw_table_row(pdf, order, col_widths, row_height, wild_data)
+                self._draw_table_row(pdf, order, col_widths, row_height, wild_data, row_number)
+                row_number += 1
 
         pdf_buffer = BytesIO()
         pdf_buffer.write(pdf.output(dest='S'))
@@ -254,34 +256,35 @@ class PDFService:
         pdf.ln()
 
     def _draw_table_row(self, pdf: FPDF, order: Dict[str, Any], col_widths: List[int], row_height: int,
-                        wild_data: Dict[str, str]) -> None:
+                        wild_data: Dict[str, str], row_number: int) -> None:
         """Отрисовывает строку таблицы"""
         pdf.set_y(pdf.get_y())
 
-        pdf.cell(col_widths[0], row_height, str(order.get("order_id", "")), border=1, align='C')
-        pdf.cell(col_widths[1], row_height, str(order.get("subject_name", "")), border=1, align='C')
+        pdf.cell(col_widths[0], row_height, str(row_number), border=1, align='C')
+        pdf.cell(col_widths[1], row_height, str(order.get("order_id", "")), border=1, align='C')
+        pdf.cell(col_widths[2], row_height, str(order.get("subject_name", "")), border=1, align='C')
         cell_x = pdf.get_x()
         cell_y = pdf.get_y()
         product_text = str(wild_data.get(order.get("article", ""), ""))
-        pdf.cell(col_widths[2], row_height, "", border=1)
+        pdf.cell(col_widths[3], row_height, "", border=1)
         if product_text:
             pdf.set_xy(cell_x, cell_y)
-            pdf.multi_cell(col_widths[2], 6, product_text, border=0, align='C')
-            pdf.set_xy(cell_x + col_widths[2], cell_y)
+            pdf.multi_cell(col_widths[3], 6, product_text, border=0, align='C')
+            pdf.set_xy(cell_x + col_widths[3], cell_y)
 
         cell_x = pdf.get_x()
         cell_y = pdf.get_y()
-        pdf.cell(col_widths[3], row_height, "", border=1)
-        self._insert_image_in_cell(pdf, order.get("photo_img", ""), cell_x, cell_y, col_widths[3], row_height)
+        pdf.cell(col_widths[4], row_height, "", border=1)
+        self._insert_image_in_cell(pdf, order.get("photo_img", ""), cell_x, cell_y, col_widths[4], row_height)
 
-        pdf.cell(col_widths[4], row_height, str(order.get("article", "")), border=1, align='C')
-        pdf.cell(col_widths[5], row_height, str(order.get("nm_id", "")), border=1, align='C')
-        pdf.cell(col_widths[6], row_height, str(order.get("supply_id", "")), border=1, align='C')
-        pdf.cell(col_widths[7], row_height, str(order.get("account", "")), border=1, align='C')
+        pdf.cell(col_widths[5], row_height, str(order.get("article", "")), border=1, align='C')
+        pdf.cell(col_widths[6], row_height, str(order.get("nm_id", "")), border=1, align='C')
+        pdf.cell(col_widths[7], row_height, str(order.get("supply_id", "")), border=1, align='C')
+        pdf.cell(col_widths[8], row_height, str(order.get("account", "")), border=1, align='C')
 
         x = pdf.get_x()
         y = pdf.get_y()
-        pdf.cell(col_widths[8], row_height, "", border=1)
+        pdf.cell(col_widths[9], row_height, "", border=1)
 
         pdf.set_xy(x, y)
         partA = str(order.get('partA', ''))
