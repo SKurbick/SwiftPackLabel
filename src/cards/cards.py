@@ -9,6 +9,8 @@ from src.wildberries_api.cards import Cards
 from src.models.article import ArticleDB
 from src.utils import get_wb_tokens
 
+from src.response import AsyncHttpClient, parse_json
+
 
 class CardsService:
     """Сервис для работы с карточками товаров Wildberries."""
@@ -20,6 +22,7 @@ class CardsService:
             db: Соединение с базой данных (опционально)
         """
         self.db = db
+        self.async_client = AsyncHttpClient(timeout=30, retries=2, delay=1)
 
     async def get_vendor_codes_by_wild(self, wild: str) -> List[str]:
         """
@@ -220,6 +223,56 @@ class CardsService:
 
         return {"success": total_updated > 0, "updated_count": total_updated, "errors": all_errors or None}
 
+    async def check_cards(self, cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Проверяет доступность карточек через публичное API Wildberries.
+        Возвращает только карточки, которые доступны для обновления.
+        """
+
+        async def check_single_card(card: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            nm_id = card.get("nmID")
+            if not nm_id:
+                return None
+
+            url = f"https://card.wb.ru/cards/v4/list?appType=1&curr=rub&dest=-1257786&spp=30&ab_testing=false&lang=ru&nm={nm_id}&ignore_stocks=true"
+
+            try:
+                response_text = await self.async_client.get(url)
+
+                if response_text:
+                    data = parse_json(response_text)
+
+                    # Проверяем есть ли данные о карточке
+                    if data and data.get("products"):
+                        logger.debug(f"Карточка {nm_id} доступна")
+                        return card
+                    else:
+                        logger.warning(f"Карточка {nm_id} не найдена в публичном API")
+                        return None
+                else:
+                    logger.warning(f"Пустой ответ для карточки {nm_id}")
+                    return None
+
+            except Exception as e:
+                logger.error(f"Ошибка при проверке карточки {nm_id}: {str(e)}")
+                return None
+
+        # Проверяем все карточки параллельно
+        tasks = [check_single_card(card) for card in cards]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Фильтруем результаты
+        filtered_cards = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка при проверке карточки: {result}")
+                continue
+            if result is not None:
+                filtered_cards.append(result)
+
+        logger.info(f"Из {len(cards)} карточек прошли проверку {len(filtered_cards)}")
+        return filtered_cards
+
     async def update_dimensions(self, wild: str, width: Optional[int] = None,
                                 length: Optional[int] = None, height: Optional[int] = None,
                                 weight: Optional[float] = None) -> Dict[str, Any]:
@@ -235,7 +288,12 @@ class CardsService:
         if not found_cards:
             return {"success": False, "error": f"Не найдено карточек с артикулом {wild}"}
 
-        result = await self.update_card_dimensions(found_cards, width, length, height, weight)
+        # Проверяем доступность карточек перед обновлением
+        validated_cards = await self.check_cards(found_cards)
+        if not validated_cards:
+            return {"success": False, "error": f"Все найденные карточки с артикулом {wild} недоступны для обновления"}
+
+        result = await self.update_card_dimensions(validated_cards, width, length, height, weight)
 
         result["found_cards_count"] = len(found_cards)
         result["vendor_codes"] = vendor_codes
