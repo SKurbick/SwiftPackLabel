@@ -27,4 +27,5 @@ dependencies = [
     "redis>=5.0.0",
     "celery>=5.3.4",
     "flower>=2.0.1",
+    "pyzbar>=0.1.9",
 ]

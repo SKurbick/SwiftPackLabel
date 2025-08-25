@@ -14,6 +14,7 @@ from src.logger import app_logger as logger
 
 from src.response import AsyncHttpClient
 from src.utils import get_information_to_data
+from src.service.qr_scanner_service import QRScannerService
 
 
 class OrderItem(BaseModel):
@@ -169,6 +170,8 @@ class PDFService:
 
     def _process_sticker_images(self, pdf: FPDF, orders: List[Dict[str, Any]]) -> None:
         """Обрабатывает изображения для стикеров"""
+        qr_scanner = QRScannerService()
+        
         for index, order in enumerate(orders, 1):
             if "file" in order and order["file"]:
                 try:
@@ -182,11 +185,23 @@ class PDFService:
                     unique_filename = f"{temp_dir}/temp_image_{uuid.uuid4()}.jpg"
                     img.save(unique_filename, "JPEG")
 
+                    # Сканирование QR-кода из изображения стикера
+                    qr_data = qr_scanner.scan_qr_from_temp_file(unique_filename)
+                    if qr_data:
+                        qr_scanner.save_scan_result(
+                            order_id=str(order.get("order_id", "")),
+                            wild=str(order.get("article", "")),
+                            nm_id=int(order.get("nm_id", 0)),
+                            qr_data=qr_data
+                        )
+                        logger.info(f"QR-код отсканирован для заказа {order.get('order_id', '')}: {qr_data[:30]}...")
+
                     pdf.image(unique_filename, x=0, y=0, w=58, h=40)
 
                     os.remove(unique_filename)
 
                 except Exception as e:
+                    logger.error(f"Ошибка при обработке изображения стикера: {e}")
                     pdf.add_page()
                     pdf.set_font("DejaVu", size=6)
                     pdf.cell(58, 5, f"Image Load Error: {str(e)}", ln=True)
