@@ -2475,30 +2475,22 @@ class SuppliesService:
         # 5. Выбираем заказы по количеству (старые сначала)
         selected_orders = await self._select_orders_by_quantity(available_orders, shipped_quantity)
 
+        # 5.5. НОВЫЙ БЛОК: Генерируем стикеры для выбранных заказов
+        try:
+            stickers_pdf = await self.generate_stickers_for_selected_orders(selected_orders, supplies)
+            logger.info(f"Сгенерированы стикеры для {len(selected_orders)} отгружаемых заказов")
+        except Exception as e:
+            logger.error(f"Ошибка генерации стикеров для фиктивной отгрузки: {str(e)}")
+            stickers_pdf = None
+
         # 6. Отправка данных в shipment_of_goods и 1C (вместо имитации)
-        shipment_success = await self._send_fictitious_shipment_data(selected_orders, supplies, operator)
+        await self._send_fictitious_shipment_data(selected_orders, supplies, operator)
 
-        # 7. Сохраняем фиктивно отгруженные order_id и формируем результаты
-        results = await self._save_fictitious_shipped_orders_and_build_results(
-            selected_orders, supplies, operator
-        )
+        # 7. Сохраняем фиктивно отгруженные order_id в БД
+        await self._save_fictitious_shipped_orders_batch(selected_orders, supplies, operator)
 
-        processing_time = time.time() - start_time
-
-        overall_success = shipment_success and len([r for r in results if r['success']]) > 0
-        
-        return {
-            "success": overall_success,
-            "message": f"Фиктивно отгружено {shipped_quantity} заказов из {len(supplies)} поставок" if overall_success else "Операция выполнена с ошибками",
-            "total_processed": len(supplies),
-            "successful_count": len([r for r in results if r['success']]),
-            "failed_count": len([r for r in results if not r['success']]),
-            "results": results,
-            "processing_time_seconds": processing_time,
-            "operator": operator,
-            "shipped_quantity": shipped_quantity,
-            "shipment_api_success": shipment_success
-        }
+        # Возвращаем только PDF стикеры
+        return {"stickers_pdf": stickers_pdf}
 
     async def _get_all_orders_from_supplies(self, supplies: Dict[str, str]) -> List[Dict]:
         """
@@ -2577,11 +2569,11 @@ class SuppliesService:
             order_wild_map = self._extract_order_wild_map(selected_orders)
             
             # 3. Отправляем в shipment_of_goods API
-            # shipment_success = await self.save_shipments(
-            #     supply_ids=delivery_supplies,
-            #     order_wild_map=order_wild_map,
-            #     author=operator
-            # )
+            shipment_success = await self.save_shipments(
+                supply_ids=delivery_supplies,
+                order_wild_map=order_wild_map,
+                author=operator
+            )
             
             # 4. Отправляем в 1C
             integration = OneCIntegration()
@@ -2677,3 +2669,94 @@ class SuppliesService:
                 })
 
         return results
+
+    async def _save_fictitious_shipped_orders_batch(self, selected_orders: List[Dict],
+                                                   supplies: Dict[str, str],
+                                                   operator: str) -> None:
+        """
+        Сохраняет фиктивно отгруженные order_id в БД (упрощенная версия).
+        
+        Args:
+            selected_orders: Выбранные для отгрузки заказы
+            supplies: Объект поставок {supply_id: account}
+            operator: Оператор
+        """
+        hanging_supplies = HangingSupplies(self.db)
+
+        for supply_id, account in supplies.items():
+            supply_orders = [order for order in selected_orders if order['supply_id'] == supply_id]
+            
+            if supply_orders:
+                order_ids = [order['id'] for order in supply_orders]
+                await hanging_supplies.add_fictitious_shipped_order_ids(
+                    supply_id, account, order_ids, operator
+                )
+                logger.info(f"Сохранено {len(order_ids)} фиктивно отгруженных заказов для поставки {supply_id} ({account})")
+
+    async def generate_stickers_for_selected_orders(self, selected_orders: List[Dict], 
+                                                   supplies: Dict[str, str]) -> BytesIO:
+        """
+        Генерирует PDF стикеры для выбранных заказов фиктивной отгрузки.
+        
+        Args:
+            selected_orders: Заказы из shipment_fictitious_supplies_with_quantity
+            supplies: Словарь {supply_id: account}
+            
+        Returns:
+            BytesIO: PDF файл со стикерами
+        """
+        logger.info(f"Генерация стикеров для {len(selected_orders)} фиктивно отгружаемых заказов")
+        
+        # 1. Преобразуем selected_orders в формат SupplyIdBodySchema
+        supply_ids = self._convert_selected_orders_to_supply_schema(selected_orders, supplies)
+        
+        # 2. Используем СУЩЕСТВУЮЩУЮ цепочку методов
+        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids))
+        self.union_results_stickers(supply_ids, stickers) 
+        grouped_stickers = await self.group_orders_to_wild(supply_ids)
+        
+        # 3. Генерируем PDF через существующий метод
+        from src.service.service_pdf import collect_images_sticker_to_pdf
+        pdf_buffer = await collect_images_sticker_to_pdf(grouped_stickers)
+        
+        logger.info(f"PDF стикеры сгенерированы для {len(grouped_stickers)} wild-кодов")
+        return pdf_buffer
+
+    def _convert_selected_orders_to_supply_schema(self, selected_orders: List[Dict], 
+                                                 supplies: Dict[str, str]) -> SupplyIdBodySchema:
+        """
+        Преобразует selected_orders в SupplyIdBodySchema.
+        """
+        from collections import defaultdict
+        from datetime import datetime
+        from src.supplies.schema import SupplyIdBodySchema, SupplyId, OrderSchema
+        
+        # Группируем заказы по supply_id
+        supply_orders_map = defaultdict(list)
+        for order in selected_orders:
+            supply_orders_map[order['supply_id']].append(order)
+        
+        supplies_list = []
+        for supply_id, orders in supply_orders_map.items():
+            account = supplies.get(supply_id, '')
+            
+            # Создаем OrderSchema объекты
+            order_schemas = [
+                OrderSchema(
+                    order_id=order['id'],
+                    nm_id=order['nmId'],
+                    local_vendor_code=process_local_vendor_code(order.get('article', '')),
+                    createdAt=order.get('createdAt', '')
+                ) for order in orders
+            ]
+            
+            supplies_list.append(SupplyId(
+                name=f"Fictitious_{supply_id}",
+                createdAt=datetime.utcnow().isoformat(),
+                supply_id=supply_id,
+                account=account,
+                count=len(order_schemas),
+                orders=order_schemas
+            ))
+        
+        return SupplyIdBodySchema(supplies=supplies_list)

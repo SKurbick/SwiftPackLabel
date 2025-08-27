@@ -1,7 +1,7 @@
 from typing import List, Dict
 
 from starlette.responses import StreamingResponse, JSONResponse
-from fastapi import APIRouter, Depends, Body, status, HTTPException,Path,Query
+from fastapi import APIRouter, Depends, Body, status, HTTPException, Path, Query
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
@@ -22,7 +22,7 @@ supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
 @supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
-@global_cached(key="supplies_all", cache_only=True)
+# @global_cached(key="supplies_all", cache_only=True)
 async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
@@ -265,14 +265,16 @@ async def deliver_fictitious_supply(
 
 @supply.post("/shipment_of_fictions",
              status_code=status.HTTP_201_CREATED,
-             response_model=FictitiousDeliveryResponse,
              summary="Фиктивная отгрузка поставок с указанным количеством",
-             description="Выполняет фиктивную отгрузку указанного количества заказов из поставок")
+             description="Выполняет фиктивную отгрузку указанного количества заказов из поставок",
+             response_description="PDF файл с QR-стикерами отгруженных заказов",
+             responses={201: {"content": {"application/pdf": {}},
+                              "description": "PDF файл с QR-стикерами для фиктивно отгруженных заказов"}})
 async def shipment_of_fictions_supply(
         request: FictitiousShipmentRequest = Body(..., description="Данные для фиктивной отгрузки"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
-) -> FictitiousDeliveryResponse:
+) -> StreamingResponse:
     """
     Выполняет фиктивную отгрузку заказов из поставок.
     
@@ -308,16 +310,20 @@ async def shipment_of_fictions_supply(
             operator=operator
         )
         
-        return FictitiousDeliveryResponse(
-            success=result["success"],
-            message=result["message"],
-            total_processed=result["total_processed"],
-            successful_count=result["successful_count"],
-            failed_count=result["failed_count"],
-            results=result["results"],
-            processing_time_seconds=result["processing_time_seconds"],
-            operator=result["operator"]
-        )
+        # Всегда возвращаем PDF стикеры
+        if result.get("stickers_pdf"):
+            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{operator}.pdf"
+            return StreamingResponse(
+                result["stickers_pdf"],
+                media_type="application/pdf", 
+                headers={'Content-Disposition': f'attachment; filename={filename}'}
+            )
+        else:
+            # Если стикеры не удалось сгенерировать, возвращаем ошибку
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Не удалось сгенерировать QR-стикеры для отгруженных заказов"
+            )
         
     except HTTPException:
         raise
