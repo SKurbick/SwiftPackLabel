@@ -20,6 +20,7 @@ from src.db import AsyncGenerator
 from src.models.card_data import CardData
 from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
+from src.models.final_supplies import FinalSupplies
 from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
@@ -35,6 +36,241 @@ class SuppliesService:
     def __init__(self, db: AsyncGenerator = None):
         self.db = db
         self.async_client = AsyncHttpClient(timeout=120, retries=3, delay=5)
+
+    async def get_supply_detailed_info(self, supply_id: str, account: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает детальную информацию о поставке из WB API.
+        
+        Args:
+            supply_id: ID поставки
+            account: Аккаунт WB
+            
+        Returns:
+            Dict с информацией о поставке или None при ошибке
+            
+        Пример возвращаемых данных:
+        {
+            "id": "WB-GI-1234567",
+            "done": false,
+            "createdAt": "2022-05-04T07:56:29Z", 
+            "closedAt": null,
+            "scanDt": null,
+            "name": "Тестовая поставка_ФИНАЛ",
+            "cargoType": 0,
+            "destinationOfficeId": 123
+        }
+        """
+        try:
+            # Получаем токены
+            wb_tokens = get_wb_tokens()
+            if account not in wb_tokens:
+                logger.error(f"Токен для аккаунта {account} не найден")
+                return None
+
+            supplies_api = Supplies(account, wb_tokens[account])
+
+            supply_info = await supplies_api.get_information_to_supply(supply_id)
+        
+            logger.info(f"Получена информация о поставке {supply_id} для аккаунта {account}")
+            logger.debug(f"Данные поставки: {supply_info}")
+
+            return supply_info or None
+        
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о поставке {supply_id} для аккаунта {account}: {str(e)}")
+            return None
+
+
+    def convert_current_name_to_final(self, current_name: str) -> str:
+        """
+        Преобразует текущее название поставки в финальное.
+        
+        Args:
+            current_name: Текущее название поставки
+            
+        Returns:
+            str: Финальное название с суффиксом _ФИНАЛ
+            
+        Примеры:
+            "Основная поставка_ТЕХ" -> "Основная поставка_ФИНАЛ"
+            "Простая поставка" -> "Простая поставка_ФИНАЛ"
+        """
+        if not current_name:
+            return "Финальная_поставка_ФИНАЛ"
+
+        clean_name = current_name.strip()
+
+        if clean_name.endswith("_ФИНАЛ"):
+            return clean_name  # Уже финальная
+        elif clean_name.endswith("_ТЕХ") or clean_name.endswith("_TEX"):
+            return f"{clean_name[:-4]}_ФИНАЛ"
+        else:
+            return f"{clean_name}_ФИНАЛ"
+
+    async def get_current_supply_names_for_accounts(
+        self, 
+        participating_combinations: Set[Tuple[str, str]], 
+        request_data: Any
+    ) -> Dict[str, str]:
+        """
+        Получает текущие названия поставок для аккаунтов из WB API.
+        
+        Args:
+            participating_combinations: Комбинации (wild_code, account)
+            request_data: Данные запроса с исходными поставками
+            
+        Returns:
+            Dict[str, str]: Словарь {account: supply_name}
+        """
+        current_supply_names = {}
+        
+        try:
+            for wild_code, account in participating_combinations:
+                if account in current_supply_names:
+                    continue  # Уже получили название для этого аккаунта
+                    
+                # Ищем supply_id для этого аккаунта в request_data
+                if wild_code in request_data.orders:
+                    wild_item = request_data.orders[wild_code]
+                    for supply_item in wild_item.supplies:
+                        if supply_item.account == account:
+                            supply_info = await self.get_supply_detailed_info(
+                                supply_item.supply_id, 
+                                account
+                            )
+                            if supply_info:
+                                current_supply_names[account] = supply_info.get("name", f"Поставка_{account}")
+                                logger.info(f"Получено название текущей поставки для {account}: {current_supply_names[account]}")
+                                break
+                
+                # Если не нашли название, используем стандартное
+                if account not in current_supply_names:
+                    current_supply_names[account] = f"Финальная_поставка_{account}"
+                    logger.warning(f"Не удалось получить название поставки для {account}, используем стандартное")
+        
+        except Exception as e:
+            logger.error(f"Ошибка получения текущих названий поставок: {str(e)}")
+        
+        return current_supply_names
+
+    async def _create_new_final_supply(self, account: str, current_name: str) -> Optional[str]:
+        """
+        Создает новую финальную поставку в WB API и сохраняет в БД.
+        
+        Args:
+            account: Аккаунт WB
+            current_name: Текущее название для преобразования
+            
+        Returns:
+            str: ID созданной поставки или None при ошибке
+        """
+        try:
+            # Получаем токены
+            wb_tokens = get_wb_tokens()
+            if account not in wb_tokens:
+                logger.error(f"Токен для аккаунта {account} не найден")
+                return None
+            
+            # Преобразуем название в финальное
+            final_name = self.convert_current_name_to_final(current_name)
+            
+            # Создаем поставку в WB API
+            supplies_api = Supplies(account, wb_tokens[account])
+            result = await supplies_api.create_supply(final_name)
+            
+            if not result or 'id' not in result:
+                logger.error(f"Не удалось создать финальную поставку для {account}")
+                return None
+                
+            new_supply_id = result['id']
+            logger.info(f"Создана новая финальная поставка {new_supply_id} ({final_name}) для {account}")
+            
+            # Сохраняем в БД final_supplies
+            if self.db:
+                final_supplies_db = FinalSupplies(self.db)
+                await final_supplies_db.save_final_supply(new_supply_id, account, final_name)
+            
+            return new_supply_id
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания новой финальной поставки для {account}: {str(e)}")
+            return None
+
+    async def _create_or_use_final_supplies(
+        self, 
+        participating_combinations: Set[Tuple[str, str]], 
+        wb_tokens: dict, 
+        request_data: Any, 
+        user: dict
+    ) -> Dict[Tuple[str, str], str]:
+        """
+        Создает или использует существующие финальные поставки.
+        
+        Args:
+            participating_combinations: Комбинации (wild_code, account)
+            wb_tokens: Токены WB API
+            request_data: Данные запроса
+            user: Данные пользователя
+            
+        Returns:
+            Dict[Tuple[str, str], str]: Маппинг комбинаций на supply_id
+        """
+        # 1. Группируем по аккаунтам
+        unique_accounts = {account for _, account in participating_combinations}
+        logger.info(f"Обработка финальных поставок для аккаунтов: {unique_accounts}")
+        
+        # 2. Получаем текущие названия поставок
+        current_supply_names = await self.get_current_supply_names_for_accounts(
+            participating_combinations, 
+            request_data
+        )
+        
+        # 3. Обрабатываем каждый аккаунт
+        account_final_supplies = {}  # {account: supply_id}
+        
+        if self.db:
+            final_supplies_db = FinalSupplies(self.db)
+            
+            for account in unique_accounts:
+                current_name = current_supply_names.get(account, f"Финальная_поставка_{account}")
+                
+                # Ищем последнюю активную финальную поставку
+                last_final_supply = await final_supplies_db.get_latest_final_supply(account)
+                
+                if last_final_supply:
+                    logger.info(f"Найдена существующая финальная поставка {last_final_supply['supply_id']} для {account}")
+                    
+                    # Проверяем статус в WB API
+                    wb_status = await self.get_supply_detailed_info(
+                        last_final_supply["supply_id"], 
+                        account
+                    )
+                    
+                    if wb_status and not wb_status.get("done", True):
+                        # Поставка активна - используем её
+                        account_final_supplies[account] = last_final_supply["supply_id"]
+                        logger.info(f"Используем активную финальную поставку {last_final_supply['supply_id']} для {account}")
+                    else:
+                        # Поставка неактивна - обновляем статус и создаем новую
+                        new_supply_id = await self._create_new_final_supply(account, current_name)
+                        if new_supply_id:
+                            account_final_supplies[account] = new_supply_id
+                else:
+                    # Нет существующих финальных поставок - создаем новую
+                    logger.info(f"Нет финальных поставок для {account}, создаем первую")
+                    new_supply_id = await self._create_new_final_supply(account, current_name)
+                    if new_supply_id:
+                        account_final_supplies[account] = new_supply_id
+        
+        # 4. Формируем результат для всех комбинаций
+        new_supplies = {}
+        for wild_code, account in participating_combinations:
+            if account in account_final_supplies:
+                new_supplies[(wild_code, account)] = account_final_supplies[account]
+                logger.debug(f"Маппинг: ({wild_code}, {account}) -> {account_final_supplies[account]}")
+        
+        logger.info(f"Финальные поставки подготовлены: {len(new_supplies)} комбинаций -> {len(account_final_supplies)} поставок")
+        return new_supplies
 
     @staticmethod
     def format_data_to_result(supply: SupplyId, order: StickerSchema, name_and_photo: Dict[int, Dict[str, Any]]) -> \
@@ -1296,7 +1532,7 @@ class SuppliesService:
         for wild_code, wild_item in request_data.orders.items():
             # Собираем все заказы для данного wild_code из всех аккаунтов
             wild_orders = []
-            for account in set(supply_item.account for supply_item in wild_item.supplies):
+            for account in {supply_item.account for supply_item in wild_item.supplies}:
                 key = (wild_code, account)
                 if key in orders_by_wild_account:
                     wild_orders.extend(orders_by_wild_account[key])
@@ -1304,8 +1540,16 @@ class SuppliesService:
             # Сортировка по времени создания (новейшие первые, согласно вашему изменению)
             wild_orders.sort(key=lambda x: -x['timestamp'])
 
-            # Выбор первых remove_count заказов
-            selected_count = min(wild_item.remove_count, len(wild_orders))
+            # Определяем количество заказов для выбора
+            if getattr(request_data, 'move_to_final', False):
+                # Для финальных поставок берем ВСЕ заказы для данного wild
+                selected_count = len(wild_orders)
+                logger.info(f"Режим финальных поставок: выбираем все {selected_count} заказов для wild {wild_code}")
+            else:
+                # Для висячих поставок используем указанное количество
+                selected_count = min(wild_item.remove_count, len(wild_orders))
+                logger.info(f"Режим висячих поставок: выбираем {selected_count} из {len(wild_orders)} заказов для wild {wild_code}")
+
             selected_orders = wild_orders[:selected_count]
 
             # Добавляем в список для перемещения
@@ -1331,7 +1575,6 @@ class SuppliesService:
         Returns:
             Tuple[List, List]: (results, task_metadata)
         """
-        # Подготовка задач для параллельного создания поставок
         tasks = []
         task_metadata = []
 
@@ -1490,50 +1733,180 @@ class SuppliesService:
         """
         logger.info(f"Начало перемещения заказов от пользователя {user.get('username', 'unknown')}")
 
-        # 1. Получение токенов WB
-        wb_tokens = get_wb_tokens()
+        # 1. Подготовка и получение данных заказов
+        selected_orders_for_move, participating_combinations = await self._prepare_orders_for_move(request_data)
 
-        # 2. Получаем данные о всех заказах из исходных поставок (параллельно)
-        orders_by_wild_account = await self._fetch_orders_from_supplies(request_data, wb_tokens)
-
-        # 3. Отбираем заказы для перемещения по времени создания
-        selected_orders_for_move, participating_combinations = self._select_orders_for_move(request_data,
-                                                                                            orders_by_wild_account)
-
-        # 4. Проверяем что есть заказы для перемещения
+        # 2. Проверка наличия заказов для перемещения
         if not selected_orders_for_move:
-            return {
-                "success": False,
-                "message": "Не найдено заказов для перемещения",
-                "removed_order_ids": [],
-                "processed_supplies": 0,
-                "processed_wilds": 0
-            }
+            return self._create_empty_result("Не найдено заказов для перемещения")
 
         logger.info(f"Всего отобрано {len(selected_orders_for_move)} заказов для перемещения")
         logger.info(f"Участвующие комбинации (wild, account): {participating_combinations}")
 
-        # 5. Создаем поставки для участвующих комбинаций (параллельно)
-        new_supplies = await self._create_new_supplies(participating_combinations, wb_tokens, user)
+        # 3. Создание целевых поставок
+        new_supplies = await self._create_target_supplies(participating_combinations, request_data, user)
 
-        # 6. Если не удалось создать поставки
+        # 4. Выполнение перемещения заказов
+        moved_order_ids = await self._execute_orders_move(selected_orders_for_move, new_supplies)
+
+        # 5. Отправка данных во внешние системы (только для финальных поставок)
+        await self._process_external_systems_integration(request_data, selected_orders_for_move, new_supplies, user)
+
+        # 6. Возврат результата
+        return self._create_success_result(moved_order_ids, new_supplies, selected_orders_for_move)
+
+    async def _prepare_orders_for_move(self, request_data) -> Tuple[List[dict], Set[Tuple[str, str]]]:
+        """
+        Подготавливает данные заказов для перемещения.
+        
+        Returns:
+            Tuple: (selected_orders_for_move, participating_combinations)
+        """
+        logger.info("Подготовка данных заказов для перемещения")
+        
+        # Получение токенов WB
+        wb_tokens = get_wb_tokens()
+
+        # Получаем данные о всех заказах из исходных поставок
+        orders_by_wild_account = await self._fetch_orders_from_supplies(request_data, wb_tokens)
+
+        # Отбираем заказы для перемещения по времени создания
+        selected_orders_for_move, participating_combinations = self._select_orders_for_move(
+            request_data, orders_by_wild_account
+        )
+
+        return selected_orders_for_move, participating_combinations
+
+    async def _create_target_supplies(self, participating_combinations: Set[Tuple[str, str]], 
+                                    request_data, user: dict) -> Dict[Tuple[str, str], str]:
+        """
+        Создает целевые поставки для перемещения заказов.
+        
+        Returns:
+            Dict: Словарь новых поставок {(wild_code, account): supply_id}
+        """
+        wb_tokens = get_wb_tokens()
+        
+        if getattr(request_data, 'move_to_final', False):
+            logger.info("Создание финальных поставок")
+            new_supplies = await self._create_or_use_final_supplies(
+                participating_combinations, wb_tokens, request_data, user
+            )
+        else:
+            logger.info("Создание висячих поставок")
+            new_supplies = await self._create_new_supplies(
+                participating_combinations, wb_tokens, user
+            )
+
         if not new_supplies:
             raise HTTPException(status_code=500, detail="Не удалось создать поставки для перемещения")
 
         logger.info(f"Успешно создано {len(new_supplies)} поставок")
+        return new_supplies
 
-        # 7. Перемещаем отобранные заказы в новые поставки (параллельно)
-        moved_order_ids = await self._move_orders_to_supplies(selected_orders_for_move, new_supplies, wb_tokens)
+    async def _execute_orders_move(self, selected_orders_for_move: List[dict], 
+                                 new_supplies: Dict[Tuple[str, str], str]) -> List[int]:
+        """
+        Выполняет перемещение заказов в новые поставки.
+        
+        Returns:
+            List[int]: ID успешно перемещенных заказов
+        """
+        logger.info("Выполнение перемещения заказов в новые поставки")
+        wb_tokens = get_wb_tokens()
+        
+        moved_order_ids = await self._move_orders_to_supplies(
+            selected_orders_for_move, new_supplies, wb_tokens
+        )
+        
+        logger.info(f"Успешно перемещено {len(moved_order_ids)} заказов")
+        return moved_order_ids
 
-        # 8. Возврат результата
+    async def _process_external_systems_integration(self, request_data, selected_orders_for_move: List[dict],
+                                                  new_supplies: Dict[Tuple[str, str], str], user: dict) -> None:
+        """
+        Обрабатывает интеграцию с внешними системами для финальных поставок.
+        """
+        if getattr(request_data, 'move_to_final', False):
+            logger.info("Отправка данных в внешние системы (финальные поставки)")
+            
+            supplies_dict = {
+                supply_id: account
+                for (wild_code, account), supply_id in new_supplies.items()
+            }
+            
+            # Обновляем supply_id в заказах на новые целевые поставки
+            updated_orders = self._update_orders_with_new_supply_ids(selected_orders_for_move, new_supplies)
+            
+            shipment_success = await self._send_shipment_data_to_external_systems(
+                updated_orders,
+                supplies_dict,
+                user.get('username', 'unknown')
+            )
+            
+            if shipment_success:
+                logger.info("Данные об отгрузке успешно отправлены в внешние системы")
+            else:
+                logger.warning("Не удалось отправить данные об отгрузке в внешние системы")
+        else:
+            logger.info("Отправка в внешние системы пропущена (режим висячих поставок)")
+
+    def _update_orders_with_new_supply_ids(self, selected_orders: List[dict], 
+                                         new_supplies: Dict[Tuple[str, str], str]) -> List[dict]:
+        """
+        Обновляет supply_id в заказах на новые целевые поставки.
+        
+        Args:
+            selected_orders: Исходные заказы со старыми supply_id
+            new_supplies: Маппинг {(wild_code, account): new_supply_id}
+            
+        Returns:
+            List[dict]: Заказы с обновленными supply_id
+        """
+        updated_orders = []
+        
+        for order in selected_orders:
+            updated_order = order.copy()
+            
+            # Добавляем supply_id из original_supply_id если нет
+            if 'supply_id' not in updated_order:
+                updated_order['supply_id'] = updated_order.get('original_supply_id', '')
+            
+            # Обновляем на новый supply_id
+            key = (order['wild_code'], order['account'])
+            if key in new_supplies:
+                updated_order['supply_id'] = new_supplies[key]
+                logger.debug(f"Обновлен supply_id для заказа {order['id']}: {order.get('original_supply_id', 'N/A')} -> {new_supplies[key]}")
+            else:
+                logger.warning(f"Не найдено новое supply_id для заказа {order['id']} ({key})")
+                
+            updated_orders.append(updated_order)
+        
+        return updated_orders
+
+    def _create_empty_result(self, message: str) -> Dict[str, Any]:
+        """Создает результат для случая отсутствия заказов."""
+        return {
+            "success": False,
+            "message": message,
+            "removed_order_ids": [],
+            "processed_supplies": 0,
+            "processed_wilds": 0
+        }
+
+    def _create_success_result(self, moved_order_ids: List[int], 
+                             new_supplies: Dict[Tuple[str, str], str], 
+                             selected_orders_for_move: List[dict]) -> Dict[str, Any]:
+        """Создает успешный результат операции."""
         logger.info(f"Перемещение завершено. Успешно перемещено {len(moved_order_ids)} заказов")
-
+        
         return {
             "success": True,
             "message": f"Операция перемещения выполнена. Перемещено {len(moved_order_ids)} заказов",
             "removed_order_ids": moved_order_ids,
             "processed_supplies": len(new_supplies),
-            "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}), }
+            "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),
+        }
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
         """Группирует заказы по поставкам и создает маппинг заказов."""
@@ -2484,7 +2857,7 @@ class SuppliesService:
             stickers_pdf = None
 
         # 6. Отправка данных в shipment_of_goods и 1C (вместо имитации)
-        await self._send_fictitious_shipment_data(selected_orders, supplies, operator)
+        await self._send_shipment_data_to_external_systems(selected_orders, supplies, operator)
 
         # 7. Сохраняем фиктивно отгруженные order_id в БД
         await self._save_fictitious_shipped_orders_batch(selected_orders, supplies, operator)
@@ -2545,11 +2918,11 @@ class SuppliesService:
         logger.info(f"Выбрано {len(selected_orders)} заказов для фиктивной отгрузки")
         return selected_orders
 
-    async def _send_fictitious_shipment_data(self, selected_orders: List[Dict], 
+    async def _send_shipment_data_to_external_systems(self, selected_orders: List[Dict],
                                            supplies: Dict[str, str], 
                                            operator: str) -> bool:
         """
-        Отправляет данные о фиктивной отгрузке в shipment_of_goods и 1C.
+        Отправляет данные об отгрузке в shipment_of_goods и 1C.
         
         Args:
             selected_orders: Выбранные заказы для отгрузки

@@ -167,6 +167,10 @@ class MoveOrdersRequest(BaseSchema):
     """Схема запроса для перемещения заказов между поставками."""
     orders: Dict[str, WildOrdersItem] = Field(
         description="Заказы сгруппированные по wild-кодам с индивидуальным remove_count")
+    move_to_final: bool = Field(
+        default=False,
+        description="Флаг перемещения в финальную поставку (по умолчанию висячая)"
+    )
 
 
 class MoveOrdersResponse(BaseSchema):

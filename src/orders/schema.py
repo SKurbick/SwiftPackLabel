@@ -1,5 +1,5 @@
 from typing import List, Dict
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import datetime, timedelta
 
 
@@ -89,6 +89,13 @@ class OrdersWithSupplyNameIn(BaseSchema):
                 raise ValueError(f"Список заказов для {wild_key} не может быть пустым")
         
         return orders_dict
+    
+    @model_validator(mode='after')
+    def add_tex_suffix_for_non_hanging(self):
+        """Добавляет суффикс _TEX к названию поставки, если она не висячая."""
+        if not self.is_hanging:
+            self.name_supply = f"{self.name_supply}_TEX"
+        return self
 
 
 class WildInfo(BaseSchema):
