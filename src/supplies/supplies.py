@@ -614,6 +614,56 @@ class SuppliesService:
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
         return SupplyIdResponseSchema(supplies=filtered_result)
 
+    async def get_delivery_supplies_ids_only(self, hanging_only: bool = False) -> Set[str]:
+        """
+        Получает только номера поставок доставки без полных данных заказов.
+        
+        Оптимизированная версия для сравнения - возвращает только supply_id.
+        
+        Args:
+            hanging_only: Фильтр по висячим поставкам
+            
+        Returns:
+            Set[str]: Множество supply_id для delivery поставок
+        """
+        try:
+            logger.info(f"Получение только supply_id для delivery поставок, hanging_only={hanging_only}")
+
+            # Получаем базовые данные как в get_list_supplies для is_delivery=True
+            wb_active_supplies_ids = await self.get_information_to_supplies()
+            basic_supplies_ids = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
+            fictitious_supplies_ids = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(
+                is_fictitious_delivered=True)
+
+            # Объединяем и фильтруем как в оригинальном методе
+            all_db_supplies_ids = self._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
+            filtered_supplies_ids = self._exclude_wb_active_from_db_supplies(
+                all_db_supplies_ids, wb_active_supplies_ids)
+
+            # Извлекаем только supply_id (без запроса полных данных заказов)
+            supply_ids_set = set()
+            for account_data in filtered_supplies_ids:
+                for account, supplies_list in account_data.items():
+                    for supply_data in supplies_list:
+                        supply_ids_set.add(supply_data['id'])
+
+            # Получаем висячие supply_id из БД
+            hanging_supplies_model = HangingSupplies(self.db)
+            hanging_supply_ids_data = await hanging_supplies_model.get_hanging_supplies()
+            hanging_supply_ids = {item['supply_id'] for item in hanging_supply_ids_data}
+            # Применяем фильтр hanging_only если нужно
+            if hanging_only:
+                supply_ids_set = supply_ids_set.intersection(hanging_supply_ids)
+            else:
+                supply_ids_set = supply_ids_set - hanging_supply_ids
+
+            logger.info(f"Получено {len(supply_ids_set)} delivery supply_id, hanging_only={hanging_only}")
+            return supply_ids_set
+
+        except Exception as e:
+            logger.error(f"Ошибка получения delivery supply_id, hanging_only={hanging_only}: {str(e)}")
+            return set()
+
     async def check_current_orders(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False):
         logger.info("Проверка поставок на соответствие наличия заказов (сверка заказов по поставкам)")
         tasks: List = [

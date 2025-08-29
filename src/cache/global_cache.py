@@ -463,6 +463,117 @@ class GlobalCache:
             logger.error(f"Ошибка при принудительном обновлении кэша: {str(e)}")
             return False
 
+    def _extract_supply_ids_from_cache(self, cached_data) -> set:
+        """
+        Извлекает supply_id из кэшированных данных.
+        
+        Args:
+            cached_data: Кэшированные данные типа SupplyIdResponseSchema
+            
+        Returns:
+            set: Множество supply_id из кэша
+        """
+        if not cached_data or not hasattr(cached_data, 'supplies'):
+            return set()
+        return {supply.supply_id for supply in cached_data.supplies}
+
+    def _calculate_supply_differences(self, cached_ids: set, current_ids: set) -> Dict[str, Any]:
+        """
+        Вычисляет различия между множествами supply_id.
+        
+        Args:
+            cached_ids: Множество supply_id из кэша
+            current_ids: Множество текущих supply_id из БД
+            
+        Returns:
+            Dict с результатами сравнения
+        """
+        new_supplies = list(current_ids - cached_ids)
+        removed_supplies = list(cached_ids - current_ids)
+        
+        return {
+            "cached_count": len(cached_ids),
+            "current_count": len(current_ids),
+            "new_supplies": new_supplies,
+            "removed_supplies": removed_supplies,
+            "has_changes": len(new_supplies) > 0 or len(removed_supplies) > 0
+        }
+
+    async def check_delivery_supplies_diff(self) -> Dict[str, Any]:
+        """
+        Проверяет различия между актуальными и кэшированными поставками доставки.
+        
+        Сравнивает только номера supply_id для эффективности.
+        Проверяет оба типа delivery поставок:
+        - Обычные (hanging_only=False, is_delivery=True)  
+        - Висячие (hanging_only=True, is_delivery=True)
+        
+        Returns:
+            Dict с результатами сравнения и метриками
+        """
+        if not self.is_connected:
+            return {"error": "Redis недоступен"}
+        
+        start_time = datetime.utcnow()
+        
+        try:
+            from src.db import db as main_db
+            
+            # Получаем кэшированные данные
+            cached_delivery_normal = await self.get("cache:supplies_all:hanging_only:False|is_delivery:True")
+            cached_delivery_hanging = await self.get("cache:supplies_all:hanging_only:True|is_delivery:True")
+            
+            # Извлекаем supply_id из кэша
+            cached_normal_ids = self._extract_supply_ids_from_cache(cached_delivery_normal)
+            cached_hanging_ids = self._extract_supply_ids_from_cache(cached_delivery_hanging)
+            
+            # Получаем текущие supply_id напрямую из БД (только номера)
+            async with main_db.connection() as connection:
+                supplies_service = SuppliesService(connection)
+                
+                current_normal_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=False)
+                current_hanging_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=True)
+            
+            # Вычисляем различия
+            normal_diff = self._calculate_supply_differences(cached_normal_ids, current_normal_ids)
+            hanging_diff = self._calculate_supply_differences(cached_hanging_ids, current_hanging_ids)
+            
+            duration = (datetime.utcnow() - start_time).total_seconds() * 1000
+            
+            result = {
+                "timestamp": start_time.isoformat(),
+                "check_duration_ms": round(duration, 2),
+                "method": "optimized_supply_ids_only",
+                
+                "delivery_normal": {
+                    **normal_diff,
+                    "cache_key": "cache:supplies_all:hanging_only:False|is_delivery:True"
+                },
+                
+                "delivery_hanging": {
+                    **hanging_diff,
+                    "cache_key": "cache:supplies_all:hanging_only:True|is_delivery:True"
+                },
+                
+                "summary": {
+                    "total_changes": normal_diff["has_changes"] or hanging_diff["has_changes"],
+                    "total_new": len(normal_diff["new_supplies"]) + len(hanging_diff["new_supplies"]),
+                    "total_removed": len(normal_diff["removed_supplies"]) + len(hanging_diff["removed_supplies"]),
+                    "affected_cache_keys": sum([normal_diff["has_changes"], hanging_diff["has_changes"]])
+                }
+            }
+            
+            if result["summary"]["total_changes"]:
+                logger.info(f"Обнаружены изменения в delivery поставках: {result['summary']}")
+            else:
+                logger.info("Изменений в delivery поставках не обнаружено")
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки различий delivery поставок: {str(e)}")
+            return {"error": str(e)}
+
 
 # Глобальный экземпляр кэша
 global_cache = GlobalCache()
