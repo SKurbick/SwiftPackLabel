@@ -8,6 +8,7 @@ from src.wild_logs.router import wild_logs
 from src.qr_parser.router import qr_parser
 from src.cards.router import cards
 from src.images.router import images
+from src.pdf_parser.router import pdf_parser_router
 
 router = APIRouter(prefix='/api/v1')
 router.include_router(supply)
@@ -19,3 +20,4 @@ router.include_router(wild_logs)
 router.include_router(qr_parser)
 router.include_router(cards)
 router.include_router(images)
+router.include_router(pdf_parser_router)
