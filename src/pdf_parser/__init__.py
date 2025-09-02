@@ -2,7 +2,7 @@
 PDF Parser модуль для парсинга листов подбора Wildberries
 """
 
-from .router import pdf_parser_router
+from .router import document_parser_router as pdf_parser_router
 from .schema import (
     OrderItem,
     ParsingMetadata, 
