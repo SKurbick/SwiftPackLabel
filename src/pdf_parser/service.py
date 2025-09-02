@@ -1,29 +1,52 @@
 """
-Сервис для обработки PDF листов подбора
+Сервис для обработки PDF и Excel листов подбора
 """
 from typing import Dict, Any, List, Tuple
 from fastapi import HTTPException, status
 
-from src.service.pdf_parser import PickingListParser, PDFParseError
+from .pdf_parser import PickingListParser, PDFParseError
+from .excel_parser import ExcelPickingListParser, ExcelParseError
 from src.supplies.supplies import SuppliesService
 from src.logger import app_logger as logger
 from src.utils import process_local_vendor_code
 
 
-class PDFProcessingService:
-    """Сервис для обработки PDF листов подбора и интеграции с системой отгрузки."""
+class DocumentProcessingService:
+    """Сервис для обработки PDF и Excel листов подбора и интеграции с системой отгрузки."""
     
     def __init__(self, db):
         self.db = db
-        self.parser = PickingListParser()
-        
-    def convert_pdf_orders_to_fictitious_format(self, pdf_orders: List[Dict[str, Any]], 
-                                              supply_account_map: Dict[str, str]) -> Tuple[List[Dict], Dict[str, str]]:
+        self.pdf_parser = PickingListParser()
+        self.excel_parser = ExcelPickingListParser()
+    
+    def _detect_file_type(self, filename: str) -> str:
         """
-        Преобразует заказы из PDF в формат для _send_fictitious_shipment_data
+        Определяет тип файла по расширению
         
         Args:
-            pdf_orders: Заказы из PDF парсера
+            filename: Имя файла
+            
+        Returns:
+            str: 'pdf' или 'excel'
+        """
+        filename_lower = filename.lower()
+        if filename_lower.endswith('.pdf'):
+            return 'pdf'
+        elif filename_lower.endswith(('.xlsx', '.xls')):
+            return 'excel'
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Неподдерживаемый тип файла: {filename}. Поддерживаются только PDF и Excel файлы."
+            )
+        
+    def convert_orders_to_fictitious_format(self, orders: List[Dict[str, Any]], 
+                                           supply_account_map: Dict[str, str]) -> Tuple[List[Dict], Dict[str, str]]:
+        """
+        Преобразует заказы из PDF/Excel в формат для _send_fictitious_shipment_data
+        
+        Args:
+            orders: Заказы из PDF/Excel парсера
             supply_account_map: Маппинг {supply_id: account}
             
         Returns:
@@ -32,7 +55,7 @@ class PDFProcessingService:
         selected_orders = []
         supplies = {}
         
-        for order in pdf_orders:
+        for order in orders:
             supply_id = order.get('supply_id')
             if not supply_id:
                 continue
@@ -82,10 +105,10 @@ class PDFProcessingService:
     
     async def parse_and_ship(self, content: bytes, filename: str, account: str, user: dict) -> Dict[str, Any]:
         """
-        Парсит PDF лист подбора и сразу отправляет данные в фиктивную отгрузку.
+        Парсит PDF или Excel лист подбора и сразу отправляет данные в фиктивную отгрузку.
         
         Args:
-            content: Содержимое PDF файла
+            content: Содержимое PDF/Excel файла
             filename: Имя файла
             account: Аккаунт WB для всех поставок в файле
             user: Данные пользователя
@@ -99,13 +122,20 @@ class PDFProcessingService:
         try:
             logger.info(f"Пользователь {user.get('username', 'unknown')} запустил парсинг с отгрузкой: {filename}")
 
-            # 1. Парсим PDF
-            result = self.parser.parse_pdf_to_json(content, source_filename=filename)
+            # 1. Определяем тип файла и парсим соответствующим парсером
+            file_type = self._detect_file_type(filename)
+            
+            if file_type == 'pdf':
+                result = self.pdf_parser.parse_pdf_to_json(content, source_filename=filename)
+                file_type_name = "PDF"
+            else:  # excel
+                result = self.excel_parser.parse_excel_to_json(content, source_filename=filename)
+                file_type_name = "Excel"
 
             if not result['orders']:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="В PDF не найдено заказов для обработки"
+                    detail=f"В {file_type_name} не найдено заказов для обработки"
                 )
 
             # 2. Создаем маппинг аккаунтов (используем один аккаунт для всех поставок)
@@ -119,7 +149,7 @@ class PDFProcessingService:
             await self._validate_supplies_belong_to_account(supply_account_map, supplies_service)
 
             # 4. Преобразуем данные в формат для фиктивной отгрузки
-            selected_orders, supplies = self.convert_pdf_orders_to_fictitious_format(
+            selected_orders, supplies = self.convert_orders_to_fictitious_format(
                 result['orders'], 
                 supply_account_map
             )
@@ -144,8 +174,9 @@ class PDFProcessingService:
                 "processed_orders": len(selected_orders),
                 "processed_supplies": len(supplies),
                 "supplies_info": supplies,
-                "pdf_metadata": {
+                "file_metadata": {
                     "source_file": filename,
+                    "file_type": file_type_name,
                     "total_orders_parsed": len(result['orders']),
                     "parsing_success": result['statistics']['parsing_success']
                 }
@@ -155,11 +186,11 @@ class PDFProcessingService:
 
             return response_data
 
-        except PDFParseError as e:
-            logger.error(f"Ошибка парсинга PDF {filename}: {e}")
+        except (PDFParseError, ExcelParseError) as e:
+            logger.error(f"Ошибка парсинга файла {filename}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Ошибка парсинга PDF: {str(e)}"
+                detail=f"Ошибка парсинга файла: {str(e)}"
             )
         except HTTPException:
             # Перепроброс уже созданных HTTPException
