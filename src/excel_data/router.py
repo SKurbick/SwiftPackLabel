@@ -3,7 +3,10 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from src.auth.dependencies import get_current_user
-from src.excel_data.schema import WildModelResponse, MessageResponse, WildModelListResponse
+from src.excel_data.schema import (
+    WildModelResponse, MessageResponse, WildModelListResponse,
+    WildModelRecord, WildModelCreate, WildModelUpdate
+)
 from src.excel_data.service import ExcelDataService
 from src.logger import app_logger as logger
 
@@ -64,5 +67,85 @@ async def download_excel_file(
         headers={"Content-Disposition": "attachment; filename=wild_model_data.xlsx"}
     )
 
+
+# Новые CRUD эндпоинты
+@excel_data.get("/records", response_model=WildModelListResponse)
+async def get_all_records(
+    user: dict = Depends(get_current_user)
+) -> WildModelListResponse:
+    """
+    Возвращает все записи из файла с индексами.
+    
+    Returns:
+        WildModelListResponse: Список всех записей с индексами
+    """
+    excel_service = ExcelDataService()
+    return excel_service.get_all_records()
+
+
+@excel_data.put("/records/{index}", response_model=WildModelRecord)
+async def update_record(
+    index: int,
+    record: WildModelUpdate,
+    user: dict = Depends(get_current_user)
+) -> WildModelRecord:
+    """
+    Обновляет запись по номеру строки (индексу).
+    
+    Args:
+        index: Номер строки для обновления (начиная с 0)
+        record: Новые данные (wild и model)
+        user: Текущий пользователь
+        
+    Returns:
+        WildModelRecord: Обновленная запись
+    """
+    excel_service = ExcelDataService()
+    return excel_service.update_record(index, record)
+
+
+@excel_data.post("/records", response_model=WildModelRecord, status_code=status.HTTP_201_CREATED)
+async def create_record(
+    record: WildModelCreate,
+    user: dict = Depends(get_current_user)
+) -> WildModelRecord:
+    """
+    Добавляет новую запись в файл.
+    
+    Args:
+        record: Данные для создания (wild и model)
+        user: Текущий пользователь
+        
+    Returns:
+        WildModelRecord: Созданная запись с индексом
+    """
+    excel_service = ExcelDataService()
+    return excel_service.create_record(record)
+
+
+@excel_data.delete("/records/{index}", response_model=MessageResponse)
+async def delete_record(
+    index: int,
+    user: dict = Depends(get_current_user)
+) -> MessageResponse:
+    """
+    Удаляет запись по номеру строки (индексу).
+    
+    Args:
+        index: Номер строки для удаления (начиная с 0)
+        user: Текущий пользователь
+        
+    Returns:
+        MessageResponse: Сообщение об успешном удалении
+    """
+    excel_service = ExcelDataService()
+    
+    if not excel_service.delete_record(index):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Запись с индексом {index} не найдена"
+        )
+    
+    return MessageResponse(message=f"Запись с индексом {index} успешно удалена")
 
 

@@ -1,7 +1,8 @@
 from typing import List, Dict, Optional, Any
+import asyncpg
 from src.logger import app_logger as logger
 from src.models.card_data import CardData
-from src.qr_parser.schema import WildParserResponse
+from src.qr_parser.schema import WildParserResponse, QRLookupResponse
 from src.utils import get_information_to_data
 
 
@@ -222,3 +223,105 @@ class WildParserService:
             rating=rating,
             colors=colors
         )
+
+
+class QRLookupService:
+    """Сервис для поиска данных по QR-коду."""
+
+    def __init__(self, db=None):
+        """
+        Инициализирует сервис для поиска по QR-коду.
+        Args:
+            db: Соединение с базой данных
+        """
+        self.db = db
+
+    async def find_by_qr_data(self, qr_data: str) -> QRLookupResponse:
+        """
+        Ищет данные по QR-коду в таблице qr_scans и соответствующий заказ в orders_wb одним запросом.
+        
+        Args:
+            qr_data: QR код стикера, например '*CN+tGIpw'
+            
+        Returns:
+            QRLookupResponse: Найденные данные или пустой ответ
+        """
+        logger.info(f"Поиск данных по QR-коду: {qr_data}")
+        
+        try:
+            # Объединенный запрос с LEFT JOIN
+            data = await self._find_qr_and_order_data(qr_data)
+            
+            if not data:
+                logger.warning(f"QR-код не найден: {qr_data}")
+                return QRLookupResponse(
+                    found=False,
+                    data=None
+                )
+            
+            if data['order_id'] is not None:
+                logger.info(f"Найден заказ по order_id {data['qr_order_id']}: {data['order_uid']}")
+            else:
+                logger.warning(f"Заказ с order_id {data['qr_order_id']} не найден")
+            
+            return QRLookupResponse(
+                found=True,
+                data=data
+            )
+                
+        except Exception as e:
+            logger.error(f"Ошибка при поиске по QR-коду {qr_data}: {str(e)}")
+            raise
+    
+    async def _find_qr_and_order_data(self, qr_data: str) -> Optional[Dict[str, Any]]:
+        """
+        Ищет данные QR-скана и связанного заказа одним запросом через LEFT JOIN.
+        
+        Args:
+            qr_data: QR код для поиска
+            
+        Returns:
+            Optional[Dict[str, Any]]: Объединенные данные или None
+        """
+        query = """
+            SELECT 
+                -- QR scan data with prefixes
+                qr.id as qr_id,
+                qr.order_id as qr_order_id,
+                qr.wild as qr_wild,
+                qr.supply_id as qr_supply_id,
+                qr.qr_data,
+                qr.account as qr_account,
+                qr.part_a as qr_part_a,
+                qr.part_b as qr_part_b,
+                qr.created_at as qr_created_at,
+                
+                -- Order data with prefixes (may be NULL if no matching order)
+                o.id as order_id,
+                o.order_uid,
+                o.rid as order_rid,
+                o.article as order_article,
+                o.nm_id as order_nm_id,
+                o.chrt_id as order_chrt_id,
+                o.color_code as order_color_code,
+                o.price as order_price,
+                o.sale_price as order_sale_price,
+                o.converted_price as order_converted_price,
+                o.delivery_type as order_delivery_type,
+                o.supply_id as order_supply_id,
+                o.address as order_address,
+                o.comment as order_comment,
+                o.created_at as order_created_at
+                
+            FROM qr_scans qr
+            LEFT JOIN orders_wb o ON qr.order_id = o.id
+            WHERE qr.qr_data = $1
+            LIMIT 1
+        """
+
+        try:
+            row = await self.db.fetchrow(query, qr_data)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка при объединенном поиске QR-скана и заказа: {str(e)}")
+            raise
