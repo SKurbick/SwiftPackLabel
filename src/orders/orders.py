@@ -128,8 +128,6 @@ class OrdersService:
         try:
 
             supplies_data = await orders.get_new_orders()
-            remove_orders = [int(i) for i in remove_orders_id.split('\n')]
-            supplies_data = [data for data in supplies_data if data.get("id") not in remove_orders]
             logger.info(f"Кабинет {account}: получено {len(supplies_data)} заказов")
             return {account: supplies_data or []}
         except Exception as e:
