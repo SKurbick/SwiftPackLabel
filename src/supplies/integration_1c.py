@@ -15,6 +15,7 @@ from src.utils import get_wb_tokens
 from src.wildberries_api.orders import Orders
 from src.response import AsyncHttpClient
 from src.settings import settings
+from src.models.onec_delivery_log import OneCDeliveryLog
 
 
 class OneCIntegration:
@@ -23,9 +24,10 @@ class OneCIntegration:
     Преобразует информацию о заказах и поставках в структурированный формат.
     """
 
-    def __init__(self):
+    def __init__(self, db=None):
         """Инициализация класса интеграции с 1C."""
         self.async_client = AsyncHttpClient(timeout=240,retries=3,delay=5)
+        self.db = db
 
     @staticmethod
     def convert_price(price) -> float:
@@ -312,7 +314,15 @@ class OneCIntegration:
                 ) for account, order_ids in accounts_orders.items()
             ]
             await asyncio.gather(*tasks)
-            return await self.send_to_1c(self.build_final_structure(result_structure))
+            
+            formatted_data = self.build_final_structure(result_structure)
+            response = await self.send_to_1c(formatted_data)
+            
+            if self.db:
+                delivery_log = OneCDeliveryLog(self.db)
+                await delivery_log.log_1c_integration(formatted_data, response)
+            
+            return response
         except Exception as e:
             logger.error(f"Ошибка при форматировании данных для 1C: {str(e)}")
             raise

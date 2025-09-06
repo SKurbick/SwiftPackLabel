@@ -142,7 +142,7 @@ async def deliver_supplies(
     try:
         supply_service = SuppliesService(db)
         await supply_service.process_delivery_supplies(supply_ids)
-        integration = OneCIntegration()
+        integration = OneCIntegration(db)
         integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
         shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
                                                               user.get('username', "Не найден"))
