@@ -288,8 +288,6 @@ class QRLookupService:
                 -- QR scan data with prefixes
                 qr.id as qr_id,
                 qr.order_id as qr_order_id,
-                qr.wild as qr_wild,
-                qr.supply_id as qr_supply_id,
                 qr.qr_data,
                 qr.account as qr_account,
                 qr.part_a as qr_part_a,
