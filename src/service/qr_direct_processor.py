@@ -191,11 +191,3 @@ class QRDirectProcessor:
         except Exception as e:
             logger.error(f"Критическая ошибка сохранения в БД: {e}")
             return 0
-    
-
-
-if __name__ == '__main__':
-    from src.db import db
-    
-    qr_parse = QRDirectProcessor(db)
-    asyncio.run(qr_parse.process_orders_qr("Даниелян",[3820675715,3820684031,3820696710,3820696331,3820823956,3820861763,3820909844]))
