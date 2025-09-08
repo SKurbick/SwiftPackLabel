@@ -10,15 +10,15 @@ from src.utils import get_wb_tokens
 class QRDirectProcessor:
     """Прямой обработчик QR-кодов для заказов"""
     
-    def __init__(self, db):
+    def __init__(self, db_manager):
         """
         Инициализация процессора
         
         Args:
-            db: Объект подключения к базе данных
+            db_manager: DatabaseManager для получения соединений из пула
         """
         self.tokens = get_wb_tokens()
-        self.db = db
+        self.db_manager = db_manager
     
     def _validate_input(self, account: str, order_ids: List[int]) -> bool:
         """
@@ -31,9 +31,9 @@ class QRDirectProcessor:
         Returns:
             bool: True если все проверки пройдены, False иначе
         """
-        # Проверяем наличие подключения к БД
-        if not self.db:
-            logger.error("Не передано подключение к базе данных")
+        # Проверяем наличие менеджера БД
+        if not self.db_manager:
+            logger.error("Не передан менеджер базы данных")
             return False
         
         # Проверяем наличие токена
@@ -164,29 +164,31 @@ class QRDirectProcessor:
         logger.info(f"Сохранение {len(qr_data)} записей в базу данных")
 
         try:
-            # Создаем универсальный SQL запрос для любого количества записей
-            values_placeholders = []
-            all_values = []
-            
-            for i, record in enumerate(qr_data):
-                base_idx = i * 5
-                placeholders = f"(${base_idx + 1}, ${base_idx + 2}, ${base_idx + 3}, ${base_idx + 4}, ${base_idx + 5})"
-                values_placeholders.append(placeholders)
-                all_values.extend([record.order_id, record.qr_data, record.account,
-                                   record.part_a, record.part_b])
-            
-            query = f"""
-            INSERT INTO qr_scans (order_id, qr_data, account, part_a, part_b)
-            VALUES {', '.join(values_placeholders)}
-            ON CONFLICT (order_id, qr_data) DO NOTHING
-            """
-            
-            await self.db.execute(query, *all_values)
-            saved_count = len(qr_data)
+            # Получаем отдельное соединение из пула для этой операции
+            async with self.db_manager.connection() as connection:
+                # Создаем универсальный SQL запрос для любого количества записей
+                values_placeholders = []
+                all_values = []
+                
+                for i, record in enumerate(qr_data):
+                    base_idx = i * 5
+                    placeholders = f"(${base_idx + 1}, ${base_idx + 2}, ${base_idx + 3}, ${base_idx + 4}, ${base_idx + 5})"
+                    values_placeholders.append(placeholders)
+                    all_values.extend([record.order_id, record.qr_data, record.account,
+                                       record.part_a, record.part_b])
+                
+                query = f"""
+                INSERT INTO qr_scans (order_id, qr_data, account, part_a, part_b)
+                VALUES {', '.join(values_placeholders)}
+                ON CONFLICT (order_id, qr_data) DO NOTHING
+                """
+                
+                await connection.execute(query, *all_values)
+                saved_count = len(qr_data)
 
-            logger.info(f"Вставка выполнена: {saved_count} записей обработано "
-                       f"(дубликаты пропущены автоматически)")
-            return saved_count
+                logger.info(f"Вставка выполнена: {saved_count} записей обработано "
+                           f"(дубликаты пропущены автоматически)")
+                return saved_count
 
         except Exception as e:
             logger.error(f"Критическая ошибка сохранения в БД: {e}")

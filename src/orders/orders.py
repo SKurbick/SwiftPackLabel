@@ -7,6 +7,7 @@ from datetime import timedelta
 from collections import defaultdict
 from typing import List, Dict, Any, Set, Tuple
 
+from src.db import db as db_manager
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
@@ -772,7 +773,9 @@ class OrdersService:
             return
         
         # Создаем задачи для параллельной обработки каждого аккаунта
-        qr_processor = QRDirectProcessor(self.db)
+        # Импортируем менеджер БД для получения соединений из пула
+        
+        qr_processor = QRDirectProcessor(db_manager)
         tasks = []
         accounts = []
         
