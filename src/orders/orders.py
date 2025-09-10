@@ -271,7 +271,7 @@ class OrdersService:
         """
         Сортирует заказы по времени создания (по убыванию)
         """
-        return sorted(orders, key=lambda x: x["created_at"], reverse=True)
+        return sorted(orders, key=lambda x: x["created_at"])
 
     async def get_filtered_orders(self, time_delta: float = None, article: str = None) -> list:
         """
