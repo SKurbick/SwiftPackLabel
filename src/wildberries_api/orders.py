@@ -27,6 +27,8 @@ class Orders(Account):
         :param order_id: ID сборочного задания
         :return: True если можно добавить, False если нельзя
         """
+        self.async_client.retries = 90
+        self.async_client.delay = 61
         try:
             # Получаем статус заказа
             orders_response = await self.get_orders_statuses([order_id])
