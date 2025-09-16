@@ -463,6 +463,106 @@ class GlobalCache:
             logger.error(f"Ошибка при принудительном обновлении кэша: {str(e)}")
             return False
 
+    async def refresh_specific_cache(self, cache_type: str, hanging_only: bool = None, is_delivery: bool = None) -> bool:
+        """
+        Принудительное обновление конкретного типа кэша.
+        
+        Args:
+            cache_type: Тип кэша ('supplies' или 'orders')
+            hanging_only: Для поставок - только висячие (True) или обычные (False), None - все
+            is_delivery: Для поставок - из доставки (True) или WB API (False), None - все
+            
+        Returns:
+            bool: True если обновление успешно
+        """
+        logger.info(f"Селективное обновление кэша: type={cache_type}, hanging_only={hanging_only}, is_delivery={is_delivery}")
+        
+        if not self.is_connected:
+            logger.warning("Redis не подключен, пропускаем селективное обновление кэша")
+            return False
+        
+        try:
+            if cache_type == "supplies":
+                return await self._refresh_supplies_cache(hanging_only, is_delivery)
+            else:
+                logger.error(f"Неизвестный тип кэша: {cache_type}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка при селективном обновлении кэша {cache_type}: {str(e)}")
+            return False
+    
+    async def _refresh_supplies_cache(self, hanging_only: bool = None, is_delivery: bool = None) -> bool:
+        """Обновление кэша поставок с фильтрацией."""
+        try:
+            from src.db import db as main_db
+
+            # Определяем какие комбинации обновлять
+            combinations_to_update = []
+
+            if hanging_only is None and is_delivery is None:
+                # Обновляем все комбинации
+                combinations_to_update = [
+                    {"hanging_only": False, "is_delivery": False},
+                    {"hanging_only": True, "is_delivery": False},
+                    {"hanging_only": False, "is_delivery": True},
+                    {"hanging_only": True, "is_delivery": True},
+                ]
+            elif hanging_only is None:
+                combinations_to_update.extend([
+                    {"hanging_only": False, "is_delivery": is_delivery},
+                    {"hanging_only": True, "is_delivery": is_delivery},
+                ])
+            elif is_delivery is None:
+                combinations_to_update.extend([
+                    {"hanging_only": hanging_only, "is_delivery": False},
+                    {"hanging_only": hanging_only, "is_delivery": True},
+                ])
+            else:
+                combinations_to_update.append({
+                    "hanging_only": hanging_only, 
+                    "is_delivery": is_delivery
+                })
+
+            async with main_db.connection() as connection:
+                supplies_service = SuppliesService(connection)
+
+                success_count = 0
+                for combination in combinations_to_update:
+                    try:
+                        h_only = combination["hanging_only"]
+                        delivery = combination["is_delivery"]
+
+                        logger.info(f"Обновление кэша поставок: hanging_only={h_only}, is_delivery={delivery}")
+
+                        # Получаем свежие данные
+                        supplies_response = await supplies_service.get_list_supplies(
+                            hanging_only=h_only,
+                            is_delivery=delivery
+                        )
+
+                        # Формируем ключ кэша
+                        cache_key = f"cache:supplies_all:hanging_only:{h_only}|is_delivery:{delivery}"
+
+                        # Удаляем старый ключ и сохраняем новые данные
+                        await self.delete(cache_key)
+                        await self.set(cache_key, supplies_response)
+
+                        logger.info(f"Кэш обновлен для {cache_key}: {len(supplies_response.supplies)} поставок")
+                        success_count += 1
+
+                    except Exception as e:
+                        logger.error(f"Ошибка обновления кэша для {combination}: {str(e)}")
+                        continue
+
+                logger.info(f"Обновление кэша поставок завершено: {success_count}/{len(combinations_to_update)} успешно")
+                return success_count == len(combinations_to_update)
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка при обновлении кэша поставок: {str(e)}")
+            return False
+    
+
     def _extract_supply_ids_from_cache(self, cached_data) -> set:
         """
         Извлекает supply_id из кэшированных данных.

@@ -9,6 +9,7 @@ from src.qr_parser.router import qr_parser
 from src.cards.router import cards
 from src.images.router import images
 from src.pdf_parser.router import document_parser_router
+from src.cache.router import cache
 
 router = APIRouter(prefix='/api/v1')
 router.include_router(supply)
@@ -21,3 +22,4 @@ router.include_router(qr_parser)
 router.include_router(cards)
 router.include_router(images)
 router.include_router(document_parser_router)
+router.include_router(cache)
