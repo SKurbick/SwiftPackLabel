@@ -851,3 +851,24 @@ class OrdersService:
             raise
         except Exception as e:
             raise Exception(f"Sticker error: {str(e)}")
+
+    @staticmethod
+    def filter_orders_by_stock(grouped_orders: Dict[str, GroupedOrderInfo], positive_stock: bool = False) -> Dict[str, GroupedOrderInfo]:
+        """
+        Фильтрует заказы по остатку товара.
+        
+        Args:
+            grouped_orders: Сгруппированные заказы
+            positive_stock: True - только положительные остатки, False - нулевые и отрицательные
+            
+        Returns:
+            Dict[str, GroupedOrderInfo]: Отфильтрованные заказы
+        """
+        filtered_orders = {}
+
+        for article, order_info in grouped_orders.items():
+            stock_quantity = order_info.stock_quantity or 0
+
+            if positive_stock and stock_quantity > 0 or not positive_stock and stock_quantity <= 0:
+                filtered_orders[article] = order_info
+        return filtered_orders
