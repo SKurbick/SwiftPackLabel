@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
-    CACHE_TTL: int = int(os.getenv("CACHE_TTL", 600))  # 10 минут по умолчанию
+    CACHE_TTL: int = int(os.getenv("CACHE_TTL", 2400))  # 10 минут по умолчанию
     
     # Настройки глобального кэша
-    CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 300))  # 5 минут по умолчанию
+    CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 1800))  # 30 минут по умолчанию
     
     # Настройки Celery
     CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1")
