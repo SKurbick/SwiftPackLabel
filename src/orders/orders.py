@@ -128,6 +128,7 @@ class OrdersService:
             Dict[str, List[Dict[str, Any]]]: Словарь с сырыми данными о заказах
         """
         try:
+
             supplies_data = await orders.get_new_orders()
             logger.info(f"Кабинет {account}: получено {len(supplies_data)} заказов")
             return {account: supplies_data or []}
@@ -318,7 +319,7 @@ class OrdersService:
 
             result[wild] = GroupedOrderInfo(
                 wild=wild,
-                stock_quantity=all_stocks_no_current.get(wild,0),
+                stock_quantity=all_stocks_no_current.get(wild, 0),
                 doc_name=doc_name,
                 api_name=api_name,
                 orders=orders,
@@ -503,7 +504,8 @@ class OrdersService:
             order_wild_map=order_wild_map
         )
 
-    async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]], supply_by_account: Dict[str, str], operator: str = 'unknown') -> None:
+    async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]],
+                                     supply_by_account: Dict[str, str], operator: str = 'unknown') -> None:
         """
         Сохраняет информацию о висячих поставках в БД.
         Args:
@@ -530,12 +532,13 @@ class OrdersService:
             order_data = {"orders": orders}
             order_data_json = json.dumps(order_data)
             await hanging_supplies.save_hanging_supply(supply_id, account, order_data_json, operator)
-            logger.info(f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами, оператор: {operator}")
+            logger.info(
+                f"Сохранена висячая поставка {supply_id} для аккаунта {account} с {len(orders)} заказами, оператор: {operator}")
 
     @staticmethod
     def _group_orders_by_product_and_account(
-        filtered_orders: Dict[str, List[OrderDetail]], 
-        supply_by_account: Dict[str, str]
+            filtered_orders: Dict[str, List[OrderDetail]],
+            supply_by_account: Dict[str, str]
     ) -> tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, str]]]:
         """
         Группирует заказы по артикулам и аккаунтам для подсчета количества.
@@ -551,17 +554,17 @@ class OrdersService:
         """
         product_quantities = defaultdict(lambda: defaultdict(int))
         product_supply_ids = defaultdict(dict)
-        
+
         for orders in filtered_orders.values():
             for order in orders:
                 wild_code = order.article
                 account = order.account
                 supply_id = supply_by_account.get(account)
-                
+
                 if supply_id:
                     product_quantities[wild_code][account] += 1
                     product_supply_ids[wild_code][account] = supply_id
-        
+
         return product_quantities, product_supply_ids
 
     @staticmethod
@@ -576,16 +579,17 @@ class OrdersService:
         """
         current_date = datetime.datetime.now()
         reserve_date = current_date.strftime("%Y-%m-%d")
-        expires_at = (current_date + timedelta(days=settings.PRODUCT_RESERVATION_EXPIRES_DAYS)).strftime("%Y-%m-%d %H:%M:%S.%f")
-        
+        expires_at = (current_date + timedelta(days=settings.PRODUCT_RESERVATION_EXPIRES_DAYS)).strftime(
+            "%Y-%m-%d %H:%M:%S.%f")
+
         return reserve_date, expires_at
 
     @staticmethod
     def _build_reservation_items(
-        product_quantities: Dict[str, Dict[str, int]], 
-        product_supply_ids: Dict[str, Dict[str, str]], 
-        reserve_date: str, 
-        expires_at: str
+            product_quantities: Dict[str, Dict[str, int]],
+            product_supply_ids: Dict[str, Dict[str, str]],
+            reserve_date: str,
+            expires_at: str
     ) -> List[Dict[str, Any]]:
         """
         Формирует элементы для резервации товаров.
@@ -600,11 +604,11 @@ class OrdersService:
             List[Dict[str, Any]]: Список элементов для резервации
         """
         reservation_items = []
-        
+
         for wild_code, accounts_data in product_quantities.items():
             for account, quantity in accounts_data.items():
                 supply_id = product_supply_ids[wild_code][account]
-                
+
                 reservation_item = {
                     "product_id": wild_code,
                     "warehouse_id": settings.PRODUCT_RESERVATION_WAREHOUSE_ID,
@@ -615,9 +619,9 @@ class OrdersService:
                     "reserve_date": reserve_date,
                     "expires_at": expires_at
                 }
-                
+
                 reservation_items.append(reservation_item)
-        
+
         return reservation_items
 
     async def _send_reservation_request(self, reservation_items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -631,8 +635,9 @@ class OrdersService:
             Dict[str, Any]: Результат HTTP запроса
         """
         reservation_url = settings.PRODUCT_RESERVATION_API_URL
-        
-        logger.info(f"Отправка запроса на создание резерва для {len(reservation_items)} позиций товаров на URL: {reservation_url}")
+
+        logger.info(
+            f"Отправка запроса на создание резерва для {len(reservation_items)} позиций товаров на URL: {reservation_url}")
         logger.debug(f"Данные для создания резерва: {json.dumps(reservation_items, ensure_ascii=False, indent=2)}")
 
         try:
@@ -641,7 +646,7 @@ class OrdersService:
                 json=reservation_items,
                 headers={"Content-Type": "application/json"}
             )
-            
+
             if response:
                 logger.info(f"Успешное создание резерва товаров для висячих поставок. Ответ: {response}")
                 return {
@@ -658,7 +663,7 @@ class OrdersService:
                     "message": "Пустой ответ от сервиса создания резерва",
                     "reserved_items": 0
                 }
-                
+
         except Exception as e:
             logger.error(f"Ошибка HTTP запроса при создании резерва: {str(e)}")
             return {
@@ -669,10 +674,10 @@ class OrdersService:
             }
 
     async def _reserve_products_for_hanging_supplies(
-        self, 
-        filtered_orders: Dict[str, List[OrderDetail]], 
-        supply_by_account: Dict[str, str], 
-        operator: str = 'unknown'
+            self,
+            filtered_orders: Dict[str, List[OrderDetail]],
+            supply_by_account: Dict[str, str],
+            operator: str = 'unknown'
     ) -> Dict[str, Any]:
         """
         Координирует процесс создания резерва товаров для висячих поставок.
@@ -703,10 +708,10 @@ class OrdersService:
                 return {"success": False, "message": "Нет данных для резервации"}
 
             result = await self._send_reservation_request(reservation_items)
-            
+
             logger.info(f"Процесс создания резерва товаров завершен. Результат: {result.get('success', False)}")
             return result
-                
+
         except Exception as e:
             logger.error(f"Критическая ошибка при создании резерва товаров для висячих поставок: {str(e)}")
             return {
@@ -715,8 +720,9 @@ class OrdersService:
                 "reserved_items": 0,
                 "error_details": str(e)
             }
-            
-    async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn, operator: str = 'unknown') -> SupplyAccountWildOut:
+
+    async def process_orders_with_fact_count(self, input_data: OrdersWithSupplyNameIn,
+                                             operator: str = 'unknown') -> SupplyAccountWildOut:
         """
         Обрабатывает заказы с учетом установленного количества fact_orders.
         
@@ -742,13 +748,13 @@ class OrdersService:
         # Если поставки висячие, сохраняем информацию в БД и резервируем товары
         if input_data.is_hanging and self.db:
             await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
-            
+
             # Резервируем товары для висячих поставок
             reservation_result = await self._reserve_products_for_hanging_supplies(
                 filtered_orders_by_sku, supply_by_account, operator
             )
             logger.info(f"Результат резервации товаров: {reservation_result}")
-            
+
         return self._prepare_result(orders_added_by_article, order_supply_mapping)
     
     async def _process_qr_codes_for_orders(self, 
@@ -810,43 +816,43 @@ class OrdersService:
             tokens = get_wb_tokens()
             if account not in tokens:
                 raise ValueError(f"Account not found: {account}")
-            
+
             # Create WB orders client
             wb_orders = Orders(account, tokens[account])
-            
+
             # Get sticker data
             sticker_data = await wb_orders.get_stickers_to_orders("single_order", [order_id])
-            
+
             # Validate response
             if not sticker_data or account not in sticker_data:
                 raise ValueError(f"No sticker data for order {order_id}")
-            
+
             stickers = sticker_data[account]["single_order"].get("stickers", [])
             if not stickers:
                 raise ValueError(f"No stickers for order {order_id}")
-            
+
             # Find target sticker
             target_sticker = None
             for sticker in stickers:
                 if sticker.get("orderId") == order_id:
                     target_sticker = sticker
                     break
-            
+
             if not target_sticker:
                 raise ValueError(f"Order {order_id} sticker not found")
-            
+
             # Get base64 data
             sticker_base64 = target_sticker.get("file")
             if not sticker_base64:
                 raise ValueError(f"Sticker data corrupted for order {order_id}")
-            
+
             # Decode base64 to PNG
             png_data = base64.b64decode(sticker_base64)
             png_buffer = BytesIO(png_data)
             png_buffer.seek(0)
-            
+
             return png_buffer
-            
+
         except ValueError:
             raise
         except Exception as e:
