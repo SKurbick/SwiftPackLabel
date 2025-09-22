@@ -10,7 +10,7 @@ from src.logger import get_logger
 logger = get_logger()
 
 
-@celery_app.task(name='sync_orders_periodic')
+@celery_app.task(name='sync_orders_periodic', soft_time_limit=3600, time_limit=3900)
 def sync_orders_periodic():
     """
     Периодическая задача для синхронизации заказов каждые 10 минут.

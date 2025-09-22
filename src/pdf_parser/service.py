@@ -102,6 +102,64 @@ class DocumentProcessingService:
             except Exception as e:
                 logger.warning(f"Не удалось проверить поставку {supply_id}: {e}")
     
+    async def _process_qr_data_after_shipment(self, selected_orders: List[Dict], supplies: Dict[str, str]) -> int:
+        """
+        Обрабатывает QR-данные после успешной отправки в 1C.
+        Извлекает order_id и account, передает в QRDirectProcessor.
+        
+        Args:
+            selected_orders: Заказы после обработки [{'id': int, 'supply_id': str, 'article': str}]
+            supplies: Маппинг {supply_id: account}
+        
+        Returns:
+            int: Количество обработанных заказов
+        """
+        from src.service.qr_direct_processor import QRDirectProcessor
+        
+        if not selected_orders or not supplies:
+            return 0
+        
+        logger.info(f"Запуск обработки QR-данных для {len(selected_orders)} заказов")
+        
+        try:
+            # Группируем заказы по аккаунтам
+            orders_by_account = {}
+            
+            for order in selected_orders:
+                order_id = order['id']  # ID сборочного задания
+                supply_id = order['supply_id']
+                account = supplies.get(supply_id)
+                
+                if not account:
+                    logger.warning(f"Не найден аккаунт для поставки {supply_id}, заказ {order_id}")
+                    continue
+                    
+                if account not in orders_by_account:
+                    orders_by_account[account] = []
+                orders_by_account[account].append(order_id)
+            
+            if not orders_by_account:
+                logger.warning("Нет заказов для обработки QR-данных")
+                return 0
+            
+            # Инициализируем QRDirectProcessor
+            qr_processor = QRDirectProcessor(self.db)
+            total_processed = 0
+            
+            # Обрабатываем каждый аккаунт
+            for account, order_ids in orders_by_account.items():
+                logger.info(f"Обработка QR для аккаунта {account}: {len(order_ids)} заказов")
+                
+                await qr_processor.process_orders_qr(account, order_ids)
+                total_processed += len(order_ids)
+            
+            logger.info(f"Обработка QR-данных завершена: {total_processed} заказов")
+            return total_processed
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки QR-данных после отгрузки: {e}")
+            return 0
+    
     
     async def parse_and_ship(self, content: bytes, filename: str, account: str, user: dict) -> Dict[str, Any]:
         """
@@ -167,12 +225,18 @@ class DocumentProcessingService:
                 operator=user.get('username', 'unknown')
             )
 
+            # 5.5. Обрабатываем QR-данные после успешной отгрузки
+            qr_processed_count = 0
+            if shipment_success:
+                qr_processed_count = await self._process_qr_data_after_shipment(selected_orders, supplies)
+
             # 6. Формируем ответ
             response_data = {
                 "success": shipment_success,
                 "message": "Отгрузка выполнена успешно" if shipment_success else "Ошибка при выполнении отгрузки",
                 "processed_orders": len(selected_orders),
                 "processed_supplies": len(supplies),
+                "qr_processed": qr_processed_count,
                 "supplies_info": supplies,
                 "file_metadata": {
                     "source_file": filename,
@@ -182,7 +246,8 @@ class DocumentProcessingService:
                 }
             }
 
-            logger.info(f"Парсинг с отгрузкой завершен: {len(selected_orders)} заказов, успех={shipment_success}")
+            logger.info(f"Парсинг с отгрузкой завершен: {len(selected_orders)} заказов, "
+                       f"QR обработано: {qr_processed_count}, успех={shipment_success}")
 
             return response_data
 

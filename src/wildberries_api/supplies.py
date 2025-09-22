@@ -1,6 +1,7 @@
 from src.response import parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
+from src.wildberries_api.orders import Orders
 
 
 class Supplies(Account):
@@ -43,13 +44,25 @@ class Supplies(Account):
         logger.info(f"Создана поставка с именем '{name}' для аккаунта {self.account}. Ответ: {response}")
         return parse_json(response)
 
-    async def add_order_to_supply(self, supply_id: str, order_id: int) -> dict:
+    async def add_order_to_supply(self, supply_id: str, order_id: int, check_status: bool = True) -> dict:
         """
         Добавляет сборочное задание (orderId) к поставке (supplyId) через PATCH-запрос к WB API.
         :param supply_id: ID поставки (например, WB-GI-1234567)
         :param order_id: ID сборочного задания (orderId)
-        :return: Ответ от WB API
+        :param check_status: Проверять статус перед добавлением (по умолчанию True)
+        :return: Ответ от WB API или ошибка
         """
+        # Проверяем статус заказа если требуется
+        if check_status:
+            orders_api = Orders(self.account, self.token)
+            
+            can_add = await orders_api.can_add_to_supply(order_id)
+            if not can_add:
+                error_msg = f"Заказ {order_id} нельзя добавить в поставку - проверьте статус"
+                logger.warning(error_msg)
+                return {"error": error_msg, "success": False}
+        
+        # Добавляем заказ в поставку
         self.async_client.retries = 90
         self.async_client.delay = 61
         url = f"{self.url}/{supply_id}/orders/{order_id}"

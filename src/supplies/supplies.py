@@ -2105,7 +2105,7 @@ class SuppliesService:
         """
         await self.update_hanging_supplies_shipped_orders_batch(grouped_orders)
 
-        integration = OneCIntegration()
+        integration = OneCIntegration(self.db)
         integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
         integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
 
@@ -2999,7 +2999,7 @@ class SuppliesService:
             )
             
             # 4. Отправляем в 1C
-            integration = OneCIntegration()
+            integration = OneCIntegration(self.db)
             integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
             integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
             

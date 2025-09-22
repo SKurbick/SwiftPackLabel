@@ -21,7 +21,8 @@ async def get_orders(
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user),
         time_delta: float = Query(1, description="Фильтрация по времени создания заказа (в часах)"),
-        wild: str = Query(None, description="Фильтрация по wild")
+        wild: str = Query(None, description="Фильтрация по wild"),
+        positive_stock: bool = Query(False, description="Фильтрация по остатку: True - положительные, False - нулевые и отрицательные")
 ) -> Dict[str, GroupedOrderInfo]:
     """
     Получить сгруппированные по wild заказы с расширенной информацией:
@@ -45,10 +46,11 @@ async def get_orders(
         filtered_orders = await orders_service.get_filtered_orders(time_delta=time_delta, article=wild)
         order_details = [OrderDetail(**order) for order in filtered_orders]
         grouped_orders = await orders_service.group_orders_by_wild(order_details)
+        filtered_by_stock = orders_service.filter_orders_by_stock(grouped_orders, positive_stock)
 
         elapsed_time = time.time() - start_time
         logger.info(f"Заказы сгруппированы успешно. Всего: {len(filtered_orders)}. Время: {elapsed_time:.2f} сек.")
-        return grouped_orders
+        return filtered_by_stock
     except Exception as e:
         logger.error(f"Ошибка при получении заказов: {str(e)}")
         raise HTTPException(

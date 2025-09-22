@@ -142,20 +142,14 @@ async def deliver_supplies(
     try:
         supply_service = SuppliesService(db)
         await supply_service.process_delivery_supplies(supply_ids)
-        integration = OneCIntegration()
-        integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
-        shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
-                                                              user.get('username', "Не найден"))
+        # integration = OneCIntegration(db)
+        # integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
+        # shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
+        #                                                       user.get('username', "Не найден"))
 
-        integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
+        # integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
 
-        response_content = {
-            "success": integration_success and shipment_result,
-            "message": "Все операции выполнены успешно" if (integration_success and shipment_result)
-            else "Возникли ошибки при обработке",
-            "integration_result": integration_result,
-            "shipment_result": shipment_result
-        }
+        response_content = {"message": "Все операции выполнены успешно"}
 
         return JSONResponse(
             content=response_content,

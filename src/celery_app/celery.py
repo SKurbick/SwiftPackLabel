@@ -52,9 +52,9 @@ def create_celery_app() -> Celery:
         
         # Периодические задачи
         beat_schedule={
-            'sync-orders-every-10-minutes': {
+            'sync-orders-every-hour': {
                 'task': 'sync_orders_periodic',
-                'schedule': 600.0,  # каждые 10 минут (600 секунд)
+                'schedule': 3900.0,  # каждые 65 минут (3900 секунд)
             },
             'cleanup-hanging-supplies-changes-log-weekly': {
                 'task': 'cleanup_old_changes_log',

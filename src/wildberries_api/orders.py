@@ -20,6 +20,40 @@ class Orders(Account):
         response = await self.async_client.post(f"{self.url}/status", headers=self.headers, json={"orders": order_ids})
         return parse_json(response)
 
+    async def can_add_to_supply(self, order_id: int) -> bool:
+        """
+        Проверяет, можно ли добавить сборочное задание в поставку.
+        
+        :param order_id: ID сборочного задания
+        :return: True если можно добавить, False если нельзя
+        """
+        self.async_client.retries = 90
+        self.async_client.delay = 61
+        try:
+            # Получаем статус заказа
+            orders_response = await self.get_orders_statuses([order_id])
+            orders_data = orders_response.get("orders", [])
+            
+            if not orders_data:
+                logger.warning(f"Не найден статус для заказа {order_id}")
+                return False
+            
+            order_status = orders_data[0]
+            supplier_status = order_status.get("supplierStatus")
+            
+            # Проверяем supplier_status - можно добавлять "new" и "confirm"
+            allowed_statuses = ["new", "confirm"]
+            if supplier_status not in allowed_statuses:
+                logger.info(f"Заказ {order_id} нельзя добавить в поставку: статус '{supplier_status}' (нужен {allowed_statuses})")
+                return False
+            
+            logger.info(f"Заказ {order_id} можно добавить в поставку (статус: supplier='{supplier_status}')")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки статуса заказа {order_id}: {e}")
+            return False
+
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
         logger.info(f"Getting stickers for supply {supply}, account {self.account}, orders count: {len(order_ids)}")
         logger.debug(f"Order IDs: {order_ids}")

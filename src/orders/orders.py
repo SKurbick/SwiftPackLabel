@@ -1,23 +1,25 @@
+import json
+import base64
 import asyncio
 import datetime
-import json
-from typing import List, Dict, Any, Set, Tuple
 from io import BytesIO
-import base64
+from datetime import timedelta
+from collections import defaultdict
+from typing import List, Dict, Any, Set, Tuple
+
+from src.db import db as db_manager
 from src.logger import app_logger as logger
 from src.utils import get_wb_tokens, process_local_vendor_code, get_information_to_data
 from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
 from src.models.stock import StockDB
 from src.models.hanging_supplies import HangingSupplies
-from datetime import timedelta
-from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
-    OrderDetail, WildInfo, SupplyInfo
-from src.wildberries_api.supplies import Supplies
-from collections import defaultdict
 from src.response import AsyncHttpClient
 from src.settings import settings
-from src.orders.__init__ import remove_orders_id
+from src.wildberries_api.supplies import Supplies
+from src.service.qr_direct_processor import QRDirectProcessor
+from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
+    OrderDetail, WildInfo, SupplyInfo
 
 
 class OrdersService:
@@ -270,7 +272,7 @@ class OrdersService:
         """
         Сортирует заказы по времени создания (по убыванию)
         """
-        return sorted(orders, key=lambda x: x["created_at"], reverse=True)
+        return sorted(orders, key=lambda x: x["created_at"])
 
     async def get_filtered_orders(self, time_delta: float = None, article: str = None) -> list:
         """
@@ -738,7 +740,11 @@ class OrdersService:
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
                                            order_supply_mapping)
-
+        
+        # Обрабатываем QR-коды для успешно добавленных заказов
+        if orders_added_by_article:
+            await self._process_qr_codes_for_orders(orders_added_by_article, order_supply_mapping)
+        
         # Если поставки висячие, сохраняем информацию в БД и резервируем товары
         if input_data.is_hanging and self.db:
             await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
@@ -750,6 +756,49 @@ class OrdersService:
             logger.info(f"Результат резервации товаров: {reservation_result}")
 
         return self._prepare_result(orders_added_by_article, order_supply_mapping)
+    
+    async def _process_qr_codes_for_orders(self, 
+                                         orders_added_by_article: Dict[str, List[int]], 
+                                         order_supply_mapping: Dict[int, Dict[str, str]]) -> None:
+        """
+        Обрабатывает QR-коды для успешно добавленных в поставки заказов.
+        
+        Args:
+            orders_added_by_article: Словарь с успешно добавленными заказами по артикулу
+            order_supply_mapping: Словарь с маппингом заказа на информацию о поставке
+        """
+        # Группируем заказы по аккаунтам одним проходом
+        orders_by_account = defaultdict(list)
+        for order_id, supply_info in order_supply_mapping.items():
+            # Проверяем, что заказ был успешно добавлен
+            if any(order_id in order_ids for order_ids in orders_added_by_article.values()):
+                orders_by_account[supply_info['account']].append(order_id)
+        
+        if not orders_by_account:
+            logger.info("Нет заказов для обработки QR")
+            return
+        
+        # Создаем задачи для параллельной обработки каждого аккаунта
+        # Импортируем менеджер БД для получения соединений из пула
+        
+        qr_processor = QRDirectProcessor(db_manager)
+        tasks = []
+        accounts = []
+        
+        for account, order_ids in orders_by_account.items():
+            logger.info(f"Подготовка обработки QR для {len(order_ids)} заказов аккаунта {account}")
+            tasks.append(qr_processor.process_orders_qr(account, order_ids))
+            accounts.append(account)
+        
+        # Выполняем все задачи параллельно с обработкой исключений
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Обрабатываем результаты
+        for account, result in zip(accounts, results):
+            if isinstance(result, Exception):
+                logger.error(f"Ошибка обработки QR для аккаунта {account}: {result}")
+            else:
+                logger.info(f"Успешно завершена обработка QR для аккаунта {account}")
 
     async def get_single_order_sticker(self, order_id: int, account: str) -> BytesIO:
         """
@@ -808,3 +857,24 @@ class OrdersService:
             raise
         except Exception as e:
             raise Exception(f"Sticker error: {str(e)}")
+
+    @staticmethod
+    def filter_orders_by_stock(grouped_orders: Dict[str, GroupedOrderInfo], positive_stock: bool = False) -> Dict[str, GroupedOrderInfo]:
+        """
+        Фильтрует заказы по остатку товара.
+        
+        Args:
+            grouped_orders: Сгруппированные заказы
+            positive_stock: True - только положительные остатки, False - нулевые и отрицательные
+            
+        Returns:
+            Dict[str, GroupedOrderInfo]: Отфильтрованные заказы
+        """
+        filtered_orders = {}
+
+        for article, order_info in grouped_orders.items():
+            stock_quantity = order_info.stock_quantity or 0
+
+            if positive_stock and stock_quantity > 0 or not positive_stock and stock_quantity <= 0:
+                filtered_orders[article] = order_info
+        return filtered_orders

@@ -1,4 +1,5 @@
 from typing import List, Optional
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -40,3 +41,17 @@ class WildParserResponse(BaseSchema):
     volume: Optional[float] = Field(None, description="Объем товара в м³")
     rating: Optional[float] = Field(None, description="Рейтинг товара")
     colors: Optional[List[str]] = Field(None, description="Цвет товара")
+
+
+class QRLookupRequest(BaseSchema):
+    """Запрос на поиск по QR-коду."""
+    
+    qr_data: str = Field(..., description="QR код стикера, например '*CN+tGIpw'")
+
+
+
+class QRLookupResponse(BaseSchema):
+    """Ответ с найденными данными по QR-коду."""
+    
+    found: bool = Field(..., description="Найдены ли данные")
+    data: Optional[dict] = Field(None, description="Объединенные данные из qr_scans и orders_wb")
