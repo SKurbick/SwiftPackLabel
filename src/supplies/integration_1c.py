@@ -26,7 +26,7 @@ class OneCIntegration:
 
     def __init__(self, db=None):
         """Инициализация класса интеграции с 1C."""
-        self.async_client = AsyncHttpClient(timeout=240,retries=30,delay=5)
+        self.async_client = AsyncHttpClient(timeout=240,retries=30,delay=61)
         self.db = db
 
     @staticmethod
