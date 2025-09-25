@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import datetime, timedelta
 
@@ -116,3 +116,28 @@ class SupplyAccountWildOut(BaseSchema):
 class OrdersResponse(BaseSchema):
     """Схема для ответа с заказами."""
     orders: Dict[str, GroupedOrderInfo]
+
+
+class OperationResult(BaseSchema):
+    """Схема для результата операции."""
+    operation_id: str
+    status: str  # PROCESSING, SUCCESS, FAILED
+    result: Optional[SupplyAccountWildOut] = None
+    error: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+
+class OperationHistoryItem(BaseSchema):
+    """Элемент истории операций."""
+    operation_id: str
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
+class OperationHistoryResponse(BaseSchema):
+    """Ответ с историей операций."""
+    operations: List[OperationHistoryItem]
+    total_count: int
