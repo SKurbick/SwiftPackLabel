@@ -101,7 +101,7 @@ class HttpClient:
             Содержимое ответа, если запрос успешен, иначе None.
         """
         return self.request("DELETE", url, headers=headers)
-    
+
     def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
               headers: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Выполняет PATCH-запрос по указанному URL.
@@ -118,7 +118,7 @@ class HttpClient:
 
 class AsyncHttpClient:
 
-    def __init__(self, timeout: int = 120, retries: int = 3, delay: int = 61):
+    def __init__(self, timeout: int = 120, retries: int = 8, delay: int = 61):
         """Инициализирует AsyncHttpClient.
         Args:
             timeout: Таймаут для каждого запроса в секундах.
@@ -213,7 +213,7 @@ class AsyncHttpClient:
             Текст ответа, если запрос успешен, иначе None.
         """
         return await self.request("DELETE", url, headers=headers)
-        
+
     async def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
                     headers: Optional[Dict[str, str]] = None) -> Optional[str]:
         """Выполняет асинхронный PATCH-запрос по-указанному URL.
