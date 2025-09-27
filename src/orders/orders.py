@@ -20,6 +20,7 @@ from src.wildberries_api.supplies import Supplies
 from src.service.qr_direct_processor import QRDirectProcessor
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
+from src.orders.order_status_service import OrderStatusService
 
 
 class OrdersService:
@@ -411,7 +412,8 @@ class OrdersService:
     async def _add_orders_to_supplies(filtered_orders: Dict[str, List[OrderDetail]],
                                       supply_by_account: Dict[str, str],
                                       orders_added_by_article: Dict[str, List[int]],
-                                      order_supply_mapping: Dict[int, Dict[str, str]]) -> None:
+                                      order_supply_mapping: Dict[int, Dict[str, str]],
+                                      status_service=None) -> None:
         """
         Добавляет отфильтрованные заказы в созданные поставки и отслеживает информацию о добавленных заказах.
         Args:
@@ -419,6 +421,7 @@ class OrdersService:
             supply_by_account: Словарь с маппингом аккаунта на ID поставки
             orders_added_by_article: Словарь для отслеживания успешно добавленных заказов по артикулу
             order_supply_mapping: Словарь для отслеживания, к какой поставке и аккаунту относится заказ
+            status_service: Сервис для логирования статусов заказов (опционально)
         """
         orders_by_supply = defaultdict(list)
         order_article_map = {}
@@ -462,6 +465,13 @@ class OrdersService:
                     'supply_id': supply_id,
                     'account': account
                 }
+                
+                # Логируем статус добавления заказа в поставку
+                if status_service:
+                    try:
+                        await status_service.log_order_added_to_supply(order_id, supply_id, account)
+                    except Exception as e:
+                        logger.error(f"Ошибка логирования статуса для заказа {order_id}: {str(e)}")
 
     @staticmethod
     def _prepare_result(orders_added_by_article: Dict[str, List[int]] = None,
@@ -738,8 +748,14 @@ class OrdersService:
         filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
         unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
+        
+        # Инициализируем сервис статусов
+        status_service = None
+        if self.db:
+            status_service = OrderStatusService(self.db)
+        
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
-                                           order_supply_mapping)
+                                           order_supply_mapping, status_service)
         
         # Обрабатываем QR-коды для успешно добавленных заказов
         if orders_added_by_article:
