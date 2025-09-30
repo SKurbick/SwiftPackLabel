@@ -316,8 +316,11 @@ class SuppliesService:
                 else:
                     result[order.local_vendor_code].append(self.format_data_to_result(supply, order, name_and_photo))
         # self._change_category_name(result)
-        data = {k: sorted(v, key=lambda x: x.get('createdAt', ''), reverse=True) for k, v in result.items()}
-        return dict(sorted(data.items(), key=lambda x: (min(item['subject_name'] for item in x[1]), x[0]), ))
+        data = {k: sorted(v, key=lambda x: (x.get('createdAt', ''), x.get('id',
+                                                                          0)), reverse=True) for k, v in result.items()}
+        return dict(sorted(data.items(), key=lambda x: (min(item['subject_name']
+                                                            for item in x[1]), min(item.get('id', 0) for item in x[1]),
+                                                        x[0])))
 
     @staticmethod
     async def get_information_to_supplies() -> List[Dict]:
@@ -1588,7 +1591,7 @@ class SuppliesService:
                     wild_orders.extend(orders_by_wild_account[key])
 
             # Сортировка по времени создания (новейшие первые, согласно вашему изменению)
-            wild_orders.sort(key=lambda x: -x['timestamp'])
+            wild_orders.sort(key=lambda x: (-x['timestamp'], x.get('id', 0)))
 
             # Определяем количество заказов для выбора
             if getattr(request_data, 'move_to_final', False):
