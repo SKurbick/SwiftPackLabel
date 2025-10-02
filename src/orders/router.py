@@ -1,4 +1,7 @@
 import time
+import uuid
+from typing import Dict
+from datetime import datetime
 
 from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
@@ -6,7 +9,7 @@ from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
 from src.cache import global_cached
-from typing import Dict
+from src.models.supply_operations import SupplyOperationsDB
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body, Path
 from starlette.responses import StreamingResponse
@@ -67,26 +70,54 @@ async def add_fact_orders_and_supply_name(
 ) -> SupplyAccountWildOut:
     """
     Создает поставки на основе фактического количества заказов для каждого wild.
+    
     Args:
         payload: Данные о заказах и имя поставки. Если payload.is_hanging=True, 
                 поставки будут помечены как "висячие".
         db: Соединение с базой данных
         user: Данные текущего пользователя
+        
     Returns:
         SupplyAccountWildOut: Результаты создания поставок
+        
+    Note:
+        Если соединение разорвется, можно восстановить результат через:
+        GET /api/v1/orders/operations/{operation_id} или
+        GET /api/v1/orders/operations/latest
     """
     start_time = time.time()
-    logger.info(f"Запрос на создание поставок от {user.get('username', 'unknown')}")
+
+    operation_id = f"supply_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    
+    logger.info(f"Обработка операции {operation_id} от {user.get('username', 'unknown')}")
     logger.info(f"Поставки будут помечены как висячие: {payload.is_hanging}")
 
     try:
+        # Сохраняем начало операции
+        await SupplyOperationsDB.save_operation_start(
+            operation_id, 
+            user['id'], 
+            payload.dict(),
+            supply_name=payload.name_supply,
+            supply_date=datetime.now().isoformat()  # Автоматически генерируем текущее время
+        )
+        
+        # Выполняем основную логику
         orders_service = OrdersService(db)
         result = await orders_service.process_orders_with_fact_count(payload, user.get('username', 'unknown'))
+        
+        # Сохраняем успешный результат
+        await SupplyOperationsDB.save_operation_success(operation_id, result.dict())
+        
         elapsed_time = time.time() - start_time
-        logger.info(f"Поставки созданы успешно. Время: {elapsed_time:.2f} сек.")
+        logger.info(f"Операция {operation_id} завершена успешно. Время: {elapsed_time:.2f} сек.")
         return result
+        
     except Exception as e:
-        logger.error(f"Ошибка при создании поставок: {str(e)}")
+        # Сохраняем ошибку в БД
+        await SupplyOperationsDB.save_operation_error(operation_id, str(e))
+        
+        logger.error(f"Ошибка в операции {operation_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Произошла ошибка при создании поставок: {str(e)}",
@@ -143,4 +174,77 @@ async def get_order_sticker(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
+        )
+
+@orders.get("/sessions", status_code=status.HTTP_200_OK)
+async def get_sessions_list(
+        limit: int = Query(50, ge=1, le=200, description="Количество сессий для получения"),
+        offset: int = Query(0, ge=0, description="Смещение для пагинации"),
+        user: dict = Depends(get_current_user)
+):
+    """
+    Получить общий список всех сессий с базовой информацией.
+    
+    Args:
+        limit: Максимальное количество сессий для возврата (1-200)
+        offset: Количество сессий для пропуска
+        user: Данные текущего пользователя
+        
+    Returns:
+        List: Список сессий с базовой информацией (operation_id, supply_name, created_at, status)
+    """
+    try:
+        sessions = await SupplyOperationsDB.get_sessions_list(limit=limit, offset=offset)
+        
+        return {
+            'sessions': sessions,
+            'total_count': len(sessions),
+            'limit': limit,
+            'offset': offset
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка сессий: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Произошла ошибка при получении списка сессий: {str(e)}"
+        )
+
+
+@orders.get("/sessions/{operation_id}", status_code=status.HTTP_200_OK)
+async def get_session_full_info(
+        operation_id: str = Path(..., description="ID сессии для получения полной информации"),
+        user: dict = Depends(get_current_user)
+):
+    """
+    Получить полную информацию о сессии по ID.
+    
+    Args:
+        operation_id: Уникальный идентификатор сессии
+        user: Данные текущего пользователя
+        
+    Returns:
+        Dict: Полная информация о сессии включая request_payload и response_data
+        
+    Raises:
+        404: Сессия не найдена
+    """
+    try:
+        session = await SupplyOperationsDB.get_session_full_info(operation_id)
+        
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Сессия {operation_id} не найдена"
+            )
+        
+        return session
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации о сессии {operation_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Произошла ошибка при получении информации о сессии: {str(e)}"
         )
