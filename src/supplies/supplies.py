@@ -1970,7 +1970,7 @@ class SuppliesService:
             supply_id = order["supply_id"]
             supply_orders[supply_id]["order_ids"].append(order["order_id"])
             supply_orders[supply_id]["account"] = order["account"]
-            order_wild_map[str(order["order_id"])] = order["article"]
+            order_wild_map[str(order["order_id"])] = process_local_vendor_code(order["article"])
 
         return dict(supply_orders), order_wild_map
 
@@ -2506,8 +2506,8 @@ class SuppliesService:
             supply_id = order.get("supply_id")
             account = order.get("account")
             orders_by_supply[(supply_id, account)].append(order.get("order_id"))
-            # Сохраняем маппинг order_id -> wild для order_wild_map
-            order_wild_map[str(order.get("order_id"))] = order.get("article")
+            # Сохраняем маппинг order_id -> wild для order_wild_map с унификацией через process_local_vendor_code
+            order_wild_map[str(order.get("order_id"))] = process_local_vendor_code(order.get("article"))
 
         # Создаем объекты DeliverySupplyInfo
         for (supply_id, account), order_ids in orders_by_supply.items():
