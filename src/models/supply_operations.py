@@ -4,6 +4,7 @@
 import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from collections import defaultdict
 from src.db import db
 from src.logger import get_logger
 
@@ -341,4 +342,143 @@ class SupplyOperationsDB:
                 
         except Exception as e:
             logger.error(f"Ошибка при получении полной информации о сессии {operation_id}: {e}")
+            raise
+
+    @staticmethod
+    async def update_response_data_after_move(
+        operation_id: str,
+        removed_order_ids: List[int]
+    ) -> bool:
+        """
+        Обновляет response_data после перемещения заказов.
+
+        Удаляет конкретные заказы из:
+        - supply_ids[].order_ids (списки ID заказов в каждой поставке)
+        - order_wild_map (маппинг заказов на wild-коды)
+        - wilds[].count (обновляет счетчики)
+
+        Args:
+            operation_id: ID операции для обновления
+            removed_order_ids: Список ID заказов, которые были перемещены
+
+        Returns:
+            bool: True если обновление успешно
+        """
+        try:
+            if not removed_order_ids:
+                logger.info(f"Нет заказов для удаления из операции {operation_id}")
+                return True
+
+            # 1. Получаем response_data
+            query_select = """
+                SELECT response_data
+                FROM supply_operations
+                WHERE operation_id = $1
+            """
+            result = await db.fetchrow(query_select, operation_id)
+
+            if not result:
+                logger.warning(f"Операция {operation_id} не найдена для обновления")
+                return False
+
+            current_response = json.loads(result['response_data'])
+
+            # 2. Проверка структуры response_data
+            if not all(key in current_response for key in ['supply_ids', 'wilds', 'order_wild_map']):
+                logger.warning(f"Операция {operation_id} имеет некорректную структуру response_data")
+                return False
+
+            removed_ids_set = set(removed_order_ids)
+            removed_ids_str_set = {str(oid) for oid in removed_order_ids}
+
+            # 3. Удаляем заказы из supply_ids и считаем удаленные по wild-кодам
+            wild_removed_counts = defaultdict(int)
+            supplies_to_remove = []
+
+            for idx, supply_item in enumerate(current_response['supply_ids']):
+                if 'order_ids' not in supply_item:
+                    continue
+
+                original_count = len(supply_item['order_ids'])
+
+                # Фильтруем order_ids, удаляя перемещенные
+                supply_item['order_ids'] = [
+                    oid for oid in supply_item['order_ids']
+                    if oid not in removed_ids_set
+                ]
+
+                new_count = len(supply_item['order_ids'])
+                removed_count = original_count - new_count
+
+                if removed_count > 0:
+                    logger.info(
+                        f"Supply {supply_item.get('supply_id', 'unknown')}: "
+                        f"удалено {removed_count} заказов ({original_count} -> {new_count})"
+                    )
+
+                # Если поставка стала пустой, помечаем для удаления
+                if new_count == 0:
+                    supplies_to_remove.append(idx)
+                    logger.info(f"Supply {supply_item.get('supply_id', 'unknown')} будет удален (order_ids=0)")
+
+            # Удаляем пустые поставки (в обратном порядке чтобы не сбить индексы)
+            for idx in reversed(supplies_to_remove):
+                del current_response['supply_ids'][idx]
+
+            # 4. Удаляем заказы из order_wild_map и считаем удаления по wild-кодам
+            for order_id_str in removed_ids_str_set:
+                if order_id_str in current_response['order_wild_map']:
+                    wild_code = current_response['order_wild_map'][order_id_str]
+                    wild_removed_counts[wild_code] += 1
+                    del current_response['order_wild_map'][order_id_str]
+
+            # 5. Обновляем счетчики в wilds
+            wilds_to_remove = []
+            for idx, wild_item in enumerate(current_response['wilds']):
+                wild_code = wild_item.get('wild')
+                if wild_code in wild_removed_counts:
+                    removed_count = wild_removed_counts[wild_code]
+                    wild_item['count'] -= removed_count
+
+                    logger.info(
+                        f"Wild {wild_code}: обновлен счетчик "
+                        f"(-{removed_count}, новый count={wild_item['count']})"
+                    )
+
+                    # Если count стал 0 или отрицательным, помечаем для удаления
+                    if wild_item['count'] <= 0:
+                        wilds_to_remove.append(idx)
+                        logger.info(f"Wild {wild_code} будет удален (count={wild_item['count']})")
+
+            # Удаляем wild-коды с count=0 (в обратном порядке)
+            for idx in reversed(wilds_to_remove):
+                del current_response['wilds'][idx]
+
+            # 6. Обновляем response_data в БД
+            query_update = """
+                UPDATE supply_operations
+                SET response_data = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation_id = $1
+                RETURNING id
+            """
+
+            updated = await db.fetchrow(
+                query_update,
+                operation_id,
+                json.dumps(current_response)
+            )
+
+            if updated:
+                logger.info(
+                    f"Response data обновлён для операции {operation_id}: "
+                    f"удалено {len(removed_order_ids)} заказов из {len(wild_removed_counts)} wild-кодов"
+                )
+                return True
+            else:
+                logger.error(f"Не удалось обновить response_data для операции {operation_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении response_data операции {operation_id}: {e}")
             raise

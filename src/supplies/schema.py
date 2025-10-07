@@ -165,6 +165,10 @@ class WildOrdersItem(BaseModel):
 
 class MoveOrdersRequest(BaseSchema):
     """Схема запроса для перемещения заказов между поставками."""
+    operation_id: Optional[str] = Field(
+        None,
+        description="ID исходной операции создания поставок для актуализации request_payload"
+    )
     orders: Dict[str, WildOrdersItem] = Field(
         description="Заказы сгруппированные по wild-кодам с индивидуальным remove_count")
     move_to_final: bool = Field(
@@ -180,6 +184,10 @@ class MoveOrdersResponse(BaseSchema):
     removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
     processed_supplies: int = Field(description="Количество обработанных поставок")
     processed_wilds: int = Field(description="Количество обработанных wild-кодов")
+    session_updated: Optional[bool] = Field(
+        None,
+        description="Был ли обновлен request_payload в исходной сессии"
+    )
 
 
 class SupplyBarcodeListRequest(BaseSchema):

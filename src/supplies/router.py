@@ -11,6 +11,7 @@ from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, Wild
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
+from src.models.supply_operations import SupplyOperationsDB
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
 from src.supplies.integration_1c import OneCIntegration
@@ -398,12 +399,20 @@ async def move_orders_between_supplies(
         supply_service = SuppliesService(db)
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
 
+        session_updated = None
+        if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
+            session_updated = await SupplyOperationsDB.update_response_data_after_move(
+                request_data.operation_id,
+                result["removed_order_ids"]
+            )
+
         return MoveOrdersResponse(
             success=result.get("success", True),
             message=result.get("message", "Операция перемещения заказов выполнена"),
             removed_order_ids=result.get("removed_order_ids", []),
             processed_supplies=result.get("processed_supplies", 0),
-            processed_wilds=result.get("processed_wilds", 0)
+            processed_wilds=result.get("processed_wilds", 0),
+            session_updated=session_updated
         )
 
     except Exception as e:
