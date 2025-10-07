@@ -108,7 +108,9 @@ async def add_fact_orders_and_supply_name(
         
         # Сохраняем успешный результат
         await SupplyOperationsDB.save_operation_success(operation_id, result.dict())
-        
+
+        result.operation_id = operation_id
+
         elapsed_time = time.time() - start_time
         logger.info(f"Операция {operation_id} завершена успешно. Время: {elapsed_time:.2f} сек.")
         return result

@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import datetime, timedelta
 
@@ -111,6 +111,7 @@ class SupplyAccountWildOut(BaseSchema):
     wilds: List[WildInfo]
     supply_ids: List[SupplyInfo]
     order_wild_map: Dict[int, str] = {}
+    operation_id: Optional[str] = None
 
 
 class OrdersResponse(BaseSchema):
