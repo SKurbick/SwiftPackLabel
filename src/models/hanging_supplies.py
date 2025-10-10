@@ -532,7 +532,7 @@ class HangingSupplies:
         query = """
         SELECT DISTINCT supply_id, account
         FROM public.hanging_supplies
-        WHERE created_at >= CURRENT_DATE - INTERVAL '7 day'
+        WHERE created_at >= CURRENT_DATE - INTERVAL '21 day'
         AND created_at < CURRENT_DATE + INTERVAL '1 day'
         AND is_fictitious_delivered = $1
         ORDER BY supply_id;
