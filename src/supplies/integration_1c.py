@@ -16,7 +16,7 @@ from src.wildberries_api.orders import Orders
 from src.response import AsyncHttpClient
 from src.settings import settings
 from src.models.onec_delivery_log import OneCDeliveryLog
-
+from src.orders.order_status_service import OrderStatusService
 
 class OneCIntegration:
     """
@@ -317,12 +317,49 @@ class OneCIntegration:
             
             formatted_data = self.build_final_structure(result_structure)
             response = await self.send_to_1c(formatted_data)
-            
+
+            # Логируем в БД лог отправки
             if self.db:
                 delivery_log = OneCDeliveryLog(self.db)
                 await delivery_log.log_1c_integration(formatted_data, response)
-            
+
+            # Логируем статус SENT_TO_1C для каждого заказа (если отправка успешна)
+            if self.db and isinstance(response, dict) and response.get("code") == 200:
+                await self._log_sent_to_1c_status(supply_ids, order_supply_map)
+
             return response
         except Exception as e:
             logger.error(f"Ошибка при форматировании данных для 1C: {str(e)}")
             raise
+
+    async def _log_sent_to_1c_status(self, supply_ids: List[Any], order_supply_map: Dict[int, str]) -> None:
+        """
+        Логирует статус SENT_TO_1C для всех заказов после успешной отправки в 1C.
+
+        Args:
+            supply_ids: Список объектов с информацией о поставках (содержит account)
+            order_supply_map: Словарь соответствия order_id -> supply_id
+        """
+        try:
+            supply_account_map = {
+                supply_info.supply_id: supply_info.account
+                for supply_info in supply_ids
+            }
+            # Подготавливаем данные для логирования
+            prepared_data = []
+            for order_id, supply_id in order_supply_map.items():
+                if account := supply_account_map.get(supply_id, ''):
+                    prepared_data.append({
+                        'order_id': order_id,
+                        'supply_id': supply_id,
+                        'account': account
+                    })
+
+            if prepared_data:
+                status_service = OrderStatusService(self.db)
+                logged_count = await status_service.process_and_log_sent_to_1c(prepared_data)
+                logger.info(f"Залогировано {logged_count} заказов со статусом SENT_TO_1C после успешной отправки в 1C")
+
+        except Exception as e:
+            logger.error(f"Ошибка при логировании статуса SENT_TO_1C: {str(e)}")
+            # Не пробрасываем ошибку, чтобы не сломать основной flow

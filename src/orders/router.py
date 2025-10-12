@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
+from src.orders.order_status_service import OrderStatusService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
@@ -46,7 +47,16 @@ async def get_orders(
     logger.info(f"Запрос на получение сгруппированных заказов от {user.get('username', 'unknown')}")
     try:
         orders_service = OrdersService(db)
+
+        # 1. Получаем отфильтрованные заказы
         filtered_orders = await orders_service.get_filtered_orders(time_delta=time_delta, article=wild)
+
+        # 2. Логируем новые заказы в order_status_log
+        status_service = OrderStatusService(db)
+        logged_count = await status_service.process_and_log_new_orders(filtered_orders)
+        logger.info(f"Залогировано {logged_count} новых заказов в order_status_log")
+
+        # 3. Продолжаем обычную обработку
         order_details = [OrderDetail(**order) for order in filtered_orders]
         grouped_orders = await orders_service.group_orders_by_wild(order_details)
         filtered_by_stock = orders_service.filter_orders_by_stock(grouped_orders, positive_stock)
@@ -105,7 +115,13 @@ async def add_fact_orders_and_supply_name(
         # Выполняем основную логику
         orders_service = OrdersService(db)
         result = await orders_service.process_orders_with_fact_count(payload, user.get('username', 'unknown'))
-        
+
+        # Логируем статусы заказов в поставках
+        status_service = OrderStatusService(db)
+        logged_count = await status_service.process_and_log_orders_in_supplies(result,payload.is_hanging)
+        logger.info(f"Залогировано {logged_count} заказов со статусом "
+            f"{'IN_HANGING_SUPPLY' if payload.is_hanging else 'IN_TECHNICAL_SUPPLY'}")
+
         # Сохраняем успешный результат
         await SupplyOperationsDB.save_operation_success(operation_id, result.dict())
 

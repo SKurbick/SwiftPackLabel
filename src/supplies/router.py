@@ -14,6 +14,7 @@ from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_
 from src.models.supply_operations import SupplyOperationsDB
 from src.service.zip_service import create_zip_archive
 from src.archives.archives import Archives
+from src.orders.order_status_service import OrderStatusService
 from src.supplies.integration_1c import OneCIntegration
 from src.cache import global_cached
 from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
@@ -143,13 +144,15 @@ async def deliver_supplies(
     try:
         supply_service = SuppliesService(db)
         await supply_service.process_delivery_supplies(supply_ids)
-        # integration = OneCIntegration(db)
-        # integration_result = await integration.format_delivery_data(supply_ids, order_wild_map)
-        # shipment_result = await supply_service.save_shipments(supply_ids, order_wild_map,
-        #                                                       user.get('username', "Не найден"))
 
-        # integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
-
+        # Логируем статус DELIVERED для всех заказов переведенных поставок
+        delivery_supplies = [{"supply_id": s.supply_id,"account": s.account,"order_ids": s.order_ids}
+            for s in supply_ids]
+        status_service = OrderStatusService(db)
+        logged_count = await status_service.process_and_log_delivered(delivery_supplies)
+        logger.info(
+            f"Переведено {len(supply_ids)} поставок в доставку. "
+            f"Залогировано {logged_count} заказов со статусом DELIVERED")
         response_content = {"message": "Все операции выполнены успешно"}
 
         return JSONResponse(
@@ -398,6 +401,17 @@ async def move_orders_between_supplies(
     try:
         supply_service = SuppliesService(db)
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
+
+        if moved_orders_details := result.pop('_moved_orders_details', None):
+            status_service = OrderStatusService(db)
+            logged_count = await status_service.process_and_log_moved_orders(
+                moved_orders_details,
+                request_data.move_to_final
+            )
+            logger.info(
+                f"Залогировано {logged_count} заказов со статусом "
+                f"{'IN_FINAL_SUPPLY' if request_data.move_to_final else 'IN_HANGING_SUPPLY'}"
+            )
 
         session_updated = None
         if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):

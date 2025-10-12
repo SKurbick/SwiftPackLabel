@@ -24,6 +24,9 @@ from src.models.final_supplies import FinalSupplies
 from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
+from src.orders.order_status_service import OrderStatusService
+from src.wildberries_api.supplies import Supplies
+
 from src.supplies.schema import (
     SupplyIdResponseSchema, SupplyIdBodySchema, OrderSchema, StickerSchema, SupplyId,
     SupplyDeleteBody, SupplyDeleteResponse, SupplyDeleteItem, WildFilterRequest, DeliverySupplyInfo,
@@ -981,13 +984,13 @@ class SuppliesService:
                                            delivery_response: Any) -> Dict[str, Any]:
         """
         Обрабатывает успешную доставку поставки.
-        
+
         Args:
             supply_id: ID поставки
             account: Аккаунт Wildberries
             operator: Оператор
             delivery_response: Ответ от WB API
-            
+
         Returns:
             Dict[str, Any]: Результат обработки
         """
@@ -995,6 +998,33 @@ class SuppliesService:
 
         if marked_success:
             logger.info(f"Фиктивная поставка {supply_id} ({account}) успешно переведена в доставку и помечена")
+
+            # Логируем статус FICTITIOUS_DELIVERED для всех заказов поставки
+            if self.db:
+                try:
+                    # Получаем все заказы поставки из WB API
+                    wb_tokens = get_wb_tokens()
+                    supplies_api = Supplies(account, wb_tokens[account])
+                    supply_orders_response = await supplies_api.get_supply_orders(supply_id)
+
+                    # Извлекаем список заказов из вложенной структуры
+                    # Структура: {account: {supply_id: {"orders": [...]}}}
+                    orders_list = supply_orders_response.get(account, {}).get(supply_id, {}).get('orders', [])
+
+                    # Подготавливаем данные для логирования
+                    if orders_list:
+                        fictitious_delivered_data = [{'order_id': order['id'],'supply_id': supply_id,'account': account}
+                                                     for order in orders_list]
+
+                        status_service = OrderStatusService(self.db)
+                        logged_count = await status_service.process_and_log_fictitious_delivered(
+                            fictitious_delivered_data
+                        )
+                        logger.info(f"Залогировано {logged_count} заказов со статусом FICTITIOUS_DELIVERED")
+                except Exception as e:
+                    logger.error(f"Ошибка при логировании статуса FICTITIOUS_DELIVERED: {str(e)}")
+                    # Не пробрасываем ошибку, чтобы не сломать основной flow
+
             return self._create_fictitious_delivery_response(
                 success=True,
                 message=f"Фиктивная поставка {supply_id} успешно переведена в доставку",
@@ -1947,18 +1977,31 @@ class SuppliesService:
             "processed_wilds": 0
         }
 
-    def _create_success_result(self, moved_order_ids: List[int], 
-                             new_supplies: Dict[Tuple[str, str], str], 
+    def _create_success_result(self, moved_order_ids: List[int],
+                             new_supplies: Dict[Tuple[str, str], str],
                              selected_orders_for_move: List[dict]) -> Dict[str, Any]:
         """Создает успешный результат операции."""
         logger.info(f"Перемещение завершено. Успешно перемещено {len(moved_order_ids)} заказов")
-        
+
+        # Формируем детали перемещенных заказов для внутреннего использования (логирование статусов)
+        moved_orders_details = []
+        for order in selected_orders_for_move:
+            if order['id'] in moved_order_ids:  # Только успешно перемещенные
+                key = (order['wild_code'], order['account'])
+                moved_orders_details.append({
+                    'order_id': order['id'],
+                    'supply_id': new_supplies.get(key),
+                    'account': order['account'],
+                    'wild': order['wild_code']
+                })
+
         return {
             "success": True,
             "message": f"Операция перемещения выполнена. Перемещено {len(moved_order_ids)} заказов",
             "removed_order_ids": moved_order_ids,
             "processed_supplies": len(new_supplies),
             "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),
+            "_moved_orders_details": moved_orders_details  # Внутреннее поле для логирования
         }
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
@@ -2239,7 +2282,24 @@ class SuppliesService:
                 f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
             await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
 
-            # 6.1. Сохраняем информацию о новых "фактических" поставках как висячих поставок
+            # 6.1. Логируем статус PARTIALLY_SHIPPED для частично отгруженных заказов
+            if self.db:
+                from src.orders.order_status_service import OrderStatusService
+
+                # Подготавливаем данные для логирования
+                partially_shipped_data = []
+                for order in updated_selected_orders:
+                    partially_shipped_data.append({
+                        'order_id': order['order_id'],
+                        'supply_id': order.get('supply_id'),  # Новый supply_id
+                        'account': order['account']
+                    })
+
+                status_service = OrderStatusService(self.db)
+                logged_count = await status_service.process_and_log_partially_shipped(partially_shipped_data)
+                logger.info(f"Залогировано {logged_count} заказов со статусом PARTIALLY_SHIPPED")
+
+            # 6.2. Сохраняем информацию о новых "фактических" поставках как висячих поставок
             await self._save_new_supplies_as_hanging(new_supplies_map, target_article, user)
 
             # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
