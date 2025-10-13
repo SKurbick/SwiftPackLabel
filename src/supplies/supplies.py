@@ -1831,9 +1831,9 @@ class SuppliesService:
         moved_order_ids = await self._execute_orders_move(selected_orders_for_move, new_supplies)
 
         # 4.5. Ожидание синхронизации данных в WB API после перемещения
-        logger.info("Ожидание 7 секунд для синхронизации данных в WB API после перемещения заказов...")
-        await asyncio.sleep(140)
-        logger.info("Продолжаем обработку после синхронизации")
+        # logger.info("Ожидание 7 секунд для синхронизации данных в WB API после перемещения заказов...")
+        # await asyncio.sleep(140)
+        # logger.info("Продолжаем обработку после синхронизации")
 
         # 5. Отправка данных во внешние системы (только для финальных поставок)
         await self._process_external_systems_integration(request_data, selected_orders_for_move, new_supplies, user)
