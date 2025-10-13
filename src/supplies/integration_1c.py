@@ -99,8 +99,19 @@ class OneCIntegration:
             response = await supplies_api.get_supply_orders(supply_id)
             all_orders = response.get(account, {}).get(supply_id, {}).get("orders", [])
 
+            # Собираем ID заказов из поставки
+            supply_order_ids = [order.get('id') for order in all_orders if order.get('id')]
+
             order_ids_set = set(order_ids)
             filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
+
+            # Детальное логирование для отладки
+            if not filtered_orders and all_orders:
+                logger.warning(
+                    f"⚠️ Поставка {supply_id}: НЕ НАЙДЕНО СОВПАДЕНИЙ! "
+                    f"Ищем: {list(order_ids_set)[:5]}... (всего {len(order_ids_set)}), "
+                    f"в поставке: {supply_order_ids[:5]}... (всего {len(supply_order_ids)})"
+                )
 
             logger.info(
                 f"Поставка {supply_id}: получено {len(filtered_orders)} заказов из {len(all_orders)} в поставке")
