@@ -15,6 +15,7 @@ from src.utils import get_wb_tokens
 from src.wildberries_api.orders import Orders
 from src.response import AsyncHttpClient
 from src.settings import settings
+from src.wildberries_api.supplies import Supplies
 from src.models.onec_delivery_log import OneCDeliveryLog
 from src.orders.order_status_service import OrderStatusService
 
@@ -77,29 +78,32 @@ class OneCIntegration:
         return result_structure, accounts_orders, order_supply_map
 
     @staticmethod
-    async def get_filtered_orders(account: str, order_ids: List[int]) -> List[Dict[str, Any]]:
+    async def get_filtered_orders(account: str, supply_id: str, order_ids: List[int]) -> List[Dict[str, Any]]:
         """
-        Получает и фильтрует заказы по указанным ID.
+        Получает и фильтрует заказы по указанным ID из конкретной поставки.
         Args:
             account: Имя аккаунта
+            supply_id: ID поставки
             order_ids: Список ID заказов для фильтрации
         Returns:
             List[Dict[str, Any]]: Отфильтрованный список заказов
         """
+
         wb_tokens = get_wb_tokens()
         if account not in wb_tokens:
             logger.error(f"Не найден токен для аккаунта {account}")
             return []
 
         try:
-            orders_api = Orders(account, wb_tokens[account])
-            all_orders = await orders_api.get_orders()
+            supplies_api = Supplies(account, wb_tokens[account])
+            response = await supplies_api.get_supply_orders(supply_id)
+            all_orders = response.get(account, {}).get(supply_id, {}).get("orders", [])
 
             order_ids_set = set(order_ids)
             filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
 
             logger.info(
-                f"Получено {len(filtered_orders)} заказов из {len(order_ids)} запрошенных для аккаунта {account}")
+                f"Поставка {supply_id}: получено {len(filtered_orders)} заказов из {len(all_orders)} в поставке")
 
             return filtered_orders
         except Exception as e:
@@ -164,8 +168,29 @@ class OneCIntegration:
             order_supply_map: Словарь соответствия ID заказов и ID поставок
             result_structure: Структура для накопления результатов
         """
-        filtered_orders = await self.get_filtered_orders(account, order_ids)
-        for order in filtered_orders:
+        # Получаем все уникальные supply_id для данного аккаунта
+        account_supply_ids = {order_supply_map.get(oid) for oid in order_ids if order_supply_map.get(oid)}
+
+        if not account_supply_ids:
+            logger.error(f"Не найдено ни одной поставки для аккаунта {account}")
+            return
+
+        logger.info(f"Аккаунт {account}: получение заказов из {len(account_supply_ids)} поставок")
+
+        # Получаем все заказы из всех поставок аккаунта параллельно
+        tasks = [
+            self.get_filtered_orders(account, supply_id, order_ids)
+            for supply_id in account_supply_ids
+        ]
+        supply_orders_list = await asyncio.gather(*tasks)
+
+        # Объединяем все результаты
+        all_orders = []
+        for supply_orders in supply_orders_list:
+            all_orders.extend(supply_orders)
+
+        # Дальше стандартная логика
+        for order in all_orders:
             order_id = order.get("id")
             if not order_id:
                 continue

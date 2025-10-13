@@ -1624,14 +1624,12 @@ class SuppliesService:
             wild_orders.sort(key=lambda x: (-x['timestamp'], x.get('id', 0)))
 
             # Определяем количество заказов для выбора
-            if getattr(request_data, 'move_to_final', False):
-                # Для финальных поставок берем ВСЕ заказы для данного wild
-                selected_count = len(wild_orders)
-                logger.info(f"Режим финальных поставок: выбираем все {selected_count} заказов для wild {wild_code}")
-            else:
-                # Для висячих поставок используем указанное количество
-                selected_count = min(wild_item.remove_count, len(wild_orders))
-                logger.info(f"Режим висячих поставок: выбираем {selected_count} из {len(wild_orders)} заказов для wild {wild_code}")
+            selected_count = min(wild_item.remove_count, len(wild_orders))
+            supply_type = 'финальные' if getattr(request_data, 'move_to_final', False) else 'висячие'
+            logger.info(
+                f"Перемещение в {supply_type} поставки: "
+                f"выбираем {selected_count} из {len(wild_orders)} заказов для wild {wild_code}"
+            )
 
             selected_orders = wild_orders[:selected_count]
 
