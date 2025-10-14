@@ -138,17 +138,20 @@ class OrderStatusLog:
             return []
 
         try:
-            # Формируем список кортежей (supply_id, account) для фильтрации
-            supply_filters = [(s['supply_id'], s['account']) for s in supplies_data]
+            # Разделяем supply_id и account в отдельные массивы для PostgreSQL
+            supply_ids = [s['supply_id'] for s in supplies_data]
+            accounts = [s['account'] for s in supplies_data]
 
             query = """
             SELECT DISTINCT order_id, supply_id
             FROM public.order_status_log
-            WHERE (supply_id, account) = ANY($1::record[])
+            WHERE (supply_id, account) IN (
+                SELECT unnest($1::text[]), unnest($2::text[])
+            )
             ORDER BY order_id
             """
 
-            rows = await self.db.fetch(query, supply_filters)
+            rows = await self.db.fetch(query, supply_ids, accounts)
 
             logger.info(
                 f"Найдено {len(rows)} уникальных order_id для {len(supplies_data)} поставок"
