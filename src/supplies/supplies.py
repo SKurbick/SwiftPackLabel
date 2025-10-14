@@ -728,9 +728,9 @@ class SuppliesService:
         if enriched_count > 0:
             logger.info(f"Обогащено {enriched_count} заказов данными createdAt")
 
-    async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema) -> Dict[str, List[Dict[str, Any]]]:
+    async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         logger.info('Инициализация получение документов (Стикеры и Лист подбора)')
-        await self.check_current_orders(supply_ids)
+        await self.check_current_orders(supply_ids, allow_partial)
         stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids))
         self.union_results_stickers(supply_ids, stickers)
         return await self.group_orders_to_wild(supply_ids)

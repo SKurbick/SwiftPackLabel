@@ -58,6 +58,7 @@ async def get_supplies(
                         422: {"description": "Ошибка валидации входных данных"}})
 async def upload_stickers_to_orders(
         supply_ids: SupplyIdBodySchema = Body(),
+        allow_partial: bool = Query(False, description="Разрешить частичную печать (без полной сверки заказов)"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> StreamingResponse:
@@ -66,6 +67,7 @@ async def upload_stickers_to_orders(
     для указанных поставок.
     Args:
         supply_ids: Информация о поставках для которых нужно создать стикеры
+        allow_partial: Разрешить частичную печать (по умолчанию False)
         db: Соединение с базой данных
     Returns:
         StreamingResponse: ZIP-архив, содержащий два PDF файла:
@@ -73,7 +75,7 @@ async def upload_stickers_to_orders(
             - selection_sheet.pdf: PDF с листом подбора
     """
     supplies_service = SuppliesService(db)
-    result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids)
+    result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids, allow_partial)
     selection_sheet_content = await create_table_pdf(result_stickers)
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
     zip_buffer = create_zip_archive({
