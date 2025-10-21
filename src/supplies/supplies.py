@@ -1620,8 +1620,13 @@ class SuppliesService:
                 if key in orders_by_wild_account:
                     wild_orders.extend(orders_by_wild_account[key])
 
-            # Сортировка по времени создания (новейшие первые, согласно вашему изменению)
-            wild_orders.sort(key=lambda x: (-x['timestamp'], x.get('id', 0)))
+            # Сортировка по времени создания:
+            # - Для финальных поставок: старые первые (FIFO)
+            # - Для висячих поставок: новые первые
+            if getattr(request_data, 'move_to_final', False):
+                wild_orders.sort(key=lambda x: (x['timestamp'], x.get('id', 0)))  # старые первые
+            else:
+                wild_orders.sort(key=lambda x: (-x['timestamp'], x.get('id', 0)))  # новые первые
 
             # Определяем количество заказов для выбора
             selected_count = min(wild_item.remove_count, len(wild_orders))
