@@ -21,6 +21,7 @@ from src.models.card_data import CardData
 from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
 from src.models.final_supplies import FinalSupplies
+from src.models.delivered_supplies import DeliveredSupplies
 from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
@@ -566,7 +567,7 @@ class SuppliesService:
                     supply["is_fictitious_delivered"] = hanging_supply_data.get('is_fictitious_delivered', False)
 
                     has_target_wild = any(
-                        order.local_vendor_code in target_wilds
+                        (order.local_vendor_code if hasattr(order, 'local_vendor_code') else order.get('local_vendor_code')) in target_wilds
                         for order in supply.get('orders', [])
                     )
                     if not has_target_wild:
@@ -579,6 +580,11 @@ class SuppliesService:
     async def get_list_supplies(self, hanging_only: bool = False, is_delivery: bool = False) -> SupplyIdResponseSchema:
         """
         Получить список поставок с фильтрацией по висячим и доставке.
+
+        Логика источников данных:
+        - is_delivery=True  → Redis кэш → БД хранилище → WB API
+        - is_delivery=False → Redis кэш → WB API (без изменений)
+
         Args:
             hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
             is_delivery: Если True - получать поставки из отгрузок за неделю, если False - из WB API
@@ -587,36 +593,117 @@ class SuppliesService:
         """
         logger.info(f"Получение данных о поставках, hanging_only={hanging_only}, is_delivery={is_delivery}")
 
-        # Выбор источника данных в зависимости от is_delivery
         if is_delivery:
-            logger.info(
-                "Получение поставок из отгрузок за неделю и фиктивно доставленных висячих поставок, исключая активные WB поставки")
-            wb_active_supplies_ids: List[Any] = await self.get_information_to_supplies()
-            basic_supplies_ids: List[Any] = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
-            fictitious_supplies_ids: List[Any] = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(
-                is_fictitious_delivered=True)
-            all_db_supplies_ids = self._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
-            filtered_basic_supplies_ids = self._exclude_wb_active_from_db_supplies(all_db_supplies_ids,
-                                                                                   wb_active_supplies_ids)
-            supplies_ids: List[Any] = await self.get_information_to_supply_details(filtered_basic_supplies_ids)
-        else:
-            logger.info("Получение поставок из WB API")
-            supplies_ids: List[Any] = await self.get_information_to_supplies()
-        supplies: Dict[str, Dict] = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
-        result: List = []
-        supplies_ids: Dict[str, List] = {key: value for d in supplies_ids for key, value in d.items()}
-        for account, value in supplies.items():
-            for supply_id, orders in value.items():
-                if not is_delivery:
-                    supply: Dict[str, Dict[str, Any]] = {
-                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
-                        for data in supplies_ids[account] if not data['done']}
-                else:
-                    supply: Dict[str, Dict[str, Any]] = {
-                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
-                        for data in supplies_ids[account]}
-                result.append(self.create_supply_result(supply, supply_id, account, orders))
+            logger.info("Режим доставленных поставок: Redis → БД хранилище → WB API")
 
+            # 1. Получаем номера доставленных поставок из источников
+            wb_active_supplies_ids = await self.get_information_to_supplies()
+            basic_supplies_ids = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
+            fictitious_supplies_ids = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(
+                is_fictitious_delivered=True
+            )
+
+            all_db_supplies_ids = self._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
+            filtered_supplies_ids = self._exclude_wb_active_from_db_supplies(
+                all_db_supplies_ids,
+                wb_active_supplies_ids
+            )
+
+            # 2. Формируем список запрашиваемых поставок
+            requested_supplies = []
+            for account_data in filtered_supplies_ids:
+                for account, supplies_list in account_data.items():
+                    for supply in supplies_list:
+                        requested_supplies.append((supply['id'], account))
+
+            logger.info(f"Запрошено {len(requested_supplies)} доставленных поставок")
+
+            # 3. Проверяем БД хранилище
+            delivered_storage = DeliveredSupplies(self.db)
+            stored_supplies = await delivered_storage.get_supplies_from_storage(requested_supplies)
+
+            # 4. Определяем недостающие поставки
+            missing_supplies = await delivered_storage.get_missing_supplies(requested_supplies)
+
+            # 5. Получаем недостающие из WB API (существующая логика)
+            if missing_supplies:
+                logger.info(f"Получение {len(missing_supplies)} недостающих поставок из WB API")
+
+                # Формируем структуру для WB API
+                missing_by_account = {}
+                for supply_id, account in missing_supplies:
+                    if account not in missing_by_account:
+                        missing_by_account[account] = []
+                    missing_by_account[account].append({'id': supply_id})
+
+                missing_formatted = [{acc: sups} for acc, sups in missing_by_account.items()]
+
+                # Получаем данные из WB API (стандартная логика)
+                enriched_supplies = await self.get_information_to_supply_details(missing_formatted)
+                missing_orders = await self.get_information_orders_to_supplies(enriched_supplies)
+
+                # Формируем result для недостающих (используем существующую логику)
+                missing_result = []
+                enriched_dict = {key: val for d in enriched_supplies for key, val in d.items()}
+
+                for order_data in missing_orders:
+                    for account, supply_orders in order_data.items():
+                        for supply_id, orders in supply_orders.items():
+                            supply_meta = {
+                                data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                                for data in enriched_dict.get(account, [])
+                            }
+
+                            if supply_id in supply_meta:
+                                supply_obj = self.create_supply_result(
+                                    supply_meta,
+                                    supply_id,
+                                    account,
+                                    orders
+                                )
+                                missing_result.append(supply_obj)
+
+                # 6. Сохраняем недостающие в БД хранилище
+                if missing_result:
+                    saved_count = await delivered_storage.save_supplies_to_storage(missing_result)
+                    logger.info(f"Сохранено {saved_count} новых поставок в БД хранилище")
+
+                    # Добавляем к stored_supplies
+                    for supply_obj in missing_result:
+                        key = (supply_obj['supply_id'], supply_obj['account'])
+                        stored_supplies[key] = supply_obj
+
+            # 7. Формируем итоговый result из БД хранилища
+            result = list(stored_supplies.values())
+
+            # Метрики
+            db_hit_count = len(stored_supplies) - len(missing_supplies)
+            db_hit_rate = (db_hit_count / len(requested_supplies) * 100) if requested_supplies else 0
+
+            logger.info(
+                f"Доставленные поставки: total={len(result)}, "
+                f"from_db={db_hit_count}, "
+                f"from_api={len(missing_supplies)}, "
+                f"db_hit_rate={db_hit_rate:.1f}%"
+            )
+
+        else:
+            # ========== АКТИВНЫЕ ПОСТАВКИ (БЕЗ ИЗМЕНЕНИЙ) ==========
+            logger.info("Получение поставок из WB API")
+            supplies_ids = await self.get_information_to_supplies()
+            supplies = self.group_result(await self.get_information_orders_to_supplies(supplies_ids))
+            result = []
+            supplies_ids_dict = {key: value for d in supplies_ids for key, value in d.items()}
+
+            for account, value in supplies.items():
+                for supply_id, orders in value.items():
+                    supply = {
+                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                        for data in supplies_ids_dict[account] if not data['done']
+                    }
+                    result.append(self.create_supply_result(supply, supply_id, account, orders))
+
+        # Финальная фильтрация
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
         return SupplyIdResponseSchema(supplies=filtered_result)
 
@@ -1835,11 +1922,6 @@ class SuppliesService:
         # 4. Выполнение перемещения заказов
         moved_order_ids = await self._execute_orders_move(selected_orders_for_move, new_supplies)
 
-        # 4.5. Ожидание синхронизации данных в WB API после перемещения
-        # logger.info("Ожидание 7 секунд для синхронизации данных в WB API после перемещения заказов...")
-        # await asyncio.sleep(140)
-        # logger.info("Продолжаем обработку после синхронизации")
-
         # 5. Отправка данных во внешние системы (только для финальных поставок)
         await self._process_external_systems_integration(request_data, selected_orders_for_move, new_supplies, user)
 
@@ -2464,7 +2546,7 @@ class SuppliesService:
                 continue
 
             quantity_shipped = len(orders)
-
+            #TODO добавить product_id для отправки данных(wild)
             shipped_goods_item = {
                 "supply_id": supply_id,
                 "quantity_shipped": quantity_shipped
