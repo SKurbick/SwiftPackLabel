@@ -15,6 +15,7 @@ from src.supplies.supplies import SuppliesService
 from src.orders.orders import OrdersService
 from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
+from src.models.delivered_supplies import DeliveredSupplies
 
 from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
 
@@ -479,40 +480,115 @@ class GlobalCache:
         УЛЬТРА-ОПТИМИЗИРОВАННОЕ получение ВСЕХ данных единым блоком:
         1. WB API вызывается ОДИН РАЗ для всех случаев
         2. БД запросы делаются ОДИН РАЗ
-        3. Все 4 комбинации генерируются из одних данных
+        3. Для delivery используется трехуровневая система: Redis → PostgreSQL (delivered_supplies) → WB API
+        4. Все 4 комбинации генерируются из одних данных
         """
         logger.info("Получение ВСЕХ данных поставок ультра-оптимизированным способом...")
-        
-        # 1. ЕДИНСТВЕННЫЙ вызов WB API для получения ВСЕХ поставок
-        logger.info("1/4: Получение ВСЕХ WB поставок...")
+
+        # 1. ЕДИНСТВЕННЫЙ вызов WB API для получения ВСЕХ WB поставок
+        logger.info("1/5: Получение ВСЕХ WB поставок...")
         wb_supplies_ids = await supplies_service.get_information_to_supplies()  # ОДИН РАЗ!
-        logger.info("2/4: Получение ВСЕХ WB заказов...")
+        logger.info("2/5: Получение ВСЕХ WB заказов...")
         wb_orders_data = await supplies_service.get_information_orders_to_supplies(wb_supplies_ids)  # ОДИН РАЗ!
         wb_supplies_grouped = supplies_service.group_result(wb_orders_data)
-        
-        # 2. ЕДИНСТВЕННЫЕ запросы к БД для delivery данных  
-        logger.info("3/4: Получение delivery данных из БД...")
+
+        # 2. ЕДИНСТВЕННЫЕ запросы к БД для delivery данных
+        logger.info("3/5: Получение delivery данных из БД...")
         basic_supplies_ids = await ShipmentOfGoods(supplies_service.db).get_weekly_supply_ids()  # ОДИН РАЗ!
         fictitious_supplies_ids = await HangingSupplies(supplies_service.db).get_weekly_fictitious_supplies_ids(
             is_fictitious_delivered=True)  # ОДИН РАЗ!
-        
+
         # 3. Подготовка delivery данных (используем уже полученные wb_supplies_ids!)
-        logger.info("4/4: Обработка delivery поставок...")
+        logger.info("4/5: Обработка delivery поставок...")
         all_db_supplies_ids = supplies_service._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
         filtered_delivery_supplies_ids = supplies_service._exclude_wb_active_from_db_supplies(
             all_db_supplies_ids, wb_supplies_ids  # ПЕРЕИСПОЛЬЗУЕМ!
         )
-        delivery_supplies_details = await supplies_service.get_information_to_supply_details(filtered_delivery_supplies_ids)
-        delivery_orders_data = await supplies_service.get_information_orders_to_supplies(delivery_supplies_details)  # ОДИН РАЗ!
-        delivery_supplies_grouped = supplies_service.group_result(delivery_orders_data)
-        
-        logger.info("ВСЕ данные поставок получены ультра-оптимизированным способом!")
-        
+
+        # 4. НОВОЕ: Используем трехуровневую систему кэширования для delivery поставок
+        logger.info("5/5: Применение трехуровневой системы для delivery (Redis → PostgreSQL → WB API)...")
+
+        # Формируем список запрашиваемых поставок для проверки в БД
+        requested_supplies = []
+        for account_data in filtered_delivery_supplies_ids:
+            for account, supplies_list in account_data.items():
+                for supply in supplies_list:
+                    requested_supplies.append((supply['id'], account))
+
+        logger.info(f"Запрошено {len(requested_supplies)} delivery поставок для кэширования")
+
+        # Проверяем БД хранилище delivered_supplies (Tier 2)
+        delivered_storage = DeliveredSupplies(supplies_service.db)
+        stored_supplies = await delivered_storage.get_supplies_from_storage(requested_supplies)
+        missing_supplies = await delivered_storage.get_missing_supplies(requested_supplies)
+
+        # Метрики для логирования
+        db_hit_count = len(stored_supplies)
+        db_miss_count = len(missing_supplies)
+        db_hit_rate = (db_hit_count / len(requested_supplies) * 100) if requested_supplies else 0
+
+        logger.info(
+            f"Статистика БД хранилища при прогреве: "
+            f"total={len(requested_supplies)}, from_db={db_hit_count}, "
+            f"from_api={db_miss_count}, db_hit_rate={db_hit_rate:.1f}%"
+        )
+
+        # Получаем недостающие из WB API (Tier 3) только если нужно
+        delivery_supplies_for_grouping = {}
+        if missing_supplies:
+            logger.info(f"Получение {len(missing_supplies)} недостающих delivery поставок из WB API")
+
+            # Формируем структуру для WB API
+            missing_by_account = {}
+            for supply_id, account in missing_supplies:
+                if account not in missing_by_account:
+                    missing_by_account[account] = []
+                missing_by_account[account].append({'id': supply_id})
+
+            missing_formatted = [{acc: sups} for acc, sups in missing_by_account.items()]
+
+            # Получаем данные из WB API
+            enriched_supplies = await supplies_service.get_information_to_supply_details(missing_formatted)
+            missing_orders = await supplies_service.get_information_orders_to_supplies(enriched_supplies)
+
+            # Формируем result для недостающих
+            missing_result = []
+            enriched_dict = {key: val for d in enriched_supplies for key, val in d.items()}
+
+            for order_data in missing_orders:
+                for account, supply_orders in order_data.items():
+                    for supply_id, orders in supply_orders.items():
+                        supply_meta = {
+                            data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
+                            for data in enriched_dict.get(account, [])
+                        }
+
+                        if supply_id in supply_meta:
+                            supply_obj = supplies_service.create_supply_result(
+                                supply_meta,
+                                supply_id,
+                                account,
+                                orders
+                            )
+                            missing_result.append(supply_obj)
+
+            # Сохраняем недостающие в БД хранилище для будущих прогревов
+            if missing_result:
+                saved_count = await delivered_storage.save_supplies_to_storage(missing_result)
+                logger.info(f"Сохранено {saved_count} новых delivery поставок в БД хранилище при прогреве")
+
+                # Добавляем к stored_supplies
+                for supply_obj in missing_result:
+                    key = (supply_obj['supply_id'], supply_obj['account'])
+                    stored_supplies[key] = supply_obj
+
+        logger.info("ВСЕ данные поставок получены ультра-оптимизированным способом с БД кэшированием!")
+
         return {
             'wb_supplies_ids': wb_supplies_ids,
             'wb_supplies_grouped': wb_supplies_grouped,
-            'delivery_supplies_ids': delivery_supplies_details, 
-            'delivery_supplies_grouped': delivery_supplies_grouped
+            'delivery_supplies_data': stored_supplies,  # Данные из БД (Tier 2) + недостающие из API (Tier 3)
+            'delivery_supplies_ids': filtered_delivery_supplies_ids
         }
 
     async def _generate_all_combinations_from_unified_data(self, unified_data, supplies_service):
@@ -544,19 +620,19 @@ class GlobalCache:
             )
             
             # 3. Delivery Normal (hanging_only=False, is_delivery=True)
-            logger.info("Генерация Delivery Normal...")
+            logger.info("Генерация Delivery Normal из БД хранилища...")
             combinations['delivery_normal'] = await self._filter_delivery_supplies_ultra_optimized(
-                unified_data['delivery_supplies_grouped'],
+                unified_data['delivery_supplies_data'],  # ИЗМЕНЕНО: данные из БД
                 unified_data['delivery_supplies_ids'],
                 hanging_only=False,
                 supplies_service=supplies_service
             )
-            
+
             # 4. Delivery Hanging (hanging_only=True, is_delivery=True)
-            logger.info("Генерация Delivery Hanging...")
+            logger.info("Генерация Delivery Hanging из БД хранилища...")
             combinations['delivery_hanging'] = await self._filter_delivery_supplies_ultra_optimized(
-                unified_data['delivery_supplies_grouped'],
-                unified_data['delivery_supplies_ids'], 
+                unified_data['delivery_supplies_data'],  # ИЗМЕНЕНО: данные из БД
+                unified_data['delivery_supplies_ids'],
                 hanging_only=True,
                 supplies_service=supplies_service
             )
@@ -601,35 +677,42 @@ class GlobalCache:
             raise
 
     async def _filter_delivery_supplies_ultra_optimized(
-        self, 
-        delivery_supplies_grouped: Dict[str, Dict], 
+        self,
+        delivery_supplies_data: Dict[tuple, Dict],  # ИЗМЕНЕНО: теперь принимаем данные из БД
         delivery_supplies_ids: List[Dict],
         hanging_only: bool,
         supplies_service
     ) -> SupplyIdResponseSchema:
         """
-        УЛЬТРА-ОПТИМИЗИРОВАННАЯ фильтрация delivery поставок - БЕЗ дополнительных API вызовов.
+        УЛЬТРА-ОПТИМИЗИРОВАННАЯ фильтрация delivery поставок из БД хранилища (delivered_supplies).
+
+        Использует данные, полученные через трехуровневую систему:
+        Redis → PostgreSQL (delivered_supplies) → WB API
+
+        Args:
+            delivery_supplies_data: Данные из БД в формате {(supply_id, account): {полная структура}}
+            delivery_supplies_ids: Метаданные для дополнительной информации
+            hanging_only: Фильтр по висячим поставкам
+            supplies_service: Сервис поставок для фильтрации
+
+        Returns:
+            SupplyIdResponseSchema: Отфильтрованные delivery поставки
         """
         try:
-            result = []
-            supplies_ids_dict = {key: value for d in delivery_supplies_ids for key, value in d.items()}
-            
-            for account, value in delivery_supplies_grouped.items():
-                for supply_id, orders in value.items():
-                    # Формируем данные поставки (delivery)
-                    supply = {
-                        data["id"]: {"name": data["name"], "createdAt": data['createdAt']}
-                        for data in supplies_ids_dict[account]
-                    }
-                    
-                    result.append(supplies_service.create_supply_result(supply, supply_id, account, orders))
-            
-            # Применяем фильтр по hanging_only
+            # Преобразуем данные из БД в список результатов
+            result = list(delivery_supplies_data.values())
+
+            logger.info(f"Фильтрация {len(result)} delivery поставок из БД хранилища (hanging_only={hanging_only})")
+
+            # Применяем фильтр по hanging_only (та же логика, что в get_list_supplies)
             filtered_result = await supplies_service.filter_supplies_by_hanging(result, hanging_only)
+
+            logger.info(f"После фильтрации осталось {len(filtered_result)} delivery поставок")
+
             return SupplyIdResponseSchema(supplies=filtered_result)
-            
+
         except Exception as e:
-            logger.error(f"Ошибка ультра-фильтрации delivery поставок: {str(e)}")
+            logger.error(f"Ошибка ультра-фильтрации delivery поставок из БД: {str(e)}")
             raise
     
     async def _background_refresh_task(self) -> None:
