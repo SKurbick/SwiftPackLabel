@@ -300,12 +300,12 @@ class OneCIntegration:
 
         try:
             result_structure, accounts_orders, order_supply_map = self.initialize_data_structures(supply_ids)
-            tasks = [
-                self.process_account_orders(
+
+            # Последовательная обработка для стабильности (избегаем "another operation is in progress")
+            for account, order_ids in accounts_orders.items():
+                await self.process_account_orders(
                     account, order_ids, order_wild_map, order_supply_map, result_structure
-                ) for account, order_ids in accounts_orders.items()
-            ]
-            await asyncio.gather(*tasks)
+                )
             
             formatted_data = self.build_final_structure(result_structure)
             response = await self.send_to_1c(formatted_data)
