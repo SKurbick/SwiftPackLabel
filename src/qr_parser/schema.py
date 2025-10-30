@@ -41,6 +41,7 @@ class WildParserResponse(BaseSchema):
     volume: Optional[float] = Field(None, description="Объем товара в м³")
     rating: Optional[float] = Field(None, description="Рейтинг товара")
     colors: Optional[List[str]] = Field(None, description="Цвет товара")
+    weight_brutto: Optional[float] = Field(None, description="Вес товара")
 
 
 class QRLookupRequest(BaseSchema):
