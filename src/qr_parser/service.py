@@ -188,16 +188,6 @@ class WildParserService:
             Optional[List[str]]: Список цветов товара
         """
         return await self.get_most_relevant_value(wild_code, 'colors', None)
-    
-    async def get_weight_brutto(self, wild_code: str) -> Optional[float]:
-        """
-        Получает вес товара в кг, выбирая наиболее актуальное значение.
-        Args:
-            wild_code: Уникальный номер wild
-        Returns:
-            Optional[float]: Вес товара
-        """
-        return await self.get_most_relevant_value(wild_code, 'weight_brutto', None)
 
     async def parse_wild_string(self, wild_string: str) -> WildParserResponse:
         """
@@ -219,7 +209,6 @@ class WildParserService:
         volume = await self.get_volume(length, width, height)
         rating = await self.get_rating(wild_code)
         colors = await self.get_colors(wild_code)
-        weight_brutto = await self.get_weight_brutto(wild_code)
 
         return WildParserResponse(
             wild=wild_code,
@@ -232,8 +221,7 @@ class WildParserService:
             height=height,
             volume=volume,
             rating=rating,
-            colors=colors,
-            weight_brutto=weight_brutto
+            colors=colors
         )
 
 
