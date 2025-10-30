@@ -13,7 +13,6 @@ class CardData:
         price
         subject_name
         rating
-        weight_brutto
     """
 
     def __init__(self, db):
