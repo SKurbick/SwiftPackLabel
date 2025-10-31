@@ -1098,6 +1098,10 @@ class SuppliesService:
                     # Структура: {account: {supply_id: {"orders": [...]}}}
                     orders_list = supply_orders_response.get(account, {}).get(supply_id, {}).get('orders', [])
 
+                    # ВАЖНО: НЕ снимаем резерв при переводе в фиктивную доставку!
+                    # Резерв будет снят только при фактической отгрузке товара (process_fictitious_shipment)
+                    # Причина: товар физически не покинул склад, только изменился виртуальный статус в WB
+
                     # Подготавливаем данные для логирования
                     if orders_list:
                         fictitious_delivered_data = [{'order_id': order['id'],'supply_id': supply_id,'account': account}
@@ -1995,34 +1999,247 @@ class SuppliesService:
         logger.info(f"Успешно перемещено {len(moved_order_ids)} заказов")
         return moved_order_ids
 
-    async def _process_external_systems_integration(self, request_data, selected_orders_for_move: List[dict],
-                                                  new_supplies: Dict[Tuple[str, str], str], user: dict) -> None:
+    async def _process_external_systems_integration(
+        self,
+        request_data,
+        selected_orders_for_move: List[dict],
+        new_supplies: Dict[Tuple[str, str], str],
+        user: dict
+    ) -> None:
         """
-        Обрабатывает интеграцию с внешними системами для финальных поставок.
+        Обрабатывает интеграцию с внешними системами.
+        - Для финальных: снятие резерва + отправка в 1C
+        - Для висячих: создание резерва с перемещением
         """
         if getattr(request_data, 'move_to_final', False):
-            logger.info("Отправка данных в внешние системы (финальные поставки)")
-            
+            logger.info("=== РЕЖИМ: ПЕРЕВОД В ФИНАЛЬНЫЙ КРУГ ===")
+
+            # 1. НОВОЕ: Снимаем резерв с исходных поставок
+            shipped_goods_response = await self._release_reserve_for_final_move(
+                selected_orders_for_move
+            )
+            logger.info(f"Снято резервов: {len(shipped_goods_response)}")
+
+            # 2. Отправляем данные в 1C + shipment API
             supplies_dict = {
                 supply_id: account
                 for (wild_code, account), supply_id in new_supplies.items()
             }
-            
-            # Обновляем supply_id в заказах на новые целевые поставки
-            updated_orders = self._update_orders_with_new_supply_ids(selected_orders_for_move, new_supplies)
-            
+
+            updated_orders = self._update_orders_with_new_supply_ids(
+                selected_orders_for_move, new_supplies
+            )
+
             shipment_success = await self._send_shipment_data_to_external_systems(
                 updated_orders,
                 supplies_dict,
                 user.get('username', 'unknown')
             )
-            
+
             if shipment_success:
-                logger.info("Данные об отгрузке успешно отправлены в внешние системы")
+                logger.info("✅ Данные об отгрузке успешно отправлены в внешние системы")
             else:
-                logger.warning("Не удалось отправить данные об отгрузке в внешние системы")
+                logger.warning("⚠️ Не удалось отправить данные об отгрузке в внешние системы")
         else:
-            logger.info("Отправка в внешние системы пропущена (режим висячих поставок)")
+            logger.info("=== РЕЖИМ: ПЕРЕВОД В ВИСЯЧИЙ ===")
+
+            # НОВОЕ: Создаем резерв с перемещением для висячих поставок
+            reserve_success = await self._create_reserve_with_movement_for_wilds(
+                selected_orders_for_move,
+                new_supplies,
+                user
+            )
+
+            if reserve_success:
+                logger.info("✅ Резерв с перемещением успешно создан для висячих поставок")
+            else:
+                logger.warning("⚠️ Не удалось создать резерв с перемещением")
+
+    async def _create_reserve_with_movement_for_wilds(
+        self,
+        selected_orders: List[dict],
+        new_supplies: Dict[Tuple[str, str], str],
+        user: dict
+    ) -> bool:
+        """
+        Создает резерв с перемещением для висячих поставок через API.
+        Отправляет последовательно для каждой комбинации (wild, account, original_supply).
+
+        Args:
+            selected_orders: Отобранные заказы для перемещения
+            new_supplies: Новые поставки {(wild_code, account): supply_id}
+            user: Данные пользователя
+
+        Returns:
+            bool: True если все запросы успешны
+        """
+        logger.info("=== СОЗДАНИЕ РЕЗЕРВА С ПЕРЕМЕЩЕНИЕМ ДЛЯ ВИСЯЧИХ ПОСТАВОК ===")
+
+        # Группируем заказы по (wild, account, original_supply_id)
+        grouped_data = defaultdict(lambda: {
+            "orders": [],
+            "new_supply_id": None,
+            "account": None
+        })
+
+        for order in selected_orders:
+            wild_code = order['wild_code']
+            account = order['account']
+            original_supply_id = order.get('original_supply_id')
+
+            key = (wild_code, account, original_supply_id)
+            grouped_data[key]["orders"].append(order)
+            grouped_data[key]["new_supply_id"] = new_supplies.get((wild_code, account))
+            grouped_data[key]["account"] = account
+
+        # Формируем данные для каждой группы
+        reservation_data_list = []
+
+        for (wild_code, account, original_supply_id), group_info in grouped_data.items():
+            quantity_to_move = len(group_info["orders"])
+            new_supply_id = group_info["new_supply_id"]
+
+            if not new_supply_id:
+                logger.warning(f"Пропуск: нет новой поставки для {wild_code}, {account}")
+                continue
+
+            if not original_supply_id:
+                logger.warning(f"Пропуск: нет исходной поставки для {wild_code}, {account}")
+                continue
+
+            # Генерируем даты резерва
+            from src.orders.orders import OrdersService
+            reserve_date, expires_at = OrdersService._generate_reservation_dates()
+
+            reservation_item = {
+                "product_id": wild_code,
+                "warehouse_id": settings.PRODUCT_RESERVATION_WAREHOUSE_ID,
+                "ordered": quantity_to_move,
+                "account": account,
+                "delivery_type": settings.PRODUCT_RESERVATION_DELIVERY_TYPE,
+                "wb_warehouse": None,
+                "reserve_date": reserve_date,
+                "supply_id": new_supply_id,  # НОВАЯ висячая поставка
+                "expires_at": expires_at,
+                "is_hanging": True,  # Это висячая поставка
+                "move_from_supply": original_supply_id,  # Откуда перемещаем
+                "quantity_to_move": quantity_to_move  # Сколько перемещаем
+            }
+
+            reservation_data_list.append(reservation_item)
+
+            logger.info(
+                f"📦 Резерв с перемещением: {wild_code} | "
+                f"из {original_supply_id} → {new_supply_id} | "
+                f"количество: {quantity_to_move}"
+            )
+
+        if not reservation_data_list:
+            logger.warning("Нет данных для создания резерва с перемещением")
+            return False
+
+        # Отправляем в API
+        return await self._send_creation_reserve_with_movement(reservation_data_list)
+
+    async def _send_creation_reserve_with_movement(
+        self,
+        reservation_data: List[Dict[str, Any]]
+    ) -> bool:
+        """
+        Отправляет запрос на создание резерва с перемещением.
+
+        Args:
+            reservation_data: Список данных для резервирования
+
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            # Формируем URL (заменяем /create_reserve на /creation_reserve_with_movement)
+            base_url = settings.PRODUCT_RESERVATION_API_URL.replace('/create_reserve', '')
+            api_url = f"{base_url}/creation_reserve_with_movement"
+
+            # Добавляем delivery_type как query parameter (требование API)
+            url_with_params = f"{api_url}?delivery_type={settings.PRODUCT_RESERVATION_DELIVERY_TYPE}"
+
+            logger.info(f"📡 Отправка запроса: {url_with_params}")
+            logger.debug(f"📄 Данные: {json.dumps(reservation_data, ensure_ascii=False, indent=2)}")
+
+            response = await self.async_client.post(
+                url=url_with_params,
+                json=reservation_data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response:
+                logger.info(f"✅ Резерв с перемещением создан. Ответ: {response}")
+                return True
+            else:
+                logger.error("❌ Получен пустой ответ от API creation_reserve_with_movement")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания резерва с перемещением: {str(e)}")
+            return False
+
+    async def _release_reserve_for_final_move(
+        self,
+        selected_orders: List[dict]
+    ) -> List[Dict[str, Any]]:
+        """
+        Снимает резерв при переводе заказов в финальный круг через API add_shipped_goods.
+        Группирует по (original_supply_id, wild) и отправляет последовательно.
+
+        Args:
+            selected_orders: Отобранные заказы для перевода в финальный
+
+        Returns:
+            List[Dict[str, Any]]: Ответ от API с product_reserves_id
+        """
+        logger.info("=== СНЯТИЕ РЕЗЕРВА ПРИ ПЕРЕВОДЕ В ФИНАЛЬНЫЙ КРУГ ===")
+
+        # Группируем по (original_supply_id, wild_code)
+        grouped_data = defaultdict(lambda: {
+            "wild_code": None,
+            "orders": []
+        })
+
+        for order in selected_orders:
+            original_supply_id = order.get('original_supply_id')
+            wild_code = order['wild_code']
+
+            if not original_supply_id:
+                logger.warning(f"Пропуск: нет original_supply_id для заказа {order.get('id')}")
+                continue
+
+            key = (original_supply_id, wild_code)
+            grouped_data[key]["wild_code"] = wild_code
+            grouped_data[key]["orders"].append(order)
+
+        # Формируем данные для add_shipped_goods
+        shipped_goods_data = []
+
+        for (original_supply_id, wild_code), group_info in grouped_data.items():
+            quantity_shipped = len(group_info["orders"])
+
+            shipped_goods_item = {
+                "supply_id": original_supply_id,  # ИСХОДНАЯ поставка
+                "quantity_shipped": quantity_shipped,
+                "product_id": wild_code  # product_id обязателен
+            }
+
+            shipped_goods_data.append(shipped_goods_item)
+            logger.info(
+                f"🔓 Снятие резерва: {original_supply_id} | "
+                f"wild: {wild_code} | количество: {quantity_shipped}"
+            )
+
+        if not shipped_goods_data:
+            logger.warning("Нет данных для снятия резерва")
+            return []
+
+        # Отправляем в API (используем существующий метод)
+        return await self._send_shipped_goods_to_api(shipped_goods_data)
 
     def _update_orders_with_new_supply_ids(self, selected_orders: List[dict], 
                                          new_supplies: Dict[Tuple[str, str], str]) -> List[dict]:
@@ -2531,11 +2748,12 @@ class SuppliesService:
 
     def _prepare_shipped_goods_data(self, grouped_orders: Dict[str, List[dict]]) -> List[Dict[str, Any]]:
         """
-        Подготавливает данные об отгруженных количествах для API.
-        
+        Подготавливает данные об отгруженных количествах для API add_shipped_goods.
+        Висячая поставка = один wild, берем product_id из первого заказа.
+
         Args:
             grouped_orders: Заказы, сгруппированные по исходным висячим поставкам
-            
+
         Returns:
             List[Dict[str, Any]]: Подготовленные данные для API
         """
@@ -2546,14 +2764,21 @@ class SuppliesService:
                 continue
 
             quantity_shipped = len(orders)
-            #TODO добавить product_id для отправки данных(wild)
+
+            # Висячая поставка = один wild, получаем product_id из первого заказа
+            product_id = process_local_vendor_code(orders[0].get("article", ""))
+
             shipped_goods_item = {
                 "supply_id": supply_id,
-                "quantity_shipped": quantity_shipped
+                "quantity_shipped": quantity_shipped,
+                "product_id": product_id  # Добавлено для корректного снятия резерва
             }
 
             shipped_goods_data.append(shipped_goods_item)
-            logger.debug(f"Подготовлены данные для поставки {supply_id}: отгружено {quantity_shipped} заказов")
+            logger.debug(
+                f"Подготовлены данные для поставки {supply_id}, "
+                f"product_id {product_id}: отгружено {quantity_shipped} заказов"
+            )
 
         return shipped_goods_data
 
@@ -3070,22 +3295,50 @@ class SuppliesService:
 
     async def _get_all_orders_from_supplies(self, supplies: Dict[str, str]) -> List[Dict]:
         """
-        Получает все заказы из поставок.
-        
+        Получает все заказы из поставок из WB API.
+
+        ВАЖНО: Проверяет статус фиктивной доставки и блокирует операцию,
+        если WB API не вернул заказы для фиктивно доставленной поставки.
+
         Args:
             supplies: Словарь {supply_id: account}
-            
+
         Returns:
             List[Dict]: Список всех заказов с добавленными supply_id и account
+
+        Raises:
+            HTTPException: Если фиктивно доставленная поставка не вернула заказы из WB API
         """
         all_orders = []
+        hanging_supplies_model = HangingSupplies(self.db)
+
         for supply_id, account in supplies.items():
+            # 1. Проверяем статус фиктивной доставки
+            hanging_supply = await hanging_supplies_model.get_hanging_supply_by_id(supply_id, account)
+            is_fictitious_delivered = hanging_supply.get('is_fictitious_delivered', False) if hanging_supply else False
+
+            # 2. Получаем заказы из WB API
             orders_data = await Supplies(account, get_wb_tokens()[account]).get_supply_orders(supply_id)
             orders = orders_data.get(account, {supply_id: {'orders': []}}).get(supply_id).get('orders', [])
+
+            # 3. ВАЛИДАЦИЯ: Блокируем операцию если поставка фиктивно доставлена, но WB API не вернул заказы
+            if is_fictitious_delivered and not orders:
+                logger.error(
+                    f"БЛОКИРОВКА ОПЕРАЦИИ: Поставка {supply_id} ({account}) в статусе фиктивной доставки, "
+                    f"но WB API не вернул заказы. Возможно поставка удалена из WB."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Поставка {supply_id} ({account}) в статусе фиктивной доставки, "
+                           f"но WB API не вернул заказы. Операция заблокирована для безопасности."
+                )
+
+            # 4. Добавляем заказы в общий список
             for order in orders:
                 order['supply_id'] = supply_id
                 order['account'] = account
                 all_orders.append(order)
+
         return all_orders
 
     async def _filter_and_sort_orders(self, all_orders: List[Dict],
@@ -3122,43 +3375,54 @@ class SuppliesService:
         return selected_orders
 
     async def _send_shipment_data_to_external_systems(self, selected_orders: List[Dict],
-                                           supplies: Dict[str, str], 
+                                           supplies: Dict[str, str],
                                            operator: str) -> bool:
         """
         Отправляет данные об отгрузке в shipment_of_goods и 1C.
-        
+        НОВОЕ: Также снимает резерв через add_shipped_goods API.
+
         Args:
             selected_orders: Выбранные заказы для отгрузки
             supplies: Словарь {supply_id: account}
             operator: Оператор, выполняющий операцию
-            
+
         Returns:
             bool: True если отправка успешна
         """
         try:
             logger.info(f"Отправка данных фиктивной отгрузки {len(selected_orders)} заказов")
-            
-            # 1. Преобразуем selected_orders в формат DeliverySupplyInfo
+
+            # 1. НОВОЕ: Снимаем резерв через add_shipped_goods API
+            grouped_orders = self.group_selected_orders_by_supply(selected_orders)
+            shipped_goods_data = self._prepare_shipped_goods_data(grouped_orders)
+
+            if shipped_goods_data:
+                shipped_goods_response = await self._send_shipped_goods_to_api(shipped_goods_data)
+                logger.info(f"Снято резервов для фиктивной отгрузки: {len(shipped_goods_response)}")
+            else:
+                logger.warning("Нет данных для снятия резерва при фиктивной отгрузке")
+
+            # 2. Преобразуем selected_orders в формат DeliverySupplyInfo
             delivery_supplies = self._convert_to_delivery_supplies(selected_orders, supplies)
-            
-            # 2. Создаем order_wild_map используя process_local_vendor_code
+
+            # 3. Создаем order_wild_map используя process_local_vendor_code
             order_wild_map = self._extract_order_wild_map(selected_orders)
-            
-            # 3. Отправляем в shipment_of_goods API
+
+            # 4. Отправляем в shipment_of_goods API
             shipment_success = await self.save_shipments(
                 supply_ids=delivery_supplies,
                 order_wild_map=order_wild_map,
                 author=operator
             )
-            
-            # 4. Отправляем в 1C
+
+            # 5. Отправляем в 1C
             integration = OneCIntegration(self.db)
             integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
             integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
-            
+
             logger.info(f"Фиктивная отгрузка: shipment_api={shipment_success}, 1c_integration={integration_success}")
             return shipment_success and integration_success
-            
+
         except Exception as e:
             logger.error(f"Ошибка отправки данных фиктивной отгрузки: {str(e)}")
             return False

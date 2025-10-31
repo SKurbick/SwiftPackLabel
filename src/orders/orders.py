@@ -617,7 +617,8 @@ class OrdersService:
                     "delivery_type": settings.PRODUCT_RESERVATION_DELIVERY_TYPE,
                     "supply_id": supply_id,
                     "reserve_date": reserve_date,
-                    "expires_at": expires_at
+                    "expires_at": expires_at,
+                    "is_hanging": True  # Помечаем как висячую поставку
                 }
 
                 reservation_items.append(reservation_item)
