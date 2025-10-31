@@ -103,15 +103,19 @@ async def add_fact_orders_and_supply_name(
     logger.info(f"Поставки будут помечены как висячие: {payload.is_hanging}")
 
     try:
-        # Сохраняем начало операции
-        await SupplyOperationsDB.save_operation_start(
-            operation_id, 
-            user['id'], 
-            payload.dict(),
-            supply_name=payload.name_supply,
-            supply_date=datetime.now().isoformat()  # Автоматически генерируем текущее время
-        )
-        
+        # Сохраняем начало операции (ТОЛЬКО для технических кругов, НЕ для висячих)
+        if not payload.is_hanging:
+            await SupplyOperationsDB.save_operation_start(
+                operation_id,
+                user['id'],
+                payload.dict(),
+                supply_name=payload.name_supply,
+                supply_date=datetime.now().isoformat()  # Автоматически генерируем текущее время
+            )
+            logger.info(f"Операция {operation_id} начата и сохранена в supply_operations (технический круг)")
+        else:
+            logger.info(f"Операция {operation_id} начата (висячий круг, не сохраняем в supply_operations)")
+
         # Выполняем основную логику
         orders_service = OrdersService(db)
         result = await orders_service.process_orders_with_fact_count(payload, user.get('username', 'unknown'))
@@ -122,8 +126,12 @@ async def add_fact_orders_and_supply_name(
         logger.info(f"Залогировано {logged_count} заказов со статусом "
             f"{'IN_HANGING_SUPPLY' if payload.is_hanging else 'IN_TECHNICAL_SUPPLY'}")
 
-        # Сохраняем успешный результат
-        await SupplyOperationsDB.save_operation_success(operation_id, result.dict())
+        # Сохраняем успешный результат (ТОЛЬКО для технических кругов, НЕ для висячих)
+        if not payload.is_hanging:
+            await SupplyOperationsDB.save_operation_success(operation_id, result.dict())
+            logger.info(f"Операция {operation_id} завершена успешно и сохранена в supply_operations (технический круг)")
+        else:
+            logger.info(f"Операция {operation_id} завершена успешно (висячий круг, не сохраняем в supply_operations)")
 
         result.operation_id = operation_id
 
@@ -132,10 +140,13 @@ async def add_fact_orders_and_supply_name(
         return result
         
     except Exception as e:
-        # Сохраняем ошибку в БД
-        await SupplyOperationsDB.save_operation_error(operation_id, str(e))
-        
-        logger.error(f"Ошибка в операции {operation_id}: {str(e)}")
+        # Сохраняем ошибку в БД (ТОЛЬКО для технических кругов, НЕ для висячих)
+        if not payload.is_hanging:
+            await SupplyOperationsDB.save_operation_error(operation_id, str(e))
+            logger.error(f"Ошибка в операции {operation_id} (технический круг) сохранена в supply_operations: {str(e)}")
+        else:
+            logger.error(f"Ошибка в операции {operation_id} (висячий круг): {str(e)}")
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Произошла ошибка при создании поставок: {str(e)}",

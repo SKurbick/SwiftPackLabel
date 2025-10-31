@@ -589,17 +589,19 @@ class OrdersService:
             product_quantities: Dict[str, Dict[str, int]],
             product_supply_ids: Dict[str, Dict[str, str]],
             reserve_date: str,
-            expires_at: str
+            expires_at: str,
+            is_hanging: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Формирует элементы для резервации товаров.
-        
+
         Args:
             product_quantities: Количество товаров по артикулам и аккаунтам
             product_supply_ids: ID поставок по артикулам и аккаунтам
             reserve_date: Дата резервации
             expires_at: Дата истечения резерва
-            
+            is_hanging: Флаг висячего круга (True - висячий, False - обычный технический)
+
         Returns:
             List[Dict[str, Any]]: Список элементов для резервации
         """
@@ -618,7 +620,7 @@ class OrdersService:
                     "supply_id": supply_id,
                     "reserve_date": reserve_date,
                     "expires_at": expires_at,
-                    "is_hanging": True  # Помечаем как висячую поставку
+                    "is_hanging": is_hanging  # Передаем реальное значение флага
                 }
 
                 reservation_items.append(reservation_item)
@@ -649,7 +651,7 @@ class OrdersService:
             )
 
             if response:
-                logger.info(f"Успешное создание резерва товаров для висячих поставок. Ответ: {response}")
+                logger.info(f"Успешное создание резерва товаров для технического круга. Ответ: {response}")
                 return {
                     "success": True,
                     "message": "Резерв товаров успешно создан",
@@ -678,21 +680,26 @@ class OrdersService:
             self,
             filtered_orders: Dict[str, List[OrderDetail]],
             supply_by_account: Dict[str, str],
-            operator: str = 'unknown'
+            operator: str = 'unknown',
+            is_hanging: bool = False
     ) -> Dict[str, Any]:
         """
-        Координирует процесс создания резерва товаров для висячих поставок.
-        
+        Координирует процесс создания резерва товаров для технических кругов.
+
+        Резерв создается для ВСЕХ технических кругов (висячих и обычных).
+
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
             supply_by_account: Словарь с маппингом аккаунта на ID поставки
-            operator: Имя пользователя (оператора), создавшего висячую поставку
-            
+            operator: Имя пользователя (оператора), создавшего технический круг
+            is_hanging: Флаг висячего круга (True - висячий, False - обычный технический)
+
         Returns:
             Dict[str, Any]: Результат операции резервации
         """
         try:
-            logger.info(f"Начало процесса создания резерва товаров для висячих поставок. Оператор: {operator}")
+            circle_type = "висячего" if is_hanging else "технического"
+            logger.info(f"Начало процесса создания резерва товаров для {circle_type} круга. Оператор: {operator}")
 
             product_quantities, product_supply_ids = self._group_orders_by_product_and_account(
                 filtered_orders, supply_by_account
@@ -701,7 +708,7 @@ class OrdersService:
             reserve_date, expires_at = self._generate_reservation_dates()
 
             reservation_items = self._build_reservation_items(
-                product_quantities, product_supply_ids, reserve_date, expires_at
+                product_quantities, product_supply_ids, reserve_date, expires_at, is_hanging
             )
 
             if not reservation_items:
@@ -714,7 +721,7 @@ class OrdersService:
             return result
 
         except Exception as e:
-            logger.error(f"Критическая ошибка при создании резерва товаров для висячих поставок: {str(e)}")
+            logger.error(f"Критическая ошибка при создании резерва товаров для технического круга: {str(e)}")
             return {
                 "success": False,
                 "message": f"Критическая ошибка создания резерва: {str(e)}",
@@ -745,14 +752,15 @@ class OrdersService:
         # Обрабатываем QR-коды для успешно добавленных заказов
         if orders_added_by_article:
             await self._process_qr_codes_for_orders(orders_added_by_article, order_supply_mapping)
-        
-        # Если поставки висячие, сохраняем информацию в БД и резервируем товары
+
+        # Если поставки висячие, сохраняем информацию в БД
         if input_data.is_hanging and self.db:
             await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
 
-            # Резервируем товары для висячих поставок
+        # Резервируем товары для ВСЕХ технических кругов (независимо от флага is_hanging)
+        if self.db:
             reservation_result = await self._reserve_products_for_hanging_supplies(
-                filtered_orders_by_sku, supply_by_account, operator
+                filtered_orders_by_sku, supply_by_account, operator, input_data.is_hanging
             )
             logger.info(f"Результат резервации товаров: {reservation_result}")
 

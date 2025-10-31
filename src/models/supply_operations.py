@@ -270,19 +270,21 @@ class SupplyOperationsDB:
     async def get_sessions_list(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """
         Получает общий список сессий с базовой информацией (название, id, время создания).
-        
+        Исключает пустые сессии (где wilds = []).
+
         Args:
             limit: Максимальное количество сессий
             offset: Смещение для пагинации
-            
+
         Returns:
-            List с базовой информацией о сессиях
+            List с базовой информацией о сессиях (без пустых)
         """
         try:
             query = """
                 SELECT operation_id, supply_name, supply_date, status, created_at, completed_at
-                FROM supply_operations 
-                ORDER BY created_at DESC 
+                FROM supply_operations
+                WHERE response_data::jsonb->'wilds' != '[]'::jsonb
+                ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
             """
             result = await db.fetch(query, limit, offset)
