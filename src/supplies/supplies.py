@@ -544,19 +544,19 @@ class SuppliesService:
 
                     # Добавляем количество отгруженных товаров
                     hanging_supply_data = hanging_supplies_map[(supply['supply_id'], supply['account'])]
-                    shipped_orders = hanging_supply_data.get('shipped_orders', [])
+                    fictitious_shipped_order_ids = hanging_supply_data.get('fictitious_shipped_order_ids', [])
 
-                    # Десериализуем shipped_orders если это строка JSON
-                    if isinstance(shipped_orders, str):
+                    # Десериализуем fictitious_shipped_order_ids если это строка JSON
+                    if isinstance(fictitious_shipped_order_ids, str):
                         try:
-                            shipped_orders = json.loads(shipped_orders)
+                            fictitious_shipped_order_ids = json.loads(fictitious_shipped_order_ids)
                         except json.JSONDecodeError:
-                            shipped_orders = []
+                            fictitious_shipped_order_ids = []
 
-                    if shipped_orders and isinstance(shipped_orders, list):
+                    if fictitious_shipped_order_ids and isinstance(fictitious_shipped_order_ids, list):
                         # Подсчитываем уникальные ID заказов
                         unique_shipped_ids = set(
-                            order.get('order_id') for order in shipped_orders
+                            order.get('order_id') for order in fictitious_shipped_order_ids
                             if isinstance(order, dict) and order.get('order_id')
                         )
                         supply["shipped_count"] = len(unique_shipped_ids)
