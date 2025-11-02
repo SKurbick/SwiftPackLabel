@@ -2606,8 +2606,17 @@ class SuppliesService:
                 logged_count = await status_service.process_and_log_partially_shipped(partially_shipped_data)
                 logger.info(f"Залогировано {logged_count} заказов со статусом PARTIALLY_SHIPPED")
 
-            # 6.2. Сохраняем информацию о новых "фактических" поставках как висячих поставок
-            await self._save_new_supplies_as_hanging(new_supplies_map, target_article, user)
+            # 6.2. ВАЖНО: НЕ сохраняем фактические поставки как висячие
+            # Причина: Реально отгруженные поставки не являются висячими по определению.
+            # После перевода в доставку они:
+            #   - Находятся в пути к WB (статус "В доставке" в WB API)
+            #   - Резерв уже списан (через add_shipped_goods API)
+            #   - Данные зафиксированы в shipment_of_goods и 1C
+            # Сохранение их в hanging_supplies приводит к:
+            #   - Риску повторной фиктивной доставки/отгрузки
+            #   - Двойному списанию резерва
+            #   - Путанице для операторов (реальные поставки в списке висячих)
+            logger.info(f"Фактические поставки {list(new_supplies_map.values())} НЕ сохраняются как висячие (уже реально отгружены)")
 
             # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
@@ -3042,38 +3051,6 @@ class SuppliesService:
 
         logger.info(f"PDF стикеры сгенерированы успешно для артикула {target_article}")
         return pdf_base64
-
-    async def _save_new_supplies_as_hanging(self, new_supplies_map: Dict[str, str], target_article: str,
-                                            user: dict) -> None:
-        """
-        Сохраняет новые фактические поставки как висячие поставки параллельно.
-        
-        Args:
-            new_supplies_map: Маппинг аккаунт -> новый supply_id
-            target_article: Артикул товара
-            user: Данные пользователя
-        """
-        if not new_supplies_map:
-            logger.info("Нет новых поставок для сохранения как висячие")
-            return
-
-        logger.info(f"Сохранение {len(new_supplies_map)} новых фактических поставок как висячих поставок")
-
-        # Создаем задачи для параллельного выполнения
-        tasks = [
-            self._save_as_hanging_supply(
-                supply_id=new_supply_id,
-                account=account,
-                wild_code=target_article,
-                user=user
-            )
-            for account, new_supply_id in new_supplies_map.items()
-        ]
-
-        # Выполняем все задачи параллельно
-        await asyncio.gather(*tasks)
-
-        logger.info(f"Сохранено {len(new_supplies_map)} новых фактических поставок как висячие")
 
     async def get_single_supply_sticker(self, supply_id: str, account: str) -> BytesIO:
         """
