@@ -2165,11 +2165,12 @@ class SuppliesService:
             logger.info(f"📡 Отправка запроса: {url_with_params}")
             logger.debug(f"📄 Данные: {json.dumps(reservation_data, ensure_ascii=False, indent=2)}")
 
-            response = await self.async_client.post(
-                url=url_with_params,
-                json=reservation_data,
-                headers={"Content-Type": "application/json"}
-            )
+            response = None
+            #     await self.async_client.post(
+            #     url=url_with_params,
+            #     json=reservation_data,
+            #     headers={"Content-Type": "application/json"}
+            # )
 
             if response:
                 logger.info(f"✅ Резерв с перемещением создан. Ответ: {response}")
@@ -2807,11 +2808,12 @@ class SuppliesService:
             logger.info(f"Отправка запроса на URL: {api_url}")
             logger.debug(f"Данные для отправки: {json.dumps(shipped_goods_data, ensure_ascii=False, indent=2)}")
 
-            response = await self.async_client.post(
-                url=api_url,
-                json=shipped_goods_data,
-                headers={"Content-Type": "application/json"}
-            )
+            response = None
+            #     await self.async_client.post(
+            #     url=api_url,
+            #     json=shipped_goods_data,
+            #     headers={"Content-Type": "application/json"}
+            # )
 
             if response:
                 logger.info(f"Успешная отправка данных об отгруженных количествах. Ответ: {response}")

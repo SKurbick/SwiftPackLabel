@@ -644,11 +644,12 @@ class OrdersService:
         logger.debug(f"Данные для создания резерва: {json.dumps(reservation_items, ensure_ascii=False, indent=2)}")
 
         try:
-            response = await self.async_client.post(
-                url=reservation_url,
-                json=reservation_items,
-                headers={"Content-Type": "application/json"}
-            )
+            response = None
+            #     await self.async_client.post(
+            #     url=reservation_url,
+            #     json=reservation_items,
+            #     headers={"Content-Type": "application/json"}
+            # )
 
             if response:
                 logger.info(f"Успешное создание резерва товаров для технического круга. Ответ: {response}")
