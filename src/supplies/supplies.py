@@ -1847,17 +1847,19 @@ class SuppliesService:
         return await self._process_create_supplies_results(results, task_metadata, user)
 
     async def _move_orders_to_supplies(self, selected_orders_for_move: List[dict],
-                                       new_supplies: Dict[Tuple[str, str], str], wb_tokens: dict) -> List[int]:
+                                       new_supplies: Dict[Tuple[str, str], str], wb_tokens: dict,
+                                       check_status: bool = False) -> Tuple[List[int], List[dict]]:
         """
         Перемещает отобранные заказы в новые поставки параллельно.
-        
+
         Args:
             selected_orders_for_move: Отобранные заказы для перемещения
             new_supplies: Новые поставки по ключу (wild_code, account)
             wb_tokens: Токены WB для аккаунтов
-            
+            check_status: Проверять ли статус заказов перед добавлением (default False, т.к. делаем пре-валидацию)
+
         Returns:
-            List[int]: ID успешно перемещенных заказов
+            Tuple[List[int], List[dict]]: (ID успешно перемещенных заказов, список неудачных попыток с деталями)
         """
         # Подготовка задач для параллельного перемещения
         tasks = []
@@ -1876,26 +1878,96 @@ class SuppliesService:
 
             # Создаем задачу для добавления заказа в поставку
             supplies_api = Supplies(account, wb_tokens[account])
-            task = supplies_api.add_order_to_supply(new_supply_id, order_id)
+            task = supplies_api.add_order_to_supply(new_supply_id, order_id, check_status=check_status)
             tasks.append(task)
-            task_metadata.append((order_id, order['original_supply_id'], new_supply_id))
+            task_metadata.append({
+                'order_id': order_id,
+                'account': account,
+                'wild_code': wild_code,
+                'original_supply_id': order['original_supply_id'],
+                'new_supply_id': new_supply_id
+            })
 
         # Параллельное выполнение всех запросов
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Обработка результатов
         moved_order_ids = []
+        failed_orders = []
 
-        for (order_id, original_supply_id, new_supply_id), result in zip(task_metadata, results):
+        for metadata, result in zip(task_metadata, results):
+            order_id = metadata['order_id']
+            original_supply_id = metadata['original_supply_id']
+            new_supply_id = metadata['new_supply_id']
+            account = metadata['account']
+            wild_code = metadata['wild_code']
+
+            # Проверка на исключение
             if isinstance(result, Exception):
-                logger.error(f"Исключение при перемещении заказа {order_id}: {str(result)}")
+                error_msg = f"Исключение при перемещении: {str(result)}"
+                logger.error(f"Заказ {order_id} ({account}): {error_msg}")
+                failed_orders.append({
+                    'order_id': order_id,
+                    'account': account,
+                    'wild_code': wild_code,
+                    'original_supply_id': original_supply_id,
+                    'new_supply_id': new_supply_id,
+                    'error': error_msg,
+                    'reason': 'exception'
+                })
                 continue
 
-            # Добавляем все заказы в список перемещенных
-            moved_order_ids.append(order_id)
-            logger.info(f"Заказ {order_id} перемещен из {original_supply_id} в {new_supply_id}")
+            # Проверка на ошибку в ответе WB API
+            if isinstance(result, dict) and result.get('error'):
+                error_msg = result.get('error', 'Неизвестная ошибка')
+                logger.error(f"Ошибка WB API при перемещении заказа {order_id} ({account}): {error_msg}")
+                failed_orders.append({
+                    'order_id': order_id,
+                    'account': account,
+                    'wild_code': wild_code,
+                    'original_supply_id': original_supply_id,
+                    'new_supply_id': new_supply_id,
+                    'error': error_msg,
+                    'reason': 'wb_api_error'
+                })
+                continue
 
-        return moved_order_ids
+            # Проверка на неуспешный ответ
+            if isinstance(result, dict) and result.get('success') == False:
+                error_msg = result.get('errorText', 'Операция не выполнена')
+                logger.error(f"Неудачное перемещение заказа {order_id} ({account}): {error_msg}")
+                failed_orders.append({
+                    'order_id': order_id,
+                    'account': account,
+                    'wild_code': wild_code,
+                    'original_supply_id': original_supply_id,
+                    'new_supply_id': new_supply_id,
+                    'error': error_msg,
+                    'reason': 'unsuccessful_response'
+                })
+                continue
+
+            # Финальная проверка: result должен быть валидным dict
+            if not isinstance(result, dict):
+                error_msg = f"Неожиданный тип ответа: {type(result).__name__}"
+                logger.error(f"Некорректный ответ для заказа {order_id} ({account}): {error_msg}")
+                failed_orders.append({
+                    'order_id': order_id,
+                    'account': account,
+                    'wild_code': wild_code,
+                    'original_supply_id': original_supply_id,
+                    'new_supply_id': new_supply_id,
+                    'error': error_msg,
+                    'reason': 'invalid_response_type'
+                })
+                continue
+
+            # Успешное перемещение
+            moved_order_ids.append(order_id)
+            logger.info(f"Заказ {order_id} ({account}, {wild_code}) перемещен из {original_supply_id} в {new_supply_id}")
+
+        logger.info(f"Результат перемещения: успешно {len(moved_order_ids)}, неудачно {len(failed_orders)}")
+        return moved_order_ids, failed_orders
 
     async def move_orders_between_supplies_implementation(self, request_data, user: dict) -> Dict[str, Any]:
         """
@@ -1923,14 +1995,22 @@ class SuppliesService:
         # 3. Создание целевых поставок
         new_supplies = await self._create_target_supplies(participating_combinations, request_data, user)
 
-        # 4. Выполнение перемещения заказов
-        moved_order_ids = await self._execute_orders_move(selected_orders_for_move, new_supplies)
+        # 4. Выполнение перемещения заказов с валидацией
+        moved_order_ids, invalid_status_orders, failed_movement_orders = await self._execute_orders_move(
+            selected_orders_for_move, new_supplies
+        )
 
-        # 5. Отправка данных во внешние системы (только для финальных поставок)
-        await self._process_external_systems_integration(request_data, selected_orders_for_move, new_supplies, user)
+        # 5. Отправка данных во внешние системы (успешно перемещенные + заблокированные)
+        await self._process_external_systems_integration(
+            request_data, selected_orders_for_move, moved_order_ids, new_supplies, user,
+            invalid_status_orders, failed_movement_orders
+        )
 
-        # 6. Возврат результата
-        return self._create_success_result(moved_order_ids, new_supplies, selected_orders_for_move)
+        # 6. Возврат результата со статистикой
+        return self._create_success_result(
+            moved_order_ids, new_supplies, selected_orders_for_move,
+            invalid_status_orders, failed_movement_orders
+        )
 
     async def _prepare_orders_for_move(self, request_data) -> Tuple[List[dict], Set[Tuple[str, str]]]:
         """
@@ -1981,57 +2061,341 @@ class SuppliesService:
         logger.info(f"Успешно создано {len(new_supplies)} поставок")
         return new_supplies
 
-    async def _execute_orders_move(self, selected_orders_for_move: List[dict], 
-                                 new_supplies: Dict[Tuple[str, str], str]) -> List[int]:
+    def _determine_blocked_status(self, supplier_status: str) -> str:
         """
-        Выполняет перемещение заказов в новые поставки.
-        
+        Определяет конкретный статус блокировки на основе supplierStatus.
+
         Returns:
-            List[int]: ID успешно перемещенных заказов
+            OrderStatus enum значение
         """
-        logger.info("Выполнение перемещения заказов в новые поставки")
+        from src.models.order_status_log import OrderStatus
+
+        if supplier_status == "complete":
+            return OrderStatus.BLOCKED_ALREADY_DELIVERED
+        elif supplier_status == "cancel":
+            return OrderStatus.BLOCKED_CANCELED
+        else:
+            return OrderStatus.BLOCKED_INVALID_STATUS
+
+    def _log_invalid_orders_by_status(self, invalid_orders: List[dict]) -> None:
+        """Логирует невалидные заказы с группировкой по статусам."""
+        logger.warning(f"\n{'='*70}")
+        logger.warning(f"⚠️  ЗАКАЗЫ С НЕКОРРЕКТНЫМ СТАТУСОМ WB")
+        logger.warning(f"{'='*70}")
+
+        # Группируем по supplierStatus
+        by_status = defaultdict(list)
+        for inv in invalid_orders:
+            status = inv['supplier_status']
+            by_status[status].append(inv)
+
+        for status, orders in by_status.items():
+            logger.warning(f"\nsupplierStatus = '{status}': {len(orders)} заказов")
+
+            # Группируем по аккаунтам
+            by_account = defaultdict(list)
+            for order in orders:
+                by_account[order['account']].append(order['order_id'])
+
+            for account, order_ids in by_account.items():
+                logger.warning(f"  {account}: {order_ids[:10]}")
+                if len(order_ids) > 10:
+                    logger.warning(f"    ... и еще {len(order_ids) - 10}")
+
+        logger.warning(f"{'='*70}\n")
+
+    def _log_all_failures(
+        self,
+        failed_orders: List[dict],
+        invalid_status_orders: List[dict]
+    ) -> None:
+        """Логирует все неудачи с группировкой по причинам."""
+
+        total_failures = len(failed_orders) + len(invalid_status_orders)
+        if total_failures == 0:
+            return
+
+        logger.warning(f"\n{'='*70}")
+        logger.warning(f"⚠️  ДЕТАЛЬНАЯ СВОДКА ПО ИСКЛЮЧЕННЫМ ЗАКАЗАМ")
+        logger.warning(f"{'='*70}")
+        logger.warning(f"Всего исключено из отправки в 1C: {total_failures} заказов\n")
+
+        # 1. Невалидные статусы
+        if invalid_status_orders:
+            logger.warning(f"📋 Невалидный статус ({len(invalid_status_orders)} заказов):")
+            logger.warning(f"   Причина: Заказы нельзя переместить из-за статуса WB")
+
+            by_account = defaultdict(list)
+            for inv in invalid_status_orders:
+                by_account[inv['account']].append(inv['order_id'])
+
+            for account, order_ids in by_account.items():
+                logger.warning(f"   {account}: {len(order_ids)} заказов - {order_ids[:5]}")
+
+        # 2. Ошибки перемещения
+        if failed_orders:
+            logger.warning(f"\n📋 Ошибки при перемещении ({len(failed_orders)} заказов):")
+
+            by_reason = defaultdict(list)
+            for fail in failed_orders:
+                reason = fail.get('reason', 'Unknown')
+                by_reason[reason].append(fail['order_id'])
+
+            for reason, order_ids in by_reason.items():
+                logger.warning(f"   {reason}: {len(order_ids)} заказов - {order_ids[:5]}")
+
+        logger.warning(f"{'='*70}\n")
+
+    async def _validate_orders_status_before_move(
+        self,
+        selected_orders: List[dict]
+    ) -> Tuple[List[dict], List[dict]]:
+        """
+        Проверяет статусы заказов ПЕРЕД перемещением.
+
+        Args:
+            selected_orders: Все отобранные заказы для перемещения
+
+        Returns:
+            Tuple[List[dict], List[dict]]: (valid_orders, invalid_orders)
+        """
+        logger.info(f"Валидация статусов {len(selected_orders)} заказов перед перемещением")
+
+        # Группируем заказы по аккаунтам
+        order_ids_by_account = defaultdict(list)
+        order_by_id = {}  # Для быстрого поиска
+
+        for order in selected_orders:
+            account = order['account']
+            order_id = order['id']
+            order_ids_by_account[account].append(order_id)
+            order_by_id[order_id] = order
+
+        # Массовая проверка статусов по всем аккаунтам
         wb_tokens = get_wb_tokens()
-        
-        moved_order_ids = await self._move_orders_to_supplies(
-            selected_orders_for_move, new_supplies, wb_tokens
+        validation_results = {}
+
+        for account, order_ids in order_ids_by_account.items():
+            try:
+                orders_api = Orders(account, wb_tokens[account])
+
+                # Разбиваем на батчи по 1000 заказов (лимит WB API)
+                batch_size = 1000
+                for i in range(0, len(order_ids), batch_size):
+                    batch = order_ids[i:i + batch_size]
+                    logger.debug(
+                        f"Проверка статусов батча {i//batch_size + 1} "
+                        f"({len(batch)} заказов) для {account}"
+                    )
+                    result = await orders_api.can_add_to_supply_batch(batch)
+                    validation_results.update(result)
+
+                logger.info(
+                    f"Проверено {len(order_ids)} заказов для {account} "
+                    f"в {(len(order_ids) - 1) // batch_size + 1} батчах"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка валидации для {account}: {e}")
+                # Помечаем все заказы аккаунта как невалидные
+                for order_id in order_ids:
+                    validation_results[order_id] = {
+                        "can_add": False,
+                        "supplier_status": "error",
+                        "wb_status": "error"
+                    }
+
+        # Разделяем на валидные и невалидные
+        valid_orders = []
+        invalid_orders = []
+
+        for order_id, status_info in validation_results.items():
+            order = order_by_id.get(order_id)
+            if not order:
+                continue
+
+            can_add = status_info.get("can_add", False)
+            supplier_status = status_info.get("supplier_status", "unknown")
+            wb_status = status_info.get("wb_status", "unknown")
+
+            if can_add:
+                valid_orders.append(order)
+            else:
+                # Определяем конкретный статус блокировки
+                blocked_status = self._determine_blocked_status(supplier_status)
+
+                # Сохраняем ПОЛНЫЙ объект заказа + информацию о блокировке
+                # Это нужно для отправки в 1C/Shipment с оригинальным supply_id
+                invalid_orders.append({
+                    **order,  # Все поля оригинального заказа
+                    'blocked_status': blocked_status,  # Для логирования
+                    'blocked_supplier_status': supplier_status,
+                    'blocked_wb_status': wb_status,
+                    'blocked_reason': f"supplierStatus={supplier_status}, wbStatus={wb_status}"
+                })
+
+        logger.info(
+            f"Валидация: {len(valid_orders)} валидных, "
+            f"{len(invalid_orders)} невалидных"
         )
-        
-        logger.info(f"Успешно перемещено {len(moved_order_ids)} заказов")
-        return moved_order_ids
+
+        # Детальное логирование
+        if invalid_orders:
+            self._log_invalid_orders_by_status(invalid_orders)
+
+        return valid_orders, invalid_orders
+
+    async def _execute_orders_move(self, selected_orders_for_move: List[dict],
+                                 new_supplies: Dict[Tuple[str, str], str]) -> Tuple[List[int], List[dict], List[dict]]:
+        """
+        Выполняет перемещение заказов в новые поставки с предварительной валидацией статусов.
+
+        Returns:
+            Tuple[List[int], List[dict], List[dict]]: (ID успешно перемещенных заказов,
+                                                        заказы с невалидным статусом,
+                                                        заказы с ошибками при перемещении)
+        """
+        logger.info(f"Начало перемещения {len(selected_orders_for_move)} заказов в новые поставки")
+
+        # ШАГ 1: Предварительная валидация статусов всех заказов
+        logger.info("=== ШАГ 1: Проверка статусов заказов перед перемещением ===")
+        valid_orders, invalid_status_orders = await self._validate_orders_status_before_move(
+            selected_orders_for_move
+        )
+
+        logger.info(
+            f"Результат валидации: валидных={len(valid_orders)}, "
+            f"с невалидным статусом={len(invalid_status_orders)}"
+        )
+
+        # Логируем заказы с невалидными статусами
+        if invalid_status_orders:
+            self._log_invalid_orders_by_status(invalid_status_orders)
+
+        # ШАГ 2: Перемещаем только валидные заказы
+        logger.info("=== ШАГ 2: Перемещение валидных заказов ===")
+        wb_tokens = get_wb_tokens()
+
+        if valid_orders:
+            # check_status=False, т.к. мы уже сделали пре-валидацию
+            moved_order_ids, failed_movement_orders = await self._move_orders_to_supplies(
+                valid_orders, new_supplies, wb_tokens, check_status=False
+            )
+        else:
+            logger.warning("Нет валидных заказов для перемещения после проверки статусов")
+            moved_order_ids = []
+            failed_movement_orders = []
+
+        # ШАГ 3: Логируем итоговую статистику
+        logger.info(
+            f"=== ИТОГО ПЕРЕМЕЩЕНИЕ ===\n"
+            f"  Всего заказов: {len(selected_orders_for_move)}\n"
+            f"  Успешно перемещено: {len(moved_order_ids)}\n"
+            f"  Невалидный статус WB: {len(invalid_status_orders)}\n"
+            f"  Ошибки при перемещении: {len(failed_movement_orders)}\n"
+            f"  Всего неудач: {len(invalid_status_orders) + len(failed_movement_orders)}"
+        )
+
+        # Подробный лог всех ошибок
+        if invalid_status_orders or failed_movement_orders:
+            self._log_all_failures(failed_movement_orders, invalid_status_orders)
+
+        return moved_order_ids, invalid_status_orders, failed_movement_orders
 
     async def _process_external_systems_integration(
         self,
         request_data,
         selected_orders_for_move: List[dict],
+        moved_order_ids: List[int],
         new_supplies: Dict[Tuple[str, str], str],
-        user: dict
+        user: dict,
+        invalid_status_orders: List[dict] = None,
+        failed_movement_orders: List[dict] = None
     ) -> None:
         """
         Обрабатывает интеграцию с внешними системами.
-        - Для финальных: снятие резерва + отправка в 1C
-        - Для висячих: создание резерва с перемещением
+        - Для финальных: снятие резерва + отправка в 1C (успешно перемещённые + заблокированные)
+        - Для висячих: создание резерва с перемещением (только успешно перемещённые)
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом (для финального режима)
+            failed_movement_orders: Заказы с ошибкой перемещения (НЕ отправляются)
         """
+        if invalid_status_orders is None:
+            invalid_status_orders = []
+        if failed_movement_orders is None:
+            failed_movement_orders = []
+        # Фильтруем только успешно перемещенные заказы
+        successfully_moved_orders = [
+            order for order in selected_orders_for_move
+            if order['id'] in moved_order_ids
+        ]
+
+        logger.info(
+            f"Интеграция с внешними системами: "
+            f"всего отобрано {len(selected_orders_for_move)}, "
+            f"успешно перемещено {len(successfully_moved_orders)}, "
+            f"заблокировано {len(invalid_status_orders)}"
+        )
+
+        if not successfully_moved_orders and not invalid_status_orders:
+            logger.warning("⚠️ Нет заказов для интеграции с внешними системами")
+            return
+
         if getattr(request_data, 'move_to_final', False):
             logger.info("=== РЕЖИМ: ПЕРЕВОД В ФИНАЛЬНЫЙ КРУГ ===")
 
-            # 1. НОВОЕ: Снимаем резерв с исходных поставок
-            shipped_goods_response = await self._release_reserve_for_final_move(
-                selected_orders_for_move
-            )
-            logger.info(f"Снято резервов: {len(shipped_goods_response)}")
+            # 1. НОВОЕ: Снимаем резерв с исходных поставок (только для успешно перемещенных)
+            if successfully_moved_orders:
+                shipped_goods_response = await self._release_reserve_for_final_move(
+                    successfully_moved_orders
+                )
+                logger.info(f"Снято резервов: {len(shipped_goods_response)}")
 
-            # 2. Отправляем данные в 1C + shipment API
+            # 2. НОВОЕ: Подготавливаем заблокированные заказы для отгрузки (с оригинальным supply_id)
+            # Важно: failed_movement_orders НЕ включаем, т.к. неясно их состояние
+            blocked_orders_for_shipment = self._prepare_blocked_orders_for_shipment(
+                invalid_status_orders,
+                []  # failed_movement_orders не отгружаем
+            )
+
+            logger.info(
+                f"Подготовлено для отгрузки: "
+                f"{len(successfully_moved_orders)} успешно перемещённых + "
+                f"{len(blocked_orders_for_shipment)} заблокированных = "
+                f"{len(successfully_moved_orders) + len(blocked_orders_for_shipment)} всего"
+            )
+
+            # 3. Обновляем supply_id для успешно перемещённых (на новые поставки)
+            updated_moved_orders = self._update_orders_with_new_supply_ids(
+                successfully_moved_orders, new_supplies
+            )
+
+            # 4. НОВОЕ: Объединяем обе группы для отправки в 1C/Shipment
+            all_orders_for_shipment = updated_moved_orders + blocked_orders_for_shipment
+
+            # 5. НОВОЕ: Создаём supplies_dict с ОБОИМИ типами поставок (новые + старые)
             supplies_dict = {
                 supply_id: account
                 for (wild_code, account), supply_id in new_supplies.items()
             }
 
-            updated_orders = self._update_orders_with_new_supply_ids(
-                selected_orders_for_move, new_supplies
+            # Добавляем старые supply_id из заблокированных заказов
+            for order in blocked_orders_for_shipment:
+                old_supply_id = order.get('supply_id')
+                account = order.get('account')
+                if old_supply_id and account and old_supply_id not in supplies_dict:
+                    supplies_dict[old_supply_id] = account
+                    logger.debug(f"Добавлен старый supply_id в словарь: {old_supply_id} ({account})")
+
+            logger.info(
+                f"Отправка в 1C/Shipment: "
+                f"{len(all_orders_for_shipment)} заказов, "
+                f"{len(supplies_dict)} уникальных поставок"
             )
 
+            # 6. Отправляем данные в 1C + shipment API (обе группы)
             shipment_success = await self._send_shipment_data_to_external_systems(
-                updated_orders,
+                all_orders_for_shipment,
                 supplies_dict,
                 user.get('username', 'unknown')
             )
@@ -2043,9 +2407,9 @@ class SuppliesService:
         else:
             logger.info("=== РЕЖИМ: ПЕРЕВОД В ВИСЯЧИЙ ===")
 
-            # НОВОЕ: Создаем резерв с перемещением для висячих поставок
+            # НОВОЕ: Создаем резерв с перемещением для висячих поставок (только для успешно перемещенных)
             reserve_success = await self._create_reserve_with_movement_for_wilds(
-                selected_orders_for_move,
+                successfully_moved_orders,
                 new_supplies,
                 user
             )
@@ -2274,6 +2638,54 @@ class SuppliesService:
         
         return updated_orders
 
+    def _prepare_blocked_orders_for_shipment(
+        self,
+        invalid_status_orders: List[dict],
+        failed_movement_orders: List[dict]
+    ) -> List[dict]:
+        """
+        Подготавливает заблокированные заказы для отгрузки с их ОРИГИНАЛЬНЫМ supply_id.
+
+        Эти заказы не смогли переместиться в новую поставку, но их всё равно нужно
+        отгрузить в 1C/Shipment с номером той поставки, где они изначально находились.
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом (complete/cancel и т.д.)
+            failed_movement_orders: Заказы, которые упали при попытке перемещения
+
+        Returns:
+            List[dict]: Заказы с оригинальным supply_id, готовые для отгрузки
+        """
+        blocked_orders = []
+
+        # Объединяем обе группы заблокированных заказов
+        all_blocked = invalid_status_orders + failed_movement_orders
+
+        for order in all_blocked:
+            prepared_order = order.copy()
+
+            # Убеждаемся что supply_id есть (используем original_supply_id)
+            if 'supply_id' not in prepared_order:
+                prepared_order['supply_id'] = prepared_order.get('original_supply_id', '')
+
+            # Если supply_id пустой, используем original_supply_id
+            if not prepared_order.get('supply_id'):
+                prepared_order['supply_id'] = prepared_order.get('original_supply_id', '')
+
+            blocked_orders.append(prepared_order)
+
+            logger.debug(
+                f"Заказ {order['id']} подготовлен для отгрузки "
+                f"с оригинальным supply_id={prepared_order.get('supply_id')}"
+            )
+
+        logger.info(
+            f"Подготовлено {len(blocked_orders)} заблокированных заказов "
+            f"для отгрузки с оригинальными supply_id"
+        )
+
+        return blocked_orders
+
     def _create_empty_result(self, message: str) -> Dict[str, Any]:
         """Создает результат для случая отсутствия заказов."""
         return {
@@ -2281,14 +2693,53 @@ class SuppliesService:
             "message": message,
             "removed_order_ids": [],
             "processed_supplies": 0,
-            "processed_wilds": 0
+            "processed_wilds": 0,
+            # Статистика (все нули для пустого результата)
+            "total_orders": 0,
+            "successful_count": 0,
+            "invalid_status_count": 0,
+            "blocked_but_shipped_count": 0,
+            "failed_movement_count": 0,
+            "total_failed_count": 0
         }
 
     def _create_success_result(self, moved_order_ids: List[int],
                              new_supplies: Dict[Tuple[str, str], str],
-                             selected_orders_for_move: List[dict]) -> Dict[str, Any]:
-        """Создает успешный результат операции."""
-        logger.info(f"Перемещение завершено. Успешно перемещено {len(moved_order_ids)} заказов")
+                             selected_orders_for_move: List[dict],
+                             invalid_status_orders: List[dict],
+                             failed_movement_orders: List[dict]) -> Dict[str, Any]:
+        """
+        Создает успешный результат операции с полной статистикой.
+
+        Args:
+            moved_order_ids: ID успешно перемещенных заказов
+            new_supplies: Созданные целевые поставки
+            selected_orders_for_move: Все отобранные для перемещения заказы
+            invalid_status_orders: Заказы с невалидным статусом WB
+            failed_movement_orders: Заказы с ошибками при перемещении
+
+        Returns:
+            Dict с результатами операции и статистикой
+        """
+        total_orders = len(selected_orders_for_move)
+        successful_count = len(moved_order_ids)
+        invalid_status_count = len(invalid_status_orders)
+        failed_movement_count = len(failed_movement_orders)
+        total_failed = invalid_status_count + failed_movement_count
+
+        # Заблокированные заказы отгружаются ТОЛЬКО в финальном режиме
+        # В режиме висячего круга они не отгружаются
+        blocked_but_shipped_count = invalid_status_count  # Все невалидные = заблокированные но отгруженные
+
+        logger.info(
+            f"=== ИТОГОВАЯ СТАТИСТИКА ПЕРЕМЕЩЕНИЯ ===\n"
+            f"  Всего заказов: {total_orders}\n"
+            f"  Успешно перемещено: {successful_count}\n"
+            f"  Невалидный статус WB: {invalid_status_count}\n"
+            f"  Заблокировано но отгружено: {blocked_but_shipped_count}\n"
+            f"  Ошибки при перемещении: {failed_movement_count}\n"
+            f"  Всего неудач: {total_failed}"
+        )
 
         # Формируем детали перемещенных заказов для внутреннего использования (логирование статусов)
         moved_orders_details = []
@@ -2302,13 +2753,33 @@ class SuppliesService:
                     'wild': order['wild_code']
                 })
 
+        # Определяем сообщение с учетом ошибок
+        if total_failed == 0:
+            message = f"✅ Все заказы ({successful_count}) успешно перемещены"
+        else:
+            message = (
+                f"⚠️ Перемещено {successful_count} из {total_orders} заказов. "
+                f"Не перемещено: {total_failed} (невалидный статус: {invalid_status_count}, "
+                f"ошибки перемещения: {failed_movement_count})"
+            )
+
         return {
             "success": True,
-            "message": f"Операция перемещения выполнена. Перемещено {len(moved_order_ids)} заказов",
+            "message": message,
             "removed_order_ids": moved_order_ids,
             "processed_supplies": len(new_supplies),
             "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),
-            "_moved_orders_details": moved_orders_details  # Внутреннее поле для логирования
+            # Статистика (вместо подробных списков заказов)
+            "total_orders": total_orders,
+            "successful_count": successful_count,
+            "invalid_status_count": invalid_status_count,
+            "blocked_but_shipped_count": blocked_but_shipped_count,
+            "failed_movement_count": failed_movement_count,
+            "total_failed_count": total_failed,
+            # Внутренние поля для логирования (не включаются в API response)
+            "_moved_orders_details": moved_orders_details,
+            "_invalid_status_orders": invalid_status_orders,
+            "_failed_movement_orders": failed_movement_orders
         }
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:

@@ -521,3 +521,166 @@ class OrderStatusService:
         except Exception as e:
             logger.error(f"Ошибка логирования частичной отгрузки: {str(e)}")
             return 0
+
+    async def log_blocked_orders_status(
+        self,
+        invalid_status_orders: List[Dict[str, Any]],
+        failed_movement_orders: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Логирует блокированные заказы (с невалидным статусом или ошибками перемещения).
+
+        Используется после move_orders_between_supplies() для логирования заказов,
+        которые не удалось переместить из-за:
+        - Невалидного статуса WB (supplierStatus != "new"/"confirm")
+        - Ошибок при попытке перемещения
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом WB
+                [
+                    {
+                        'order_id': 12345,
+                        'account': 'acc1',
+                        'supplier_status': 'complete',  # или 'cancel', 'not_found', и т.д.
+                        'original_supply_id': 'WB-GI-123'
+                    },
+                    ...
+                ]
+            failed_movement_orders: Заказы с ошибками при перемещении
+                [
+                    {
+                        'order_id': 67890,
+                        'account': 'acc2',
+                        'original_supply_id': 'WB-GI-456',
+                        'error': 'Текст ошибки'
+                    },
+                    ...
+                ]
+
+        Returns:
+            int: Количество залогированных заказов
+
+        Note:
+            Статусы блокировки определяются по supplier_status:
+            - 'complete' -> BLOCKED_ALREADY_DELIVERED
+            - 'cancel' -> BLOCKED_CANCELED
+            - другие -> BLOCKED_INVALID_STATUS
+        """
+        if not invalid_status_orders and not failed_movement_orders:
+            logger.debug("Нет блокированных заказов для логирования")
+            return 0
+
+        try:
+            prepared_data = []
+
+            # 1. Обрабатываем заказы с невалидным статусом WB
+            for order in invalid_status_orders:
+                supplier_status = order.get('supplier_status', 'unknown')
+
+                # Определяем тип блокировки по supplier_status
+                if supplier_status == 'complete':
+                    status = OrderStatus.BLOCKED_ALREADY_DELIVERED
+                elif supplier_status == 'cancel':
+                    status = OrderStatus.BLOCKED_CANCELED
+                else:
+                    status = OrderStatus.BLOCKED_INVALID_STATUS
+
+                prepared_data.append({
+                    'order_id': order['order_id'],
+                    'status': status.value,
+                    'supply_id': order.get('original_supply_id'),
+                    'account': order['account']
+                })
+
+            # 2. Обрабатываем заказы с ошибками перемещения (тоже блокируем как INVALID_STATUS)
+            for order in failed_movement_orders:
+                prepared_data.append({
+                    'order_id': order['order_id'],
+                    'status': OrderStatus.BLOCKED_INVALID_STATUS.value,
+                    'supply_id': order.get('original_supply_id'),
+                    'account': order['account']
+                })
+
+            # 3. Вставляем в БД через модель
+            if prepared_data:
+                count = await self.status_log.insert_orders_batch(prepared_data)
+
+                logger.info(
+                    f"Залогировано {count} блокированных заказов "
+                    f"(невалидный статус: {len(invalid_status_orders)}, "
+                    f"ошибки перемещения: {len(failed_movement_orders)})"
+                )
+
+                return count
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Ошибка логирования блокированных заказов: {str(e)}")
+            return 0
+
+    async def log_shipped_with_block_status(
+        self,
+        invalid_status_orders: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Логирует заблокированные заказы, которые были отгружены с оригинальным supply_id.
+
+        Используется в режиме финального круга, когда заказы с невалидным статусом
+        (complete/cancel) не смогли переместиться, но были отгружены в 1C/Shipment
+        с номером поставки, где они изначально находились.
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом WB, которые были отгружены
+                [
+                    {
+                        'id': 12345,  # или 'order_id'
+                        'account': 'acc1',
+                        'supply_id': 'WB-GI-123',  # оригинальный supply_id
+                        ...
+                    },
+                    ...
+                ]
+
+        Returns:
+            int: Количество залогированных заказов
+
+        Note:
+            Этот метод вызывается ПОСЛЕ log_blocked_orders_status() и ТОЛЬКО в режиме
+            финального круга (move_to_final=True)
+        """
+        if not invalid_status_orders:
+            logger.debug("Нет заблокированных заказов для логирования SHIPPED_WITH_BLOCK")
+            return 0
+
+        try:
+            prepared_data = []
+
+            # Обрабатываем заказы с невалидным статусом, которые были отгружены
+            for order in invalid_status_orders:
+                # Поддерживаем оба варианта ключа (id или order_id)
+                order_id = order.get('id') or order.get('order_id')
+
+                prepared_data.append({
+                    'order_id': order_id,
+                    'status': OrderStatus.SHIPPED_WITH_BLOCK.value,
+                    'supply_id': order.get('supply_id') or order.get('original_supply_id'),
+                    'account': order['account']
+                })
+
+            # Вставляем в БД через модель
+            if prepared_data:
+                count = await self.status_log.insert_orders_batch(prepared_data)
+
+                logger.info(
+                    f"Залогировано {count} заблокированных заказов со статусом SHIPPED_WITH_BLOCK "
+                    f"(отгружены с оригинальным supply_id)"
+                )
+
+                return count
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Ошибка логирования SHIPPED_WITH_BLOCK: {str(e)}")
+            return 0

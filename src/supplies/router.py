@@ -404,22 +404,66 @@ async def move_orders_between_supplies(
         supply_service = SuppliesService(db)
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
 
-        if moved_orders_details := result.pop('_moved_orders_details', None):
-            status_service = OrderStatusService(db)
+        # Извлекаем внутренние данные для логирования (не включаются в API response)
+        moved_orders_details = result.pop('_moved_orders_details', None)
+        invalid_status_orders = result.pop('_invalid_status_orders', [])
+        failed_movement_orders = result.pop('_failed_movement_orders', [])
+
+        status_service = OrderStatusService(db)
+
+        # Логируем успешно перемещенные заказы
+        if moved_orders_details:
             logged_count = await status_service.process_and_log_moved_orders(
                 moved_orders_details,
                 request_data.move_to_final
             )
             logger.info(
-                f"Залогировано {logged_count} заказов со статусом "
+                f"Залогировано {logged_count} успешно перемещенных заказов со статусом "
                 f"{'IN_FINAL_SUPPLY' if request_data.move_to_final else 'IN_HANGING_SUPPLY'}"
             )
 
+        # Логируем блокированные заказы (с невалидным статусом или ошибками)
+        if invalid_status_orders or failed_movement_orders:
+            blocked_count = await status_service.log_blocked_orders_status(
+                invalid_status_orders,
+                failed_movement_orders
+            )
+            logger.info(
+                f"Залогировано {blocked_count} блокированных заказов "
+                f"(невалидный статус: {len(invalid_status_orders)}, "
+                f"ошибки перемещения: {len(failed_movement_orders)})"
+            )
+
+            # НОВОЕ: Если финальный режим, логируем SHIPPED_WITH_BLOCK для невалидных заказов
+            # Эти заказы были отгружены в 1C/Shipment с оригинальным supply_id
+            if request_data.move_to_final and invalid_status_orders:
+                shipped_with_block_count = await status_service.log_shipped_with_block_status(
+                    invalid_status_orders
+                )
+                logger.info(
+                    f"Залогировано {shipped_with_block_count} заблокированных заказов "
+                    f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
+                )
+
         session_updated = None
         if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
+            # НОВОЕ: В финальном режиме также удаляем из сессии заблокированные заказы
+            # (они были отгружены в 1C/Shipment с оригинальным supply_id)
+            removed_order_ids = result["removed_order_ids"].copy()
+
+            if request_data.move_to_final and invalid_status_orders:
+                # Добавляем ID заблокированных заказов
+                blocked_order_ids = [order.get('id') or order.get('order_id') for order in invalid_status_orders]
+                removed_order_ids.extend(blocked_order_ids)
+                logger.info(
+                    f"Удаление из сессии: {len(result['removed_order_ids'])} перемещённых + "
+                    f"{len(blocked_order_ids)} заблокированных (отгружены) = "
+                    f"{len(removed_order_ids)} всего"
+                )
+
             session_updated = await SupplyOperationsDB.update_response_data_after_move(
                 request_data.operation_id,
-                result["removed_order_ids"]
+                removed_order_ids
             )
 
         return MoveOrdersResponse(
@@ -428,6 +472,12 @@ async def move_orders_between_supplies(
             removed_order_ids=result.get("removed_order_ids", []),
             processed_supplies=result.get("processed_supplies", 0),
             processed_wilds=result.get("processed_wilds", 0),
+            total_orders=result.get("total_orders", 0),
+            successful_count=result.get("successful_count", 0),
+            invalid_status_count=result.get("invalid_status_count", 0),
+            blocked_but_shipped_count=result.get("blocked_but_shipped_count", 0),
+            failed_movement_count=result.get("failed_movement_count", 0),
+            total_failed_count=result.get("total_failed_count", 0),
             session_updated=session_updated
         )
 

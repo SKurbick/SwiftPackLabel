@@ -23,7 +23,7 @@ class Orders(Account):
     async def can_add_to_supply(self, order_id: int) -> bool:
         """
         Проверяет, можно ли добавить сборочное задание в поставку.
-        
+
         :param order_id: ID сборочного задания
         :return: True если можно добавить, False если нельзя
         """
@@ -33,26 +33,107 @@ class Orders(Account):
             # Получаем статус заказа
             orders_response = await self.get_orders_statuses([order_id])
             orders_data = orders_response.get("orders", [])
-            
+
             if not orders_data:
                 logger.warning(f"Не найден статус для заказа {order_id}")
                 return False
-            
+
             order_status = orders_data[0]
             supplier_status = order_status.get("supplierStatus")
-            
+
             # Проверяем supplier_status - можно добавлять "new" и "confirm"
             allowed_statuses = ["new", "confirm"]
             if supplier_status not in allowed_statuses:
                 logger.info(f"Заказ {order_id} нельзя добавить в поставку: статус '{supplier_status}' (нужен {allowed_statuses})")
                 return False
-            
+
             logger.info(f"Заказ {order_id} можно добавить в поставку (статус: supplier='{supplier_status}')")
             return True
-            
+
         except Exception as e:
             logger.error(f"Ошибка проверки статуса заказа {order_id}: {e}")
             return False
+
+    async def can_add_to_supply_batch(self, order_ids: list[int]) -> dict[int, dict[str, any]]:
+        """
+        Проверяет можно ли добавить список заказов в поставку (batch проверка).
+
+        :param order_ids: Список ID сборочных заданий (максимум 1000)
+        :return: Dict[order_id, {"can_add": bool, "supplier_status": str, "wb_status": str}]
+        """
+        if not order_ids:
+            return {}
+
+        # Защита от превышения лимита WB API
+        if len(order_ids) > 1000:
+            logger.error(
+                f"Попытка проверить {len(order_ids)} заказов за один раз. "
+                f"Максимум 1000. Используйте батчинг в вызывающем коде."
+            )
+            raise ValueError(
+                f"can_add_to_supply_batch() поддерживает максимум 1000 заказов за запрос. "
+                f"Получено: {len(order_ids)}. Используйте батчинг."
+            )
+
+        self.async_client.retries = 90
+        self.async_client.delay = 61
+
+        try:
+            # Получаем статусы всех заказов одним запросом (WB API поддерживает до 1000 заказов)
+            orders_response = await self.get_orders_statuses(order_ids)
+            orders_data = orders_response.get("orders", [])
+
+            result = {}
+            allowed_statuses = ["new", "confirm"]
+
+            # Обрабатываем полученные статусы
+            for order in orders_data:
+                order_id = order.get("id")
+                supplier_status = order.get("supplierStatus", "unknown")
+                wb_status = order.get("wbStatus", "unknown")
+
+                can_add = supplier_status in allowed_statuses
+
+                result[order_id] = {
+                    "can_add": can_add,
+                    "supplier_status": supplier_status,
+                    "wb_status": wb_status
+                }
+
+                if not can_add:
+                    logger.info(
+                        f"Заказ {order_id} нельзя добавить: "
+                        f"supplierStatus='{supplier_status}', wbStatus='{wb_status}'"
+                    )
+
+            # Заказы не найденные в ответе помечаем как недоступные
+            for order_id in order_ids:
+                if order_id not in result:
+                    logger.warning(f"Заказ {order_id} не найден в WB API")
+                    result[order_id] = {
+                        "can_add": False,
+                        "supplier_status": "not_found",
+                        "wb_status": "not_found"
+                    }
+
+            logger.info(
+                f"Batch проверка статусов: {len(order_ids)} заказов, "
+                f"валидных: {sum(1 for r in result.values() if r['can_add'])}"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Ошибка batch проверки статусов: {e}")
+            # В случае ошибки помечаем все заказы как недоступные
+            return {
+                order_id: {
+                    "can_add": False,
+                    "supplier_status": "error",
+                    "wb_status": "error"
+                }
+                for order_id in order_ids
+            }
 
     async def get_stickers_to_orders(self, supply, order_ids: list[int]):
         logger.info(f"Getting stickers for supply {supply}, account {self.account}, orders count: {len(order_ids)}")

@@ -184,6 +184,13 @@ class MoveOrdersResponse(BaseSchema):
     removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
     processed_supplies: int = Field(description="Количество обработанных поставок")
     processed_wilds: int = Field(description="Количество обработанных wild-кодов")
+    # Статистика выполнения (вместо подробных списков заказов)
+    total_orders: int = Field(description="Общее количество заказов, отобранных для перемещения")
+    successful_count: int = Field(description="Количество успешно перемещенных заказов")
+    invalid_status_count: int = Field(description="Количество заказов с невалидным статусом WB")
+    blocked_but_shipped_count: int = Field(description="Количество заблокированных заказов, отгруженных с оригинальным supply_id")
+    failed_movement_count: int = Field(description="Количество заказов с ошибками при перемещении")
+    total_failed_count: int = Field(description="Общее количество неудачных попыток (невалидный статус + ошибки)")
     session_updated: Optional[bool] = Field(
         None,
         description="Был ли обновлен request_payload в исходной сессии"
