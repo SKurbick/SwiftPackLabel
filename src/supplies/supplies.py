@@ -1947,24 +1947,31 @@ class SuppliesService:
                 })
                 continue
 
-            # Финальная проверка: result должен быть валидным dict
-            if not isinstance(result, dict):
-                error_msg = f"Неожиданный тип ответа: {type(result).__name__}"
-                logger.error(f"Некорректный ответ для заказа {order_id} ({account}): {error_msg}")
-                failed_orders.append({
-                    'order_id': order_id,
-                    'account': account,
-                    'wild_code': wild_code,
-                    'original_supply_id': original_supply_id,
-                    'new_supply_id': new_supply_id,
-                    'error': error_msg,
-                    'reason': 'invalid_response_type'
-                })
+            # Проверка на успешный ответ: пустая строка (код 204) означает успех
+            if isinstance(result, str) and result == "":
+                # Успешное перемещение (WB API вернул 204 с пустым телом)
+                moved_order_ids.append(order_id)
+                logger.info(f"Заказ {order_id} ({account}, {wild_code}) успешно перемещен из {original_supply_id} в {new_supply_id}")
                 continue
 
-            # Успешное перемещение
-            moved_order_ids.append(order_id)
-            logger.info(f"Заказ {order_id} ({account}, {wild_code}) перемещен из {original_supply_id} в {new_supply_id}")
+            # Если result - это dict с успешным статусом, тоже считаем успехом
+            if isinstance(result, dict) and not result.get('error') and result.get('success') != False:
+                moved_order_ids.append(order_id)
+                logger.info(f"Заказ {order_id} ({account}, {wild_code}) перемещен из {original_supply_id} в {new_supply_id}")
+                continue
+
+            # Любой другой случай - ошибка
+            error_msg = f"Неожиданный ответ API: {type(result).__name__} = {result}"
+            logger.error(f"Некорректный ответ для заказа {order_id} ({account}): {error_msg}")
+            failed_orders.append({
+                'order_id': order_id,
+                'account': account,
+                'wild_code': wild_code,
+                'original_supply_id': original_supply_id,
+                'new_supply_id': new_supply_id,
+                'error': error_msg,
+                'reason': 'invalid_response_type'
+            })
 
         logger.info(f"Результат перемещения: успешно {len(moved_order_ids)}, неудачно {len(failed_orders)}")
         return moved_order_ids, failed_orders
