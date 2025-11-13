@@ -2832,9 +2832,11 @@ class SuppliesService:
 
         for order in selected_orders:
             supply_id = order["supply_id"]
-            supply_orders[supply_id]["order_ids"].append(order["order_id"])
+            # Поддерживаем оба варианта ключа (для заблокированных заказов - 'id', для обычных - 'order_id')
+            order_id = order.get('id') if 'id' in order else order.get('order_id')
+            supply_orders[supply_id]["order_ids"].append(order_id)
             supply_orders[supply_id]["account"] = order["account"]
-            order_wild_map[str(order["order_id"])] = process_local_vendor_code(order["article"])
+            order_wild_map[str(order_id)] = process_local_vendor_code(order["article"])
 
         return dict(supply_orders), order_wild_map
 
