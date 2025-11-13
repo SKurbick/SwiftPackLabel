@@ -435,31 +435,50 @@ async def move_orders_between_supplies(
             )
 
             # НОВОЕ: Если финальный режим, логируем SHIPPED_WITH_BLOCK для невалидных заказов
-            # Эти заказы были отгружены в 1C/Shipment с оригинальным supply_id
+            # НО ТОЛЬКО если отгрузка в 1C/Shipment прошла успешно!
             if request_data.move_to_final and invalid_status_orders:
-                shipped_with_block_count = await status_service.log_shipped_with_block_status(
-                    invalid_status_orders
-                )
-                logger.info(
-                    f"Залогировано {shipped_with_block_count} заблокированных заказов "
-                    f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
-                )
+                shipment_success = result.get('_shipment_success', False)
+                if shipment_success:
+                    shipped_with_block_count = await status_service.log_shipped_with_block_status(
+                        invalid_status_orders
+                    )
+                    logger.info(
+                        f"Залогировано {shipped_with_block_count} заблокированных заказов "
+                        f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
+                    )
+                else:
+                    logger.error(
+                        f"❌ КРИТИЧНО: Отгрузка {len(invalid_status_orders)} заблокированных заказов НЕ удалась! "
+                        f"Статус SHIPPED_WITH_BLOCK НЕ записан. Заказы остаются в сессии."
+                    )
 
         session_updated = None
         if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
             # НОВОЕ: В финальном режиме также удаляем из сессии заблокированные заказы
-            # (они были отгружены в 1C/Shipment с оригинальным supply_id)
+            # НО ТОЛЬКО если они реально были отгружены в 1C/Shipment!
             removed_order_ids = result["removed_order_ids"].copy()
 
             if request_data.move_to_final and invalid_status_orders:
-                # Добавляем ID заблокированных заказов
-                blocked_order_ids = [order.get('id') or order.get('order_id') for order in invalid_status_orders]
-                removed_order_ids.extend(blocked_order_ids)
-                logger.info(
-                    f"Удаление из сессии: {len(result['removed_order_ids'])} перемещённых + "
-                    f"{len(blocked_order_ids)} заблокированных (отгружены) = "
-                    f"{len(removed_order_ids)} всего"
-                )
+                shipment_success = result.get('_shipment_success', False)
+                if shipment_success:
+                    # Отгрузка успешна - удаляем заблокированные заказы из сессии
+                    blocked_order_ids = [
+                        order.get('id') if 'id' in order else order.get('order_id')
+                        for order in invalid_status_orders
+                        if order.get('id') is not None or order.get('order_id') is not None
+                    ]
+                    removed_order_ids.extend(blocked_order_ids)
+                    logger.info(
+                        f"Удаление из сессии: {len(result['removed_order_ids'])} перемещённых + "
+                        f"{len(blocked_order_ids)} заблокированных (отгружены) = "
+                        f"{len(removed_order_ids)} всего"
+                    )
+                else:
+                    # Отгрузка НЕ удалась - НЕ удаляем заблокированные заказы
+                    logger.warning(
+                        f"⚠️ Отгрузка не удалась: {len(invalid_status_orders)} заблокированных заказов "
+                        f"ОСТАЮТСЯ в сессии для повторной попытки"
+                    )
 
             session_updated = await SupplyOperationsDB.update_response_data_after_move(
                 request_data.operation_id,

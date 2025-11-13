@@ -2001,7 +2001,7 @@ class SuppliesService:
         )
 
         # 5. Отправка данных во внешние системы (успешно перемещенные + заблокированные)
-        await self._process_external_systems_integration(
+        shipment_success, blocked_prepared_count = await self._process_external_systems_integration(
             request_data, selected_orders_for_move, moved_order_ids, new_supplies, user,
             invalid_status_orders, failed_movement_orders
         )
@@ -2009,7 +2009,8 @@ class SuppliesService:
         # 6. Возврат результата со статистикой
         return self._create_success_result(
             moved_order_ids, new_supplies, selected_orders_for_move,
-            invalid_status_orders, failed_movement_orders
+            invalid_status_orders, failed_movement_orders,
+            request_data.move_to_final, shipment_success, blocked_prepared_count
         )
 
     async def _prepare_orders_for_move(self, request_data) -> Tuple[List[dict], Set[Tuple[str, str]]]:
@@ -2086,7 +2087,8 @@ class SuppliesService:
         # Группируем по supplierStatus
         by_status = defaultdict(list)
         for inv in invalid_orders:
-            status = inv['supplier_status']
+            # Используем правильное имя поля из структуры invalid_status_orders
+            status = inv.get('blocked_supplier_status', inv.get('supplier_status', 'unknown'))
             by_status[status].append(inv)
 
         for status, orders in by_status.items():
@@ -2095,7 +2097,9 @@ class SuppliesService:
             # Группируем по аккаунтам
             by_account = defaultdict(list)
             for order in orders:
-                by_account[order['account']].append(order['order_id'])
+                # Поддерживаем оба варианта: 'id' (invalid_status_orders) и 'order_id' (failed_movement_orders)
+                order_id = order.get('id') if 'id' in order else order.get('order_id')
+                by_account[order['account']].append(order_id)
 
             for account, order_ids in by_account.items():
                 logger.warning(f"  {account}: {order_ids[:10]}")
@@ -2310,7 +2314,7 @@ class SuppliesService:
         user: dict,
         invalid_status_orders: List[dict] = None,
         failed_movement_orders: List[dict] = None
-    ) -> None:
+    ) -> Tuple[Optional[bool], int]:
         """
         Обрабатывает интеграцию с внешними системами.
         - Для финальных: снятие резерва + отправка в 1C (успешно перемещённые + заблокированные)
@@ -2319,6 +2323,9 @@ class SuppliesService:
         Args:
             invalid_status_orders: Заказы с невалидным статусом (для финального режима)
             failed_movement_orders: Заказы с ошибкой перемещения (НЕ отправляются)
+
+        Returns:
+            Tuple[Optional[bool], int]: (shipment_success для финального режима или None, количество подготовленных заблокированных заказов)
         """
         if invalid_status_orders is None:
             invalid_status_orders = []
@@ -2339,7 +2346,7 @@ class SuppliesService:
 
         if not successfully_moved_orders and not invalid_status_orders:
             logger.warning("⚠️ Нет заказов для интеграции с внешними системами")
-            return
+            return None, 0
 
         if getattr(request_data, 'move_to_final', False):
             logger.info("=== РЕЖИМ: ПЕРЕВОД В ФИНАЛЬНЫЙ КРУГ ===")
@@ -2404,6 +2411,9 @@ class SuppliesService:
                 logger.info("✅ Данные об отгрузке успешно отправлены в внешние системы")
             else:
                 logger.warning("⚠️ Не удалось отправить данные об отгрузке в внешние системы")
+
+            # Возвращаем результат отгрузки и количество подготовленных заблокированных заказов
+            return shipment_success, len(blocked_orders_for_shipment)
         else:
             logger.info("=== РЕЖИМ: ПЕРЕВОД В ВИСЯЧИЙ ===")
 
@@ -2418,6 +2428,9 @@ class SuppliesService:
                 logger.info("✅ Резерв с перемещением успешно создан для висячих поставок")
             else:
                 logger.warning("⚠️ Не удалось создать резерв с перемещением")
+
+            # В висячем режиме заблокированные заказы не отгружаются
+            return None, 0
 
     async def _create_reserve_with_movement_for_wilds(
         self,
@@ -2672,10 +2685,22 @@ class SuppliesService:
             if not prepared_order.get('supply_id'):
                 prepared_order['supply_id'] = prepared_order.get('original_supply_id', '')
 
+            # Поддерживаем оба варианта ключа для логирования
+            order_id = order.get('id') if 'id' in order else order.get('order_id')
+
+            # Проверяем критичную ситуацию: отсутствие supply_id
+            if not prepared_order.get('supply_id'):
+                logger.error(
+                    f"❌ КРИТИЧНО: Заказ {order_id} не может быть отгружен - "
+                    f"отсутствует supply_id и original_supply_id! "
+                    f"Это приведёт к некорректному учёту остатков!"
+                )
+                continue  # Пропускаем такой заказ
+
             blocked_orders.append(prepared_order)
 
             logger.debug(
-                f"Заказ {order['id']} подготовлен для отгрузки "
+                f"Заказ {order_id} подготовлен для отгрузки "
                 f"с оригинальным supply_id={prepared_order.get('supply_id')}"
             )
 
@@ -2707,7 +2732,10 @@ class SuppliesService:
                              new_supplies: Dict[Tuple[str, str], str],
                              selected_orders_for_move: List[dict],
                              invalid_status_orders: List[dict],
-                             failed_movement_orders: List[dict]) -> Dict[str, Any]:
+                             failed_movement_orders: List[dict],
+                             move_to_final: bool,
+                             shipment_success: Optional[bool],
+                             blocked_prepared_count: int) -> Dict[str, Any]:
         """
         Создает успешный результат операции с полной статистикой.
 
@@ -2717,6 +2745,9 @@ class SuppliesService:
             selected_orders_for_move: Все отобранные для перемещения заказы
             invalid_status_orders: Заказы с невалидным статусом WB
             failed_movement_orders: Заказы с ошибками при перемещении
+            move_to_final: Режим финальной поставки
+            shipment_success: Успешность отгрузки в 1C/Shipment (только для финального режима)
+            blocked_prepared_count: Количество реально подготовленных заблокированных заказов
 
         Returns:
             Dict с результатами операции и статистикой
@@ -2727,9 +2758,12 @@ class SuppliesService:
         failed_movement_count = len(failed_movement_orders)
         total_failed = invalid_status_count + failed_movement_count
 
-        # Заблокированные заказы отгружаются ТОЛЬКО в финальном режиме
-        # В режиме висячего круга они не отгружаются
-        blocked_but_shipped_count = invalid_status_count  # Все невалидные = заблокированные но отгруженные
+        # ИСПРАВЛЕНО: Заблокированные заказы отгружаются ТОЛЬКО в финальном режиме
+        # И только те, которые реально были подготовлены (с валидным supply_id)
+        if move_to_final:
+            blocked_but_shipped_count = blocked_prepared_count  # Реальное количество подготовленных
+        else:
+            blocked_but_shipped_count = 0  # В висячем режиме не отгружаем
 
         logger.info(
             f"=== ИТОГОВАЯ СТАТИСТИКА ПЕРЕМЕЩЕНИЯ ===\n"
@@ -2779,7 +2813,8 @@ class SuppliesService:
             # Внутренние поля для логирования (не включаются в API response)
             "_moved_orders_details": moved_orders_details,
             "_invalid_status_orders": invalid_status_orders,
-            "_failed_movement_orders": failed_movement_orders
+            "_failed_movement_orders": failed_movement_orders,
+            "_shipment_success": shipment_success  # Успешность отгрузки в 1C/Shipment (только для финального режима)
         }
 
     def _group_orders_by_supply(self, selected_orders: List[dict]) -> Tuple[Dict[str, dict], Dict[str, str]]:
