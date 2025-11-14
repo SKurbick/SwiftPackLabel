@@ -2983,7 +2983,7 @@ class SuppliesService:
 
         integration = OneCIntegration(self.db)
         integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
-        integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
+        integration_success = isinstance(integration_result, dict) and integration_result.get("code") == 200
 
         if not integration_success:
             logger.error(f"Ошибка интеграции с 1C: {integration_result}")
@@ -3919,7 +3919,7 @@ class SuppliesService:
             # 5. Отправляем в 1C
             integration = OneCIntegration(self.db)
             integration_result = await integration.format_delivery_data(delivery_supplies, order_wild_map)
-            integration_success = isinstance(integration_result, dict) and integration_result.get("status_code") == 200
+            integration_success = isinstance(integration_result, dict) and integration_result.get("code") == 200
 
             logger.info(f"Фиктивная отгрузка: shipment_api={shipment_success}, 1c_integration={integration_success}")
             return shipment_success and integration_success
