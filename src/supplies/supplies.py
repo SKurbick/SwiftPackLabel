@@ -2253,6 +2253,13 @@ class SuppliesService:
         if invalid_orders:
             self._log_invalid_orders_by_status(invalid_orders)
 
+        # НОРМАЛИЗАЦИЯ: Добавляем 'order_id' для совместимости с методами отправки в 1C/Shipment
+        # Заблокированные заказы имеют ключ 'id', но многие методы ожидают 'order_id'
+        # Делаем это ОДИН РАЗ здесь, чтобы все последующие методы работали единообразно
+        for invalid_order in invalid_orders:
+            if 'order_id' not in invalid_order:
+                invalid_order['order_id'] = invalid_order['id']
+
         return valid_orders, invalid_orders
 
     async def _execute_orders_move(self, selected_orders_for_move: List[dict],
