@@ -2812,10 +2812,30 @@ class SuppliesService:
                 f"ошибки перемещения: {failed_movement_count})"
             )
 
+        # Формируем список removed_order_ids с учётом заблокированных заказов в финальном режиме
+        final_removed_order_ids = moved_order_ids.copy()
+
+        # В финальном режиме, если отгрузка успешна, добавляем заблокированные заказы
+        if move_to_final and shipment_success:
+            blocked_order_ids = []
+            # Добавляем ID из invalid_status_orders
+            for order in invalid_status_orders:
+                order_id = order.get('order_id', order.get('id'))
+                if order_id:
+                    blocked_order_ids.append(order_id)
+            # Добавляем ID из failed_movement_orders
+            for order in failed_movement_orders:
+                order_id = order.get('order_id', order.get('id'))
+                if order_id:
+                    blocked_order_ids.append(order_id)
+
+            final_removed_order_ids.extend(blocked_order_ids)
+            logger.info(f"Добавлено {len(blocked_order_ids)} заблокированных заказов в removed_order_ids (финальный режим, успешная отгрузка)")
+
         return {
             "success": True,
             "message": message,
-            "removed_order_ids": moved_order_ids,
+            "removed_order_ids": final_removed_order_ids,
             "processed_supplies": len(new_supplies),
             "processed_wilds": len({order['wild_code'] for order in selected_orders_for_move}),
             # Статистика (вместо подробных списков заказов)
