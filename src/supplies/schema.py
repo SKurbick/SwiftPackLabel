@@ -64,6 +64,8 @@ class SupplyIdResult(SupplyBase):
                                          description="Количество отгруженных товаров (только для висячих поставок)")
     is_fictitious_delivered: Optional[bool] = Field(None,
                                                     description="Флаг фиктивной доставки (только для висячих поставок)")
+    canceled_order_ids: Optional[List[int]] = Field(None,
+                                                     description="Список order_id отмененных заказов (wb_status = canceled/canceled_by_client)")
 
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:

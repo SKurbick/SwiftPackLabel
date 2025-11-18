@@ -22,6 +22,7 @@ from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
 from src.models.final_supplies import FinalSupplies
 from src.models.delivered_supplies import DeliveredSupplies
+from src.models.assembly_task_status import AssemblyTaskStatus
 from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
@@ -524,6 +525,11 @@ class SuppliesService:
     async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
         """
         Фильтрует список поставок по признаку "висячая".
+
+        НОВОЕ: Добавлена валидация статусов заказов из assembly_task_status:
+        - Вычисляет canceled_order_ids (wb_status = canceled/canceled_by_client)
+        - Скрывает полностью отгруженные поставки: shipped_count >= (count - canceled_count)
+
         Args:
             supplies_data: Список поставок для фильтрации
             hanging_only: Если True - оставить только висячие поставки, если False - только обычные (не висячие)
@@ -533,17 +539,51 @@ class SuppliesService:
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
 
+        # ========================================
+        # НОВОЕ: Получаем статусы заказов из assembly_task_status
+        # ========================================
+        if hanging_only:
+            # Собираем все order_id для висячих поставок, группируем по аккаунтам
+            orders_by_account = defaultdict(set)  # {account: {order_id1, order_id2, ...}}
+            supply_orders_map = {}  # {(supply_id, account): [order_ids]}
+
+            for supply in supplies_data:
+                key = (supply['supply_id'], supply['account'])
+                if key in hanging_supplies_map:
+                    order_ids = [
+                        order['id'] if isinstance(order, dict) else order.id
+                        for order in supply.get('orders', [])
+                    ]
+                    supply_orders_map[key] = order_ids
+                    orders_by_account[supply['account']].update(order_ids)
+
+            # Получаем статусы батчем для каждого аккаунта
+            statuses_cache = {}  # {account: {order_id: {'wb_status': '...', 'supplier_status': '...'}}}
+            assembly_task_status_service = AssemblyTaskStatus(self.db)
+
+            for account, order_ids_set in orders_by_account.items():
+                if order_ids_set:
+                    order_ids_list = list(order_ids_set)
+                    statuses = await assembly_task_status_service.get_order_statuses_batch(account, order_ids_list)
+                    statuses_cache[account] = statuses
+                    logger.info(
+                        f"Получено {len(statuses)} статусов для аккаунта {account} "
+                        f"из {len(order_ids_list)} запрошенных заказов"
+                    )
+
         target_wilds = {}
         filtered_supplies = []
+
         for supply in supplies_data:
             is_hanging = (supply['supply_id'], supply['account']) in hanging_supplies_map
 
             if hanging_only == is_hanging:
                 if hanging_only:
                     supply["is_hanging"] = True
+                    key = (supply['supply_id'], supply['account'])
 
                     # Добавляем количество отгруженных товаров
-                    hanging_supply_data = hanging_supplies_map[(supply['supply_id'], supply['account'])]
+                    hanging_supply_data = hanging_supplies_map[key]
                     fictitious_shipped_order_ids = hanging_supply_data.get('fictitious_shipped_order_ids', [])
 
                     # Десериализуем fictitious_shipped_order_ids если это строка JSON
@@ -566,6 +606,42 @@ class SuppliesService:
                     # Добавляем информацию о фиктивной доставке
                     supply["is_fictitious_delivered"] = hanging_supply_data.get('is_fictitious_delivered', False)
 
+                    # ========================================
+                    # НОВОЕ: Вычисляем отмененные заказы
+                    # ========================================
+                    canceled_order_ids = []
+                    order_ids = supply_orders_map.get(key, [])
+                    account_statuses = statuses_cache.get(supply['account'], {})
+
+                    for order_id in order_ids:
+                        status_data = account_statuses.get(order_id, {})
+                        wb_status = status_data.get('wb_status')
+
+                        # Блокируем только canceled и canceled_by_client
+                        if wb_status in ['canceled', 'canceled_by_client']:
+                            canceled_order_ids.append(order_id)
+
+                    supply["canceled_order_ids"] = canceled_order_ids
+
+                    # ========================================
+                    # НОВОЕ: Проверяем полноту отгрузки и скрываем если всё отгружено
+                    # ========================================
+                    count = len(supply.get('orders', []))
+                    canceled_count = len(canceled_order_ids)
+                    shipped_count = supply["shipped_count"]
+                    available_to_ship = count - canceled_count
+
+                    is_fully_shipped = (shipped_count >= available_to_ship)
+
+                    if is_fully_shipped:
+                        logger.info(
+                            f"Скрываем полностью отгруженную поставку {supply['supply_id']} (аккаунт {supply['account']}): "
+                            f"shipped={shipped_count}, available={available_to_ship} "
+                            f"(count={count}, canceled={canceled_count})"
+                        )
+                        continue  # Не добавляем в результат - скрываем поставку!
+
+                    # Проверка на target_wilds (оставляем без изменений)
                     has_target_wild = any(
                         (order.local_vendor_code if hasattr(order, 'local_vendor_code') else order.get('local_vendor_code')) in target_wilds
                         for order in supply.get('orders', [])
@@ -3866,15 +3942,43 @@ class SuppliesService:
                                       fictitious_shipped_ids: Dict[Tuple[str, str], List[int]]) -> List[Dict]:
         """
         Фильтрует и сортирует заказы.
-        
+
+        НОВОЕ: Добавлена проверка статусов из assembly_task_status:
+        - Исключает заказы с wb_status = 'canceled' или 'canceled_by_client'
+        - Разрешает заказы без записи в assembly_task_status
+        - Логирует отмененные заказы
+
         Args:
             all_orders: Все заказы из поставок
             fictitious_shipped_ids: Словарь уже отгруженных order_id по (supply_id, account)
-            
+
         Returns:
             List[Dict]: Отсортированный список доступных заказов
         """
+        # ========================================
+        # НОВОЕ: Получаем статусы из assembly_task_status
+        # ========================================
+        # Собираем order_id по аккаунтам для батч-запроса
+        orders_by_account = defaultdict(set)  # {account: {order_id1, order_id2, ...}}
+        for order in all_orders:
+            orders_by_account[order['account']].add(order['id'])
+
+        # Получаем статусы батчем для каждого аккаунта
+        statuses_cache = {}  # {account: {order_id: {'wb_status': '...', 'supplier_status': '...'}}}
+        assembly_task_status_service = AssemblyTaskStatus(self.db)
+
+        for account, order_ids_set in orders_by_account.items():
+            if order_ids_set:
+                order_ids_list = list(order_ids_set)
+                statuses = await assembly_task_status_service.get_order_statuses_batch(account, order_ids_list)
+                statuses_cache[account] = statuses
+
+        # ========================================
+        # Фильтруем заказы
+        # ========================================
         available_orders = []
+        canceled_orders = []  # Для логирования
+
         for order in all_orders:
             supply_id = order['supply_id']
             account = order['account']
@@ -3882,10 +3986,59 @@ class SuppliesService:
             shipped_key = (supply_id, account)
             shipped_ids = set(fictitious_shipped_ids.get(shipped_key, []))
 
-            if order_id not in shipped_ids:
-                available_orders.append(order)
+            # Проверка 1: Заказ уже был фиктивно отгружен?
+            if order_id in shipped_ids:
+                continue  # Пропускаем
 
-        # Сортируем по времени создания (старые сначала)
+            # Проверка 2: НОВОЕ - Заказ отменен в assembly_task_status?
+            account_statuses = statuses_cache.get(account, {})
+            status_data = account_statuses.get(order_id, {})
+            wb_status = status_data.get('wb_status')
+
+            # Блокируем только заказы со статусом canceled или canceled_by_client
+            if wb_status in ['canceled', 'canceled_by_client']:
+                canceled_orders.append({
+                    'order_id': order_id,
+                    'supply_id': supply_id,
+                    'account': account,
+                    'wb_status': wb_status,
+                    'supplier_status': status_data.get('supplier_status')
+                })
+                continue  # Пропускаем отмененные
+
+            # Заказ валидный - добавляем в доступные
+            available_orders.append(order)
+
+        # ========================================
+        # Логирование результатов фильтрации
+        # ========================================
+        total_orders = len(all_orders)
+        already_shipped = total_orders - len(available_orders) - len(canceled_orders)
+
+        logger.info(
+            f"Фильтрация заказов для фиктивной отгрузки: "
+            f"всего={total_orders}, "
+            f"доступно={len(available_orders)}, "
+            f"уже отгружено={already_shipped}, "
+            f"отменено={len(canceled_orders)}"
+        )
+
+        if canceled_orders:
+            canceled_ids = [o['order_id'] for o in canceled_orders]
+            logger.warning(
+                f"Исключено {len(canceled_orders)} отмененных заказов: {canceled_ids[:10]}"
+                f"{'...' if len(canceled_ids) > 10 else ''}"
+            )
+            # Детальное логирование первых 5 отмененных заказов
+            for canceled in canceled_orders[:5]:
+                logger.debug(
+                    f"Отмененный заказ {canceled['order_id']}: "
+                    f"supply_id={canceled['supply_id']}, "
+                    f"wb_status={canceled['wb_status']}, "
+                    f"supplier_status={canceled['supplier_status']}"
+                )
+
+        # Сортируем по времени создания (старые сначала - FIFO)
         available_orders.sort(key=lambda x: x.get('createdAt', ''))
         return available_orders
 
