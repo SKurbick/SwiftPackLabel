@@ -551,7 +551,7 @@ class SuppliesService:
                 key = (supply['supply_id'], supply['account'])
                 if key in hanging_supplies_map:
                     order_ids = [
-                        order['id'] if isinstance(order, dict) else order.id
+                        order['order_id'] if isinstance(order, dict) else order.order_id
                         for order in supply.get('orders', [])
                     ]
                     supply_orders_map[key] = order_ids
