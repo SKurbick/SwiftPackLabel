@@ -3863,11 +3863,28 @@ class SuppliesService:
         # 3. Фильтруем доступные заказы (упрощенная логика)
         available_orders = await self._filter_and_sort_orders(all_orders, fictitious_shipped_ids)
 
-        # 4. Валидация количества
-        if len(available_orders) < shipped_quantity:
+        # 4. Валидация и автокоррекция количества
+        if len(available_orders) == 0:
+            # Критическая ошибка - нет доступных заказов для отгрузки
+            canceled_count = len(all_orders) - len(available_orders)
             raise HTTPException(
                 status_code=400,
-                detail=f"Недостаточно доступных заказов. Доступно: {len(available_orders)}, запрошено: {shipped_quantity}"
+                detail=f"Нет доступных заказов для отгрузки. "
+                       f"Всего заказов: {len(all_orders)}, "
+                       f"отменено/уже отгружено: {canceled_count}"
+            )
+
+        original_quantity = shipped_quantity
+        if len(available_orders) < shipped_quantity:
+            # Автокоррекция: отгружаем максимум доступных заказов
+            shipped_quantity = len(available_orders)
+            canceled_count = len(all_orders) - len(available_orders)
+
+            logger.warning(
+                f"⚠️ АВТОКОРРЕКЦИЯ КОЛИЧЕСТВА: запрошено отгрузить {original_quantity} заказов, "
+                f"но доступно только {shipped_quantity}. "
+                f"Причина: {canceled_count} заказов отменены или уже отгружены. "
+                f"Будет отгружено {shipped_quantity} заказов."
             )
 
         # 5. Выбираем заказы по количеству (старые сначала)
