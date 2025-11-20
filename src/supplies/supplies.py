@@ -604,56 +604,88 @@ class SuppliesService:
                         supply["shipped_count"] = 0
 
                     # Добавляем информацию о фиктивной доставке
-                    supply["is_fictitious_delivered"] = hanging_supply_data.get('is_fictitious_delivered', False)
+                    is_fictitious_delivered = hanging_supply_data.get('is_fictitious_delivered', False)
+                    supply["is_fictitious_delivered"] = is_fictitious_delivered
 
                     # ========================================
-                    # СТРОГАЯ ВАЛИДАЦИЯ: разрешаем только supplier_status='complete' AND wb_status='waiting'
+                    # СТРОГАЯ ВАЛИДАЦИЯ: применяется ТОЛЬКО для поставок в доставке (is_fictitious_delivered=True)
                     # ========================================
-                    blocked_order_ids = []  # Все невалидные заказы
-                    valid_order_ids = []    # Валидные заказы (для подсчета)
-                    order_ids = supply_orders_map.get(key, [])
-                    account_statuses = statuses_cache.get(supply['account'], {})
+                    if is_fictitious_delivered:
+                        # Поставка в статусе доставки - применяем строгую валидацию
+                        blocked_order_ids = []  # Все невалидные заказы
+                        valid_order_ids = []    # Валидные заказы (для подсчета)
+                        order_ids = supply_orders_map.get(key, [])
+                        account_statuses = statuses_cache.get(supply['account'], {})
 
-                    for order_id in order_ids:
-                        status_data = account_statuses.get(order_id, {})
-                        supplier_status = status_data.get('supplier_status')
-                        wb_status = status_data.get('wb_status')
+                        for order_id in order_ids:
+                            status_data = account_statuses.get(order_id, {})
+                            supplier_status = status_data.get('supplier_status')
+                            wb_status = status_data.get('wb_status')
 
-                        # Разрешаем ТОЛЬКО конкретную комбинацию статусов
-                        is_valid_for_delivery = (
-                            supplier_status == 'complete' and wb_status == 'waiting'
-                        )
+                            # Разрешаем ТОЛЬКО конкретную комбинацию статусов
+                            is_valid_for_delivery = (
+                                supplier_status == 'complete' and wb_status == 'waiting'
+                            )
 
-                        if not is_valid_for_delivery:
-                            blocked_order_ids.append(order_id)
-                        else:
-                            valid_order_ids.append(order_id)
+                            if not is_valid_for_delivery:
+                                blocked_order_ids.append(order_id)
+                            else:
+                                valid_order_ids.append(order_id)
 
-                    # Используем существующее поле для совместимости с фронтендом
-                    supply["canceled_order_ids"] = blocked_order_ids
+                        # Используем существующее поле для совместимости с фронтендом
+                        supply["canceled_order_ids"] = blocked_order_ids
 
-                    # ========================================
-                    # Проверяем наличие валидных заказов и полноту отгрузки
-                    # ========================================
-                    count = len(supply.get('orders', []))
-                    blocked_count = len(blocked_order_ids)
-                    shipped_count = supply["shipped_count"]
-                    available_to_ship = count - blocked_count  # Валидные, не отгруженные
+                        # Проверяем наличие валидных заказов и полноту отгрузки
+                        count = len(supply.get('orders', []))
+                        blocked_count = len(blocked_order_ids)
+                        shipped_count = supply["shipped_count"]
+                        available_to_ship = count - blocked_count  # Валидные, не отгруженные
 
-                    # Скрываем поставку если:
-                    # 1. Все валидные заказы уже отгружены (shipped_count >= available_to_ship)
-                    # 2. Нет валидных заказов вообще (available_to_ship == 0)
-                    is_fully_processed = (shipped_count >= available_to_ship) or (available_to_ship == 0)
+                        # Скрываем поставку если:
+                        # 1. Все валидные заказы уже отгружены (shipped_count >= available_to_ship)
+                        # 2. Нет валидных заказов вообще (available_to_ship == 0)
+                        is_fully_processed = (shipped_count >= available_to_ship) or (available_to_ship == 0)
 
-                    if is_fully_processed:
-                        reason = 'все отгружено' if shipped_count >= available_to_ship else 'нет валидных заказов'
-                        logger.info(
-                            f"Скрываем поставку {supply['supply_id']} (аккаунт {supply['account']}): "
-                            f"shipped={shipped_count}, blocked={blocked_count}, "
-                            f"available={available_to_ship}, count={count} "
-                            f"(причина: {reason})"
-                        )
-                        continue  # Не добавляем в результат - скрываем поставку!
+                        if is_fully_processed:
+                            reason = 'все отгружено' if shipped_count >= available_to_ship else 'нет валидных заказов'
+                            logger.info(
+                                f"Скрываем поставку в доставке {supply['supply_id']} (аккаунт {supply['account']}): "
+                                f"shipped={shipped_count}, blocked={blocked_count}, "
+                                f"available={available_to_ship}, count={count} "
+                                f"(причина: {reason})"
+                            )
+                            continue  # Не добавляем в результат - скрываем поставку!
+                    else:
+                        # Активная висячая поставка (НЕ в доставке) - старая логика
+                        canceled_order_ids = []
+                        order_ids = supply_orders_map.get(key, [])
+                        account_statuses = statuses_cache.get(supply['account'], {})
+
+                        for order_id in order_ids:
+                            status_data = account_statuses.get(order_id, {})
+                            wb_status = status_data.get('wb_status')
+
+                            # Блокируем только canceled и canceled_by_client (старая логика)
+                            if wb_status in ['canceled', 'canceled_by_client']:
+                                canceled_order_ids.append(order_id)
+
+                        supply["canceled_order_ids"] = canceled_order_ids
+
+                        # Проверяем полноту отгрузки (старая логика)
+                        count = len(supply.get('orders', []))
+                        canceled_count = len(canceled_order_ids)
+                        shipped_count = supply["shipped_count"]
+                        available_to_ship = count - canceled_count
+
+                        is_fully_shipped = (shipped_count >= available_to_ship)
+
+                        if is_fully_shipped:
+                            logger.info(
+                                f"Скрываем полностью отгруженную активную поставку {supply['supply_id']} (аккаунт {supply['account']}): "
+                                f"shipped={shipped_count}, available={available_to_ship} "
+                                f"(count={count}, canceled={canceled_count})"
+                            )
+                            continue  # Не добавляем в результат - скрываем поставку!
 
                     # Проверка на target_wilds (оставляем без изменений)
                     has_target_wild = any(
