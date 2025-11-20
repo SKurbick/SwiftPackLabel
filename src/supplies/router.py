@@ -363,6 +363,21 @@ async def shipment_hanging_actual_quantity(
         supply_service = SuppliesService(db)
         result = await supply_service.shipment_hanging_actual_quantity_implementation(supply_data, user)
 
+        # НОВОЕ: Извлекаем invalid_orders для логирования
+        invalid_orders = result.pop('_invalid_orders', [])
+
+        # НОВОЕ: Логируем заблокированные заказы в order_status_log
+        if invalid_orders:
+            status_service = OrderStatusService(db)
+            blocked_count = await status_service.log_blocked_orders_status(
+                invalid_status_orders=invalid_orders,
+                failed_movement_orders=[]
+            )
+            logger.info(
+                f"Залогировано {blocked_count} заблокированных заказов "
+                f"в order_status_log при отгрузке фактического количества"
+            )
+
         return JSONResponse(
             content=result,
             status_code=status.HTTP_201_CREATED)

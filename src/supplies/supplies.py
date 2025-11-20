@@ -3187,18 +3187,38 @@ class SuppliesService:
             target_article, all_orders = await self._validate_and_get_data(supply_data)
             selected_orders, grouped_orders = self._select_and_group_orders(all_orders, supply_data.shipped_count)
 
-            # 1. Создаем новые поставки и перемещаем заказы
-            new_supplies_map = await self._create_and_transfer_orders(selected_orders, target_article, user)
+            # НОВОЕ: Валидация статусов WB перед отгрузкой
+            valid_orders, invalid_orders = await self._validate_orders_status_before_move(selected_orders)
+
+            logger.info(
+                f"Валидация отобранных заказов: валидных={len(valid_orders)}, "
+                f"заблокированных={len(invalid_orders)} (пропущены)"
+            )
+
+            # Детальное логирование заблокированных
+            if invalid_orders:
+                self._log_invalid_orders_by_status(invalid_orders)
+
+            # Проверка: есть ли валидные заказы
+            if not valid_orders:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Все {len(invalid_orders)} отобранных заказов имеют невалидный статус WB "
+                           f"(complete/cancel). Нет доступных заказов для отгрузки."
+                )
+
+            # 1. Создаем новые поставки и перемещаем ТОЛЬКО валидные заказы
+            new_supplies_map = await self._create_and_transfer_orders(valid_orders, target_article, user)
 
             # 2. Переводим новые поставки в статус доставки
             await self._deliver_new_supplies(new_supplies_map)
 
-            # 3. Обновляем данные заказов с новыми supply_id
-            updated_selected_orders = self._update_orders_with_new_supplies(selected_orders, new_supplies_map)
-            updated_grouped_orders = self.group_selected_orders_by_supply(updated_selected_orders)
+            # 3. Обновляем данные заказов с новыми supply_id (ТОЛЬКО для валидных заказов)
+            updated_valid_orders = self._update_orders_with_new_supplies(valid_orders, new_supplies_map)
+            updated_grouped_orders = self.group_selected_orders_by_supply(updated_valid_orders)
 
             # 4. Подготавливаем данные для 1C и shipment_goods
-            delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_selected_orders)
+            delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_valid_orders)
 
             # 5. Обновляем висячие поставки и получаем product_reserves_id
             shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders)
@@ -3206,15 +3226,14 @@ class SuppliesService:
             # 6. Отправляем данные в shipment API с product_reserves_id
             logger.info(
                 f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
-            await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
+            await self._send_enhanced_shipment_data(updated_valid_orders, shipped_goods_response, user)
 
             # 6.1. Логируем статус PARTIALLY_SHIPPED для частично отгруженных заказов
             if self.db:
-                from src.orders.order_status_service import OrderStatusService
 
                 # Подготавливаем данные для логирования
                 partially_shipped_data = []
-                for order in updated_selected_orders:
+                for order in updated_valid_orders:
                     partially_shipped_data.append({
                         'order_id': order['order_id'],
                         'supply_id': order.get('supply_id'),  # Новый supply_id
@@ -3223,7 +3242,7 @@ class SuppliesService:
 
                 status_service = OrderStatusService(self.db)
                 logged_count = await status_service.process_and_log_partially_shipped(partially_shipped_data)
-                logger.info(f"Залогировано {logged_count} заказов со статусом PARTIALLY_SHIPPED")
+                logger.info(f"Залогировано {logged_count} валидных заказов со статусом PARTIALLY_SHIPPED")
 
             # 6.2. ВАЖНО: НЕ сохраняем фактические поставки как висячие
             # Причина: Реально отгруженные поставки не являются висячими по определению.
@@ -3243,12 +3262,22 @@ class SuppliesService:
 
             # 8. Генерируем PDF со стикерами для новых поставок
             pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article,
-                                                                              updated_selected_orders)
+                                                                              updated_valid_orders)
+
+            # Формируем сообщение с учетом заблокированных
+            if invalid_orders:
+                message = (
+                    f"Отгрузка выполнена: {len(valid_orders)} валидных заказов отгружены, "
+                    f"{len(invalid_orders)} заблокированных пропущены"
+                )
+            else:
+                message = f"Отгрузка выполнена: {len(valid_orders)} заказов отгружены успешно"
 
             response_data = {
                 "success": success,
-                "message": "Отгрузка фактического количества выполнена успешно" if success else "Операция выполнена с ошибками",
-                "processed_orders": len(updated_selected_orders),
+                "message": message,
+                "processed_orders": len(valid_orders),
+                "blocked_orders_count": len(invalid_orders),
                 "processed_supplies": len(updated_grouped_orders),
                 "target_article": target_article,
                 "shipped_count": supply_data.shipped_count,
@@ -3256,11 +3285,16 @@ class SuppliesService:
                 "qr_codes": pdf_stickers,
                 "integration_result": integration_result,
                 "shipment_result": success,
-                "new_supplies": list(new_supplies_map.values())
+                "new_supplies": list(new_supplies_map.values()),
+                "_invalid_orders": invalid_orders  # Для логирования в router
             }
 
-            logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов, "
-                        f"создано {len(new_supplies_map)} новых поставок")
+            logger.info(
+                f"Отгрузка фактического количества завершена: "
+                f"{len(valid_orders)} валидных заказов отгружено, "
+                f"{len(invalid_orders)} заблокированных пропущено, "
+                f"создано {len(new_supplies_map)} новых поставок"
+            )
             return response_data
 
         except HTTPException:
