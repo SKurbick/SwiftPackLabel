@@ -607,37 +607,51 @@ class SuppliesService:
                     supply["is_fictitious_delivered"] = hanging_supply_data.get('is_fictitious_delivered', False)
 
                     # ========================================
-                    # НОВОЕ: Вычисляем отмененные заказы
+                    # СТРОГАЯ ВАЛИДАЦИЯ: разрешаем только supplier_status='complete' AND wb_status='waiting'
                     # ========================================
-                    canceled_order_ids = []
+                    blocked_order_ids = []  # Все невалидные заказы
+                    valid_order_ids = []    # Валидные заказы (для подсчета)
                     order_ids = supply_orders_map.get(key, [])
                     account_statuses = statuses_cache.get(supply['account'], {})
 
                     for order_id in order_ids:
                         status_data = account_statuses.get(order_id, {})
+                        supplier_status = status_data.get('supplier_status')
                         wb_status = status_data.get('wb_status')
 
-                        # Блокируем только canceled и canceled_by_client
-                        if wb_status in ['canceled', 'canceled_by_client']:
-                            canceled_order_ids.append(order_id)
+                        # Разрешаем ТОЛЬКО конкретную комбинацию статусов
+                        is_valid_for_delivery = (
+                            supplier_status == 'complete' and wb_status == 'waiting'
+                        )
 
-                    supply["canceled_order_ids"] = canceled_order_ids
+                        if not is_valid_for_delivery:
+                            blocked_order_ids.append(order_id)
+                        else:
+                            valid_order_ids.append(order_id)
+
+                    # Используем существующее поле для совместимости с фронтендом
+                    supply["canceled_order_ids"] = blocked_order_ids
 
                     # ========================================
-                    # НОВОЕ: Проверяем полноту отгрузки и скрываем если всё отгружено
+                    # Проверяем наличие валидных заказов и полноту отгрузки
                     # ========================================
                     count = len(supply.get('orders', []))
-                    canceled_count = len(canceled_order_ids)
+                    blocked_count = len(blocked_order_ids)
                     shipped_count = supply["shipped_count"]
-                    available_to_ship = count - canceled_count
+                    available_to_ship = count - blocked_count  # Валидные, не отгруженные
 
-                    is_fully_shipped = (shipped_count >= available_to_ship)
+                    # Скрываем поставку если:
+                    # 1. Все валидные заказы уже отгружены (shipped_count >= available_to_ship)
+                    # 2. Нет валидных заказов вообще (available_to_ship == 0)
+                    is_fully_processed = (shipped_count >= available_to_ship) or (available_to_ship == 0)
 
-                    if is_fully_shipped:
+                    if is_fully_processed:
+                        reason = 'все отгружено' if shipped_count >= available_to_ship else 'нет валидных заказов'
                         logger.info(
-                            f"Скрываем полностью отгруженную поставку {supply['supply_id']} (аккаунт {supply['account']}): "
-                            f"shipped={shipped_count}, available={available_to_ship} "
-                            f"(count={count}, canceled={canceled_count})"
+                            f"Скрываем поставку {supply['supply_id']} (аккаунт {supply['account']}): "
+                            f"shipped={shipped_count}, blocked={blocked_count}, "
+                            f"available={available_to_ship}, count={count} "
+                            f"(причина: {reason})"
                         )
                         continue  # Не добавляем в результат - скрываем поставку!
 
@@ -3994,7 +4008,7 @@ class SuppliesService:
         # Фильтруем заказы
         # ========================================
         available_orders = []
-        canceled_orders = []  # Для логирования
+        blocked_orders = []  # Для логирования заблокированных заказов
 
         for order in all_orders:
             supply_id = order['supply_id']
@@ -4007,21 +4021,27 @@ class SuppliesService:
             if order_id in shipped_ids:
                 continue  # Пропускаем
 
-            # Проверка 2: НОВОЕ - Заказ отменен в assembly_task_status?
+            # Проверка 2: СТРОГАЯ ВАЛИДАЦИЯ - разрешаем только supplier_status='complete' AND wb_status='waiting'
             account_statuses = statuses_cache.get(account, {})
             status_data = account_statuses.get(order_id, {})
+            supplier_status = status_data.get('supplier_status')
             wb_status = status_data.get('wb_status')
 
-            # Блокируем только заказы со статусом canceled или canceled_by_client
-            if wb_status in ['canceled', 'canceled_by_client']:
-                canceled_orders.append({
+            # Разрешаем ТОЛЬКО конкретную комбинацию статусов
+            is_valid_for_fictitious_shipment = (
+                supplier_status == 'complete' and wb_status == 'waiting'
+            )
+
+            if not is_valid_for_fictitious_shipment:
+                blocked_orders.append({
                     'order_id': order_id,
                     'supply_id': supply_id,
                     'account': account,
                     'wb_status': wb_status,
-                    'supplier_status': status_data.get('supplier_status')
+                    'supplier_status': supplier_status,
+                    'block_reason': f"Required: supplier_status='complete' AND wb_status='waiting', Got: supplier_status='{supplier_status}', wb_status='{wb_status}'"
                 })
-                continue  # Пропускаем отмененные
+                continue  # Блокируем все кроме разрешенной комбинации
 
             # Заказ валидный - добавляем в доступные
             available_orders.append(order)
@@ -4030,29 +4050,34 @@ class SuppliesService:
         # Логирование результатов фильтрации
         # ========================================
         total_orders = len(all_orders)
-        already_shipped = total_orders - len(available_orders) - len(canceled_orders)
+        already_shipped = total_orders - len(available_orders) - len(blocked_orders)
 
         logger.info(
-            f"Фильтрация заказов для фиктивной отгрузки: "
+            f"Фильтрация заказов для фиктивной отгрузки (СТРОГАЯ ВАЛИДАЦИЯ): "
             f"всего={total_orders}, "
             f"доступно={len(available_orders)}, "
             f"уже отгружено={already_shipped}, "
-            f"отменено={len(canceled_orders)}"
+            f"заблокировано (невалидный статус)={len(blocked_orders)}"
         )
 
-        if canceled_orders:
-            canceled_ids = [o['order_id'] for o in canceled_orders]
+        if blocked_orders:
+            blocked_ids = [o['order_id'] for o in blocked_orders]
             logger.warning(
-                f"Исключено {len(canceled_orders)} отмененных заказов: {canceled_ids[:10]}"
-                f"{'...' if len(canceled_ids) > 10 else ''}"
+                f"Исключено {len(blocked_orders)} заказов с невалидными статусами: {blocked_ids[:10]}"
+                f"{'...' if len(blocked_ids) > 10 else ''}"
             )
-            # Детальное логирование первых 5 отмененных заказов
-            for canceled in canceled_orders[:5]:
+            logger.info(
+                f"Разрешены только заказы с supplier_status='complete' AND wb_status='waiting'"
+            )
+
+            # Детальное логирование первых 5 заблокированных заказов
+            for blocked in blocked_orders[:5]:
                 logger.debug(
-                    f"Отмененный заказ {canceled['order_id']}: "
-                    f"supply_id={canceled['supply_id']}, "
-                    f"wb_status={canceled['wb_status']}, "
-                    f"supplier_status={canceled['supplier_status']}"
+                    f"Заблокированный заказ {blocked['order_id']}: "
+                    f"supply_id={blocked['supply_id']}, "
+                    f"wb_status={blocked['wb_status']}, "
+                    f"supplier_status={blocked['supplier_status']}, "
+                    f"reason: {blocked['block_reason']}"
                 )
 
         # Сортируем по времени создания (старые сначала - FIFO)
