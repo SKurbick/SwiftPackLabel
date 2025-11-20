@@ -10,6 +10,7 @@ from PIL import Image
 
 from io import BytesIO
 
+from src.service.service_pdf import collect_images_sticker_to_pdf
 from src.settings import settings
 from src.logger import app_logger as logger
 from src.supplies.integration_1c import OneCIntegration
@@ -23,6 +24,7 @@ from src.models.hanging_supplies import HangingSupplies
 from src.models.final_supplies import FinalSupplies
 from src.models.delivered_supplies import DeliveredSupplies
 from src.models.assembly_task_status import AssemblyTaskStatus
+from src.models.qr_scan_db import QRScanDB
 from src.response import AsyncHttpClient, parse_json
 from fastapi import HTTPException
 
@@ -699,6 +701,69 @@ class SuppliesService:
 
         return filtered_supplies
 
+    async def enrich_orders_with_qr_codes(self, supplies_data: List[Dict]) -> List[Dict]:
+        """
+        Обогащает заказы в поставках QR-кодами из таблицы qr_scans.
+
+        Оптимизация:
+        - Batch-запрос для всех order_ids сразу
+        - Минимальное количество обращений к БД
+
+        Args:
+            supplies_data: Список поставок с заказами
+
+        Returns:
+            Обогащенный список поставок (изменяет in-place и возвращает)
+        """
+        if not supplies_data:
+            return supplies_data
+
+        # ============ Шаг 1: Собираем все order_ids ============
+        all_order_ids = []
+        order_supply_map = {}  # {order_id: (supply_index, order_index)}
+
+        for supply_idx, supply in enumerate(supplies_data):
+            for order_idx, order in enumerate(supply.get('orders', [])):
+                # Извлекаем order_id (поддержка dict и Pydantic модели)
+                order_id = order['order_id'] if isinstance(order, dict) else order.order_id
+                all_order_ids.append(order_id)
+                order_supply_map[order_id] = (supply_idx, order_idx)
+
+        if not all_order_ids:
+            logger.debug("Нет заказов для обогащения QR-кодами")
+            return supplies_data
+
+        # ============ Шаг 2: Получаем QR-коды batch-запросом ============
+        qr_scan_db = QRScanDB(self.db)
+
+        logger.debug(f"Получение QR-кодов для {len(all_order_ids)} заказов")
+        qr_codes = await qr_scan_db.get_qr_codes_by_order_ids(all_order_ids)
+
+        # ============ Шаг 3: Обогащаем заказы QR-кодами ============
+        enriched_count = 0
+
+        for order_id, qr_code in qr_codes.items():
+            if order_id not in order_supply_map:
+                continue
+
+            supply_idx, order_idx = order_supply_map[order_id]
+            order = supplies_data[supply_idx]['orders'][order_idx]
+
+            # Устанавливаем QR-код (поддержка dict и Pydantic модели)
+            if isinstance(order, dict):
+                order['qr_code'] = qr_code
+            else:
+                order.qr_code = qr_code
+
+            enriched_count += 1
+
+        logger.info(
+            f"Обогащено {enriched_count} заказов QR-кодами из {len(all_order_ids)} общих "
+            f"({enriched_count / len(all_order_ids) * 100:.1f}% покрытие)"
+        )
+
+        return supplies_data
+
     async def get_list_supplies(self, hanging_only: bool = False, is_delivery: bool = False) -> SupplyIdResponseSchema:
         """
         Получить список поставок с фильтрацией по висячим и доставке.
@@ -827,7 +892,11 @@ class SuppliesService:
 
         # Финальная фильтрация
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
-        return SupplyIdResponseSchema(supplies=filtered_result)
+
+        # Обогащение QR-кодами
+        enriched_result = await self.enrich_orders_with_qr_codes(filtered_result)
+
+        return SupplyIdResponseSchema(supplies=enriched_result)
 
     async def get_delivery_supplies_ids_only(self, hanging_only: bool = False) -> Set[str]:
         """
@@ -3233,23 +3302,164 @@ class SuppliesService:
             target_article, all_orders = await self._validate_and_get_data(supply_data)
             selected_orders, grouped_orders = self._select_and_group_orders(all_orders, supply_data.shipped_count)
 
-            # 1. Создаем новые поставки и перемещаем заказы
-            new_supplies_map = await self._create_and_transfer_orders(selected_orders, target_article, user)
+            # 1. Создаем ЧЕРНОВЫЕ поставки (БЕЗ перемещения заказов)
+            logger.info(f"=== СОЗДАНИЕ ЧЕРНОВЫХ ПОСТАВОК ДЛЯ ПОЛУЧЕНИЯ СТИКЕРОВ ===")
 
-            # 2. Переводим новые поставки в статус доставки
+            orders_by_account = defaultdict(list)
+            for order in selected_orders:
+                account = order["account"]
+                orders_by_account[account].append(order)
+
+            new_supplies_map = {}
+            wb_tokens = get_wb_tokens()
+
+            for account, orders in orders_by_account.items():
+                timestamp = datetime.now().strftime("%d.%m.%Y_%H:%M")
+                supply_name = f"Факт_{target_article}_{timestamp}_{user.get('username', 'auto')}"
+
+                logger.info(f"Создание черновой поставки '{supply_name}' для {account}")
+
+                supplies_api = Supplies(account, wb_tokens[account])
+                create_response = await supplies_api.create_supply(supply_name)
+
+                if create_response.get("errors"):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Ошибка создания поставки для {account}: {create_response['errors']}"
+                    )
+
+                new_supply_id = create_response.get("id")
+                if not new_supply_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Не получен ID новой поставки для {account}"
+                    )
+
+                logger.info(f"Создана черновая поставка {new_supply_id} для {account}")
+                new_supplies_map[account] = new_supply_id
+
+            # 2. Получаем стикеры ДО перемещения заказов
+            logger.info(f"=== ПОЛУЧЕНИЕ СТИКЕРОВ ДЛЯ {len(selected_orders)} ЗАКАЗОВ ===")
+
+            orders_by_supply = defaultdict(list)
+            for order in selected_orders:
+                account = order["account"]
+                if account in new_supplies_map:
+                    new_supply_id = new_supplies_map[account]
+                    orders_by_supply[(account, new_supply_id)].append(order)
+
+            supplies_list = []
+            for (account, supply_id), orders in orders_by_supply.items():
+                order_schemas = [
+                    OrderSchema(
+                        order_id=order["order_id"],
+                        nm_id=order.get("nm_id", 0),
+                        local_vendor_code=target_article,
+                        createdAt=order.get("createdAt", "")
+                    )
+                    for order in orders
+                ]
+
+                supplies_list.append(
+                    SupplyId(
+                        name="",
+                        createdAt="",
+                        supply_id=supply_id,
+                        account=account,
+                        count=len(order_schemas),
+                        orders=order_schemas
+                    )
+                )
+
+            if not supplies_list:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Не удалось подготовить данные для получения стикеров"
+                )
+
+            supply_ids_schema = SupplyIdBodySchema(supplies=supplies_list)
+            stickers_raw = await self.get_stickers(supply_ids_schema)
+            stickers_grouped = self.group_result(stickers_raw)
+
+            # 3. Извлекаем _received_order_ids
+            received_order_ids = set()
+            for account_data in stickers_grouped.values():
+                for supply_data in account_data.values():
+                    received_ids = supply_data.get('_received_order_ids', [])
+                    received_order_ids.update(received_ids)
+
+            logger.info(f"Стикеры получены: {len(received_order_ids)} из {len(selected_orders)} заказов")
+
+            # 4. Фильтруем заказы - отгружаем ТОЛЬКО те что получили стикеры
+            orders_with_stickers = [
+                order for order in selected_orders
+                if order['order_id'] in received_order_ids
+            ]
+
+            orders_without_stickers = [
+                order for order in selected_orders
+                if order['order_id'] not in received_order_ids
+            ]
+
+            # 5. Обработка случаев без стикеров
+            if not orders_with_stickers:
+                logger.error(
+                    f"❌ КРИТИЧЕСКАЯ ОШИБКА: Ни один из {len(selected_orders)} заказов "
+                    f"не получил стикеры от WB API"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Невозможно выполнить фактическую отгрузку: "
+                        f"ни один из {len(selected_orders)} заказов не получил стикеры от WB API. "
+                        f"Возможные причины: заказы больше не в статусе 'confirm', проблемы с WB API. "
+                        f"Черновые поставки {list(new_supplies_map.values())} будут автоматически удалены."
+                    )
+                )
+
+            if orders_without_stickers:
+                logger.warning(
+                    f"⚠️ ЧАСТИЧНАЯ ОТГРУЗКА: {len(orders_without_stickers)} заказов не получили стикеры. "
+                    f"Будет отгружено только {len(orders_with_stickers)} заказов. "
+                    f"Заказы без стикеров: {[o['order_id'] for o in orders_without_stickers]}"
+                )
+
+            logger.info(f"Продолжаем с {len(orders_with_stickers)} заказами которые получили стикеры")
+
+            # 6. Перемещаем ТОЛЬКО заказы со стикерами
+            logger.info(f"=== ПЕРЕМЕЩЕНИЕ ЗАКАЗОВ СО СТИКЕРАМИ В ПОСТАВКИ ===")
+            for account, orders in orders_by_account.items():
+                if account not in new_supplies_map:
+                    continue
+
+                supply_id = new_supplies_map[account]
+                supplies_api = Supplies(account, wb_tokens[account])
+
+                # Фильтруем только заказы со стикерами для этого аккаунта
+                orders_to_move = [o for o in orders if o['order_id'] in received_order_ids]
+
+                logger.info(f"Перемещение {len(orders_to_move)} заказов в поставку {supply_id} ({account})")
+
+                for order in orders_to_move:
+                    order_id = order["order_id"]
+                    await supplies_api.add_order_to_supply(supply_id, order_id)
+                    logger.debug(f"Заказ {order_id} перемещен в поставку {supply_id}")
+
+            # 7. Переводим новые поставки в статус доставки
             await self._deliver_new_supplies(new_supplies_map)
 
-            # 3. Обновляем данные заказов с новыми supply_id
-            updated_selected_orders = self._update_orders_with_new_supplies(selected_orders, new_supplies_map)
+            # 8. Обновляем данные заказов с новыми supply_id (ТОЛЬКО orders_with_stickers!)
+            updated_selected_orders = self._update_orders_with_new_supplies(orders_with_stickers, new_supplies_map)
             updated_grouped_orders = self.group_selected_orders_by_supply(updated_selected_orders)
 
-            # 4. Подготавливаем данные для 1C и shipment_goods
+            # 9. Подготавливаем данные для 1C и shipment_goods
             delivery_supplies, order_wild_map = self.prepare_data_for_delivery_optimized(updated_selected_orders)
 
-            # 5. Обновляем висячие поставки и получаем product_reserves_id
-            shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders)
+            # 10. Обновляем висячие поставки (используем orders_with_stickers для правильного подсчета)
+            grouped_orders_with_stickers = self.group_selected_orders_by_supply(orders_with_stickers)
+            shipped_goods_response = await self._update_hanging_supplies_shipped_quantities(grouped_orders_with_stickers)
 
-            # 6. Отправляем данные в shipment API с product_reserves_id
+            # 11. Отправляем данные в shipment API с product_reserves_id (ТОЛЬКО orders_with_stickers!)
             logger.info(
                 f"Отправка данных в shipment API с product_reserves_id и автором '{user.get('username', 'unknown')}'")
             await self._send_enhanced_shipment_data(updated_selected_orders, shipped_goods_response, user)
@@ -3283,21 +3493,33 @@ class SuppliesService:
             #   - Путанице для операторов (реальные поставки в списке висячих)
             logger.info(f"Фактические поставки {list(new_supplies_map.values())} НЕ сохраняются как висячие (уже реально отгружены)")
 
-            # 7. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
+            # 12. Отправляем в 1C (БЕЗ повторной отправки в shipment API)
             integration_result, success = await self._process_shipment(updated_grouped_orders, delivery_supplies,
                                                                        order_wild_map, user, skip_shipment_api=True)
 
-            # 8. Генерируем PDF со стикерами для новых поставок
-            pdf_stickers = await self._generate_pdf_stickers_for_new_supplies(new_supplies_map, target_article,
-                                                                              updated_selected_orders)
+            # 13. Генерируем PDF переиспользуя УЖЕ полученные стикеры
+            logger.info(f"=== ГЕНЕРАЦИЯ PDF ИЗ УЖЕ ПОЛУЧЕННЫХ СТИКЕРОВ ===")
+            try:
+                self.union_results_stickers(supply_ids_schema, stickers_grouped)
+                grouped_stickers = await self.group_orders_to_wild(supply_ids_schema)
+                stickers_pdf = await collect_images_sticker_to_pdf(grouped_stickers)
+                pdf_stickers = base64.b64encode(stickers_pdf.getvalue()).decode('utf-8')
+                logger.info(f"PDF стикеры сгенерированы для {len(grouped_stickers)} wild-кодов")
+            except Exception as e:
+                logger.error(f"Ошибка генерации PDF стикеров: {str(e)}")
+                pdf_stickers = ""
 
             response_data = {
                 "success": success,
-                "message": "Отгрузка фактического количества выполнена успешно" if success else "Операция выполнена с ошибками",
-                "processed_orders": len(updated_selected_orders),
+                "message": (
+                    f"Отгрузка выполнена: {len(orders_with_stickers)} заказов отгружено"
+                    + (f", {len(orders_without_stickers)} заказов без стикеров пропущено" if orders_without_stickers else "")
+                ),
+                "processed_orders": len(orders_with_stickers),
                 "processed_supplies": len(updated_grouped_orders),
                 "target_article": target_article,
                 "shipped_count": supply_data.shipped_count,
+                "orders_without_stickers_count": len(orders_without_stickers),
                 "operator": user.get('username', 'unknown'),
                 "qr_codes": pdf_stickers,
                 "integration_result": integration_result,
@@ -3305,8 +3527,11 @@ class SuppliesService:
                 "new_supplies": list(new_supplies_map.values())
             }
 
-            logger.info(f"Отгрузка фактического количества завершена: {len(selected_orders)} заказов, "
-                        f"создано {len(new_supplies_map)} новых поставок")
+            logger.info(
+                f"Отгрузка фактического количества завершена: {len(orders_with_stickers)} заказов отгружено, "
+                f"{len(orders_without_stickers)} без стикеров пропущено, "
+                f"создано {len(new_supplies_map)} новых поставок"
+            )
             return response_data
 
         except HTTPException:
@@ -3920,12 +4145,12 @@ class SuppliesService:
                        f"отменено/уже отгружено: {canceled_count}"
             )
 
-        original_quantity = shipped_quantity
         if len(available_orders) < shipped_quantity:
             # Автокоррекция: отгружаем максимум доступных заказов
             shipped_quantity = len(available_orders)
             canceled_count = len(all_orders) - len(available_orders)
 
+            original_quantity = shipped_quantity
             logger.warning(
                 f"⚠️ АВТОКОРРЕКЦИЯ КОЛИЧЕСТВА: запрошено отгрузить {original_quantity} заказов, "
                 f"но доступно только {shipped_quantity}. "
@@ -3936,19 +4161,79 @@ class SuppliesService:
         # 5. Выбираем заказы по количеству (старые сначала)
         selected_orders = await self._select_orders_by_quantity(available_orders, shipped_quantity)
 
-        # 5.5. НОВЫЙ БЛОК: Генерируем стикеры для выбранных заказов
+        # 5.5. Генерируем стикеры для выбранных заказов
+        logger.info(f"Запрос стикеров для {len(selected_orders)} выбранных заказов")
+        supply_ids_schema = self._convert_selected_orders_to_supply_schema(selected_orders, supplies)
+        stickers_raw = await self.get_stickers(supply_ids_schema)
+        stickers_grouped = self.group_result(stickers_raw)
+
+        # 5.6. Извлекаем список order_ids которые РЕАЛЬНО получили стикеры от WB API
+        received_order_ids = set()
+        for account_data in stickers_grouped.values():
+            for supply_data in account_data.values():
+                received_ids = supply_data.get('_received_order_ids', [])
+                received_order_ids.update(received_ids)
+
+        logger.info(
+            f"Стикеры получены: {len(received_order_ids)} из {len(selected_orders)} заказов"
+        )
+
+        # 5.7. Фильтруем заказы - отгружаем ТОЛЬКО те что получили стикеры
+        orders_with_stickers = [
+            order for order in selected_orders
+            if order['id'] in received_order_ids
+        ]
+
+        # Вычисляем заказы БЕЗ стикеров
+        orders_without_stickers = [
+            order for order in selected_orders
+            if order['id'] not in received_order_ids
+        ]
+
+        # 5.8. Обработка случаев когда стикеры не получены
+        if not orders_with_stickers:
+            # КРИТИЧЕСКАЯ ОШИБКА: Ни один заказ не получил стикеры
+            logger.error(
+                f"❌ КРИТИЧЕСКАЯ ОШИБКА: Ни один из {len(selected_orders)} выбранных заказов "
+                f"не получил стикеры от WB API. Отгрузка невозможна."
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Невозможно выполнить фиктивную отгрузку: "
+                    f"ни один из {len(selected_orders)} выбранных заказов не получил стикеры от WB API. "
+                    f"Возможные причины: заказы больше не в доступном статусе , проблемы с WB API."
+                )
+            )
+
+        if orders_without_stickers:
+            # ЧАСТИЧНАЯ ОТГРУЗКА: Часть заказов не получила стикеры
+            logger.warning(
+                f"⚠️ ЧАСТИЧНАЯ ОТГРУЗКА: {len(orders_without_stickers)} заказов не получили стикеры. "
+                f"Будет отгружено только {len(orders_with_stickers)} заказов. "
+                f"Заказы без стикеров: {[o['id'] for o in orders_without_stickers]}"
+            )
+
+        # 5.9. Генерируем PDF только для заказов со стикерами
         try:
-            stickers_pdf = await self.generate_stickers_for_selected_orders(selected_orders, supplies)
-            logger.info(f"Сгенерированы стикеры для {len(selected_orders)} отгружаемых заказов")
+            self.union_results_stickers(supply_ids_schema, stickers_grouped)
+            grouped_stickers = await self.group_orders_to_wild(supply_ids_schema)
+            stickers_pdf = await collect_images_sticker_to_pdf(grouped_stickers)
+            logger.info(f"PDF стикеры сгенерированы для {len(grouped_stickers)} wild-кодов")
         except Exception as e:
-            logger.error(f"Ошибка генерации стикеров для фиктивной отгрузки: {str(e)}")
-            stickers_pdf = None
+            logger.error(f"Ошибка генерации PDF стикеров: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Невозможно выполнить фиктивную отгрузку: не сгенерирован pdf файл"
+                )
+            )
 
-        # 6. Отправка данных в shipment_of_goods и 1C (вместо имитации)
-        await self._send_shipment_data_to_external_systems(selected_orders, supplies, operator)
+        # 6. Отправка данных в shipment_of_goods и 1C - ТОЛЬКО заказы со стикерами
+        await self._send_shipment_data_to_external_systems(orders_with_stickers, supplies, operator)
 
-        # 7. Сохраняем фиктивно отгруженные order_id в БД
-        await self._save_fictitious_shipped_orders_batch(selected_orders, supplies, operator)
+        # 7. Сохраняем фиктивно отгруженные order_id в БД - ТОЛЬКО заказы со стикерами
+        await self._save_fictitious_shipped_orders_batch(orders_with_stickers, supplies, operator)
 
         # Возвращаем только PDF стикеры
         return {"stickers_pdf": stickers_pdf}

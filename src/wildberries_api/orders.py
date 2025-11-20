@@ -172,6 +172,16 @@ class Orders(Account):
 
         total_stickers = len(result.get(self.account, {}).get(supply, {}).get('stickers', []))
         logger.info(f"Completed getting stickers. Total stickers: {total_stickers}")
+
+        # Добавляем список order_ids которые получили стикеры
+        if result and self.account in result and supply in result[self.account]:
+            received_order_ids = [
+                sticker['orderId'] for sticker in
+                result[self.account][supply].get('stickers', [])
+            ]
+            result[self.account][supply]['_received_order_ids'] = received_order_ids
+            logger.info(f"Successfully received stickers for {len(received_order_ids)} orders")
+
         return result
 
     async def get_new_orders(self):

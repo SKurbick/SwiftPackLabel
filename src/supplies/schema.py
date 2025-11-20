@@ -30,6 +30,7 @@ class OrderSchema(BaseModel):
     order_id: int
     nm_id: int
     createdAt: Optional[str] = None
+    qr_code: Optional[str] = Field(None, description="QR-код стикера (part_a + part_b)")
 
 
 class StickerSchema(OrderSchema):
