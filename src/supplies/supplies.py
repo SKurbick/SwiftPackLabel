@@ -3384,8 +3384,8 @@ class SuppliesService:
             # 3. Извлекаем _received_order_ids
             received_order_ids = set()
             for account_data in stickers_grouped.values():
-                for supply_data in account_data.values():
-                    received_ids = supply_data.get('_received_order_ids', [])
+                for sticker_data in account_data.values():
+                    received_ids = sticker_data.get('_received_order_ids', [])
                     received_order_ids.update(received_ids)
 
             logger.info(f"Стикеры получены: {len(received_order_ids)} из {len(selected_orders)} заказов")
