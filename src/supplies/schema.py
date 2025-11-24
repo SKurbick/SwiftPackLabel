@@ -32,6 +32,19 @@ class OrderSchema(BaseModel):
     createdAt: Optional[str] = None
     qr_code: Optional[str] = Field(None, description="QR-код стикера (part_a + part_b)")
 
+    @field_validator("createdAt", mode="before")
+    @classmethod
+    def convert_to_moscow_time(cls, v: Optional[str]) -> Optional[str]:
+        """Конвертирует UTC время в московское (UTC+3)."""
+        if not v:
+            return v
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            moscow_time = dt + timedelta(hours=3)
+            return moscow_time.strftime("%Y-%m-%dT%H:%M:%S+03:00")
+        except (ValueError, AttributeError):
+            return v
+
 
 class StickerSchema(OrderSchema):
     """Схема для представления информации о стикере, расширяющая OrderSchema."""

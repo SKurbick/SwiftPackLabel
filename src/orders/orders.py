@@ -14,6 +14,7 @@ from src.wildberries_api.orders import Orders
 from src.models.article import ArticleDB
 from src.models.stock import StockDB
 from src.models.hanging_supplies import HangingSupplies
+from src.models.qr_scan_db import QRScanDB
 from src.response import AsyncHttpClient
 from src.settings import settings
 from src.wildberries_api.supplies import Supplies
@@ -465,12 +466,14 @@ class OrdersService:
 
     @staticmethod
     def _prepare_result(orders_added_by_article: Dict[str, List[int]] = None,
-                        order_supply_mapping: Dict[int, Dict[str, str]] = None) -> SupplyAccountWildOut:
+                        order_supply_mapping: Dict[int, Dict[str, str]] = None,
+                        order_qr_map: Dict[int, str] = None) -> SupplyAccountWildOut:
         """
         Формирует результат обработки заказов в новом формате.
         Args:
             orders_added_by_article: Словарь с добавленными заказами по артикулу
             order_supply_mapping: Словарь с маппингом заказа на информацию о поставке
+            order_qr_map: Словарь с маппингом заказа на QR-код (part_a + part_b)
         Returns:
             SupplyAccountWildOut: Результат обработки заказов
         """
@@ -501,7 +504,8 @@ class OrdersService:
         return SupplyAccountWildOut(
             wilds=wilds_info,
             supply_ids=supply_info_list,
-            order_wild_map=order_wild_map
+            order_wild_map=order_wild_map,
+            order_qr_map=order_qr_map or {}
         )
 
     async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]],
@@ -749,7 +753,7 @@ class OrdersService:
         supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
                                            order_supply_mapping)
-        
+
         # Обрабатываем QR-коды для успешно добавленных заказов
         if orders_added_by_article:
             await self._process_qr_codes_for_orders(orders_added_by_article, order_supply_mapping)
@@ -765,17 +769,33 @@ class OrdersService:
             )
             logger.info(f"Результат резервации товаров: {reservation_result}")
 
-        return self._prepare_result(orders_added_by_article, order_supply_mapping)
+        # Получаем QR-коды из БД для всех успешно добавленных заказов
+        order_qr_map = {}
+        if orders_added_by_article:
+            all_order_ids = [
+                order_id
+                for order_ids in orders_added_by_article.values()
+                for order_id in order_ids
+            ]
+            logger.info(f"Получение QR-кодов из БД для {len(all_order_ids)} заказов")
+            order_qr_map = await self._fetch_qr_codes_from_db(all_order_ids)
+
+        return self._prepare_result(orders_added_by_article, order_supply_mapping, order_qr_map)
     
-    async def _process_qr_codes_for_orders(self, 
-                                         orders_added_by_article: Dict[str, List[int]], 
-                                         order_supply_mapping: Dict[int, Dict[str, str]]) -> None:
+    async def _process_qr_codes_for_orders(self,
+                                         orders_added_by_article: Dict[str, List[int]],
+                                         order_supply_mapping: Dict[int, Dict[str, str]]) -> Dict[int, str]:
         """
         Обрабатывает QR-коды для успешно добавленных в поставки заказов.
-        
+
+        После обработки возвращает словарь {order_id: qr_code} полученный из БД.
+
         Args:
             orders_added_by_article: Словарь с успешно добавленными заказами по артикулу
             order_supply_mapping: Словарь с маппингом заказа на информацию о поставке
+
+        Returns:
+            Dict[int, str]: Словарь {order_id: "part_apart_b"} с QR-кодами
         """
         # Группируем заказы по аккаунтам одним проходом
         orders_by_account = defaultdict(list)
@@ -783,32 +803,67 @@ class OrdersService:
             # Проверяем, что заказ был успешно добавлен
             if any(order_id in order_ids for order_ids in orders_added_by_article.values()):
                 orders_by_account[supply_info['account']].append(order_id)
-        
+
         if not orders_by_account:
             logger.info("Нет заказов для обработки QR")
-            return
-        
+            return {}
+
         # Создаем задачи для параллельной обработки каждого аккаунта
         # Импортируем менеджер БД для получения соединений из пула
-        
+
         qr_processor = QRDirectProcessor(db_manager)
         tasks = []
         accounts = []
-        
+
         for account, order_ids in orders_by_account.items():
             logger.info(f"Подготовка обработки QR для {len(order_ids)} заказов аккаунта {account}")
             tasks.append(qr_processor.process_orders_qr(account, order_ids))
             accounts.append(account)
-        
+
         # Выполняем все задачи параллельно с обработкой исключений
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Обрабатываем результаты
         for account, result in zip(accounts, results):
             if isinstance(result, Exception):
                 logger.error(f"Ошибка обработки QR для аккаунта {account}: {result}")
             else:
                 logger.info(f"Успешно завершена обработка QR для аккаунта {account}")
+
+        # Возвращаем пустой словарь - QR-коды будут получены из БД позже
+        return {}
+
+    async def _fetch_qr_codes_from_db(self, order_ids: List[int]) -> Dict[int, str]:
+        """
+        Получает QR-коды из БД для списка заказов.
+
+        QR-код формируется как конкатенация part_a + part_b из таблицы qr_scans.
+
+        Args:
+            order_ids: Список ID заказов для получения QR-кодов
+
+        Returns:
+            Dict[int, str]: Словарь {order_id: "part_apart_b"}
+                           Если QR-код не найден - order_id не включается в словарь
+        """
+        if not self.db or not order_ids:
+            logger.debug("Нет БД или пустой список order_ids для получения QR-кодов")
+            return {}
+
+        try:
+            qr_db = QRScanDB(self.db)
+            qr_codes = await qr_db.get_qr_codes_by_order_ids(order_ids)
+
+            logger.info(
+                f"Получено {len(qr_codes)} QR-кодов из БД "
+                f"для {len(order_ids)} заказов"
+            )
+
+            return qr_codes
+
+        except Exception as e:
+            logger.error(f"Ошибка получения QR-кодов из БД: {str(e)}")
+            return {}
 
     async def get_single_order_sticker(self, order_id: int, account: str) -> BytesIO:
         """

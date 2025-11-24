@@ -111,6 +111,10 @@ class SupplyAccountWildOut(BaseSchema):
     wilds: List[WildInfo]
     supply_ids: List[SupplyInfo]
     order_wild_map: Dict[int, str] = {}
+    order_qr_map: Dict[int, str] = Field(
+        default_factory=dict,
+        description="Маппинг order_id -> QR-код (part_a + part_b)"
+    )
     operation_id: Optional[str] = None
 
 

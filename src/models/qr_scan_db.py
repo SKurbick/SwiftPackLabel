@@ -39,9 +39,9 @@ class QRScanDB:
             Dict[int, str]: Словарь {order_id: "part_apart_b"}
 
         Example:
-            >>> qr_db = QRScanDB(db)
-            >>> qr_codes = await qr_db.get_qr_codes_by_order_ids([123, 456, 789])
-            >>> print(qr_codes)
+            qr_db = QRScanDB(db)
+            qr_codes = await qr_db.get_qr_codes_by_order_ids([123, 456, 789])
+            print(qr_codes)
             {
                 123: "wild123A001",
                 456: "wild456B002",
