@@ -764,6 +764,142 @@ class SuppliesService:
 
         return supplies_data
 
+    @staticmethod
+    def _is_supply_empty(hanging_supply: Dict) -> bool:
+        """
+        Проверяет, является ли поставка пустой (нет заказов).
+
+        Args:
+            hanging_supply: Запись висячей поставки из БД
+
+        Returns:
+            bool: True если поставка пустая, False если есть заказы
+        """
+        try:
+            order_data = hanging_supply.get('order_data', {})
+            if isinstance(order_data, str):
+                order_data = json.loads(order_data)
+
+            orders = order_data.get('orders', [])
+            return len(orders) == 0
+
+        except Exception as e:
+            logger.error(
+                f"Ошибка парсинга order_data для поставки "
+                f"{hanging_supply.get('supply_id')}: {e}"
+            )
+            # В случае ошибки парсинга считаем поставку пустой (безопаснее)
+            return True
+
+    def _should_mark_supply_as_fictitious(
+        self,
+        hanging_supply: Dict,
+        active_supply_ids: Set[Tuple[str, str]]
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Проверяет, нужно ли пометить поставку как фиктивную.
+
+        Args:
+            hanging_supply: Запись висячей поставки из БД
+            active_supply_ids: Множество (supply_id, account) поставок в статусе сборки (done=False)
+
+        Returns:
+            Tuple[bool, Optional[str]]: (нужно_пометить, причина_пропуска)
+        """
+        supply_id = hanging_supply['supply_id']
+        account = hanging_supply['account']
+
+        # ПРОВЕРКА 1: Поставка еще в сборке (done=False в WB)
+        if (supply_id, account) in active_supply_ids:
+            return False, "active_in_wb"
+
+        # ПРОВЕРКА 2: Уже помечена фиктивной
+        if hanging_supply.get('is_fictitious_delivered', False):
+            return False, "already_marked"
+
+        # ПРОВЕРКА 3: Поставка пустая (нет заказов)
+        if self._is_supply_empty(hanging_supply):
+            return False, "empty_supply"
+
+        # Все проверки пройдены: поставка перешла в доставку (done=True)
+        return True, None
+
+    async def _auto_mark_done_supplies_as_fictitious(
+        self,
+        active_supplies_result: List[Dict]
+    ) -> Tuple[int, int]:
+        """
+        Автоматически помечает висячие поставки как фиктивные, если они перешли в доставку (done=True).
+
+        Логика:
+        1. Получает все висячие поставки из БД
+        2. Сравнивает с поставками в сборке из WB API (done=False)
+        3. Поставки из БД, которых нет в списке сборки → перешли в доставку → помечает как фиктивные
+
+        Статусы WB:
+        - done=False: поставка в статусе "Сборка" (активная)
+        - done=True:  поставка в статусе "Доставка" (завершена)
+
+        Защита от ошибок:
+        - Пропускает пустые поставки (будут обработаны EmptySupplyCleaner)
+        - Пропускает уже помеченные фиктивные
+        - Обрабатывает ошибки для каждой поставки независимо
+
+        Args:
+            active_supplies_result: Список поставок в статусе сборки (done=False) из WB API
+
+        Returns:
+            Tuple[int, int]: (количество_помеченных, количество_пропущенных_пустых)
+        """
+        hanging_supplies_model = HangingSupplies(self.db)
+        all_hanging = await hanging_supplies_model.get_hanging_supplies()
+
+        # Множество поставок в статусе сборки (done=False) из WB API
+        active_supply_ids = {
+            (supply['supply_id'], supply['account'])
+            for supply in active_supplies_result
+        }
+
+        marked_count = 0
+        skipped_empty = 0
+
+        for hanging in all_hanging:
+            supply_id = hanging['supply_id']
+            account = hanging['account']
+
+            # Проверяем все условия для пометки
+            should_mark, skip_reason = self._should_mark_supply_as_fictitious(
+                hanging, active_supply_ids
+            )
+
+            if not should_mark:
+                if skip_reason == "empty_supply":
+                    logger.debug(f"⏭️ Пропускаем пустую поставку {supply_id} ({account})")
+                    skipped_empty += 1
+                continue
+
+            # ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ: Поставка перешла в доставку, помечаем фиктивной
+            try:
+                # Получаем количество заказов для логирования
+                order_data = hanging.get('order_data', {})
+                if isinstance(order_data, str):
+                    order_data = json.loads(order_data)
+                orders_count = len(order_data.get('orders', []))
+
+                await hanging_supplies_model.mark_as_fictitious_delivered(
+                    supply_id, account, operator='auto_system'
+                )
+                logger.info(
+                    f"🔔 Поставка {supply_id} ({account}) помечена как фиктивная "
+                    f"(перешла в доставку done=True, {orders_count} заказов)"
+                )
+                marked_count += 1
+
+            except Exception as e:
+                logger.error(f"Ошибка пометки {supply_id}: {e}")
+
+        return marked_count, skipped_empty
+
     async def get_list_supplies(self, hanging_only: bool = False, is_delivery: bool = False) -> SupplyIdResponseSchema:
         """
         Получить список поставок с фильтрацией по висячим и доставке.
@@ -889,6 +1025,15 @@ class SuppliesService:
                         for data in supplies_ids_dict[account] if not data['done']
                     }
                     result.append(self.create_supply_result(supply, supply_id, account, orders))
+
+        # Автоматическая пометка висячих поставок с done=True как фиктивных
+        if hanging_only:
+            marked_count, skipped_empty = await self._auto_mark_done_supplies_as_fictitious(result)
+            if marked_count > 0 or skipped_empty > 0:
+                logger.info(
+                    f"Автопометка: {marked_count} фиктивных, "
+                    f"{skipped_empty} пропущено (пустые)"
+                )
 
         # Финальная фильтрация
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
