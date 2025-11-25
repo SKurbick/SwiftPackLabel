@@ -1028,7 +1028,17 @@ class SuppliesService:
 
         # Автоматическая пометка висячих поставок с done=True как фиктивных
         if hanging_only:
-            marked_count, skipped_empty = await self._auto_mark_done_supplies_as_fictitious(result)
+            # Формируем список ТОЛЬКО активных поставок (done=False) для корректной пометки
+            active_supplies_only_false = []
+            for account, supplies_list in supplies_ids_dict.items():
+                for supply_data in supplies_list:
+                    if not supply_data['done']:  # Только done=False
+                        active_supplies_only_false.append({
+                            'supply_id': supply_data['id'],
+                            'account': account
+                        })
+
+            marked_count, skipped_empty = await self._auto_mark_done_supplies_as_fictitious(active_supplies_only_false)
             if marked_count > 0 or skipped_empty > 0:
                 logger.info(
                     f"Автопометка: {marked_count} фиктивных, "
