@@ -638,22 +638,23 @@ class SuppliesService:
                             else:
                                 valid_order_ids.append(order_id)
 
-                        # Используем существующее поле для совместимости с фронтендом
-                        supply["canceled_order_ids"] = blocked_order_ids
-
                         # Проверяем наличие валидных заказов и полноту отгрузки
                         # Используем теорию множеств для точного расчета
                         all_order_ids = set(order_ids)
                         shipped_ids = supply.get("_unique_shipped_ids", set())
                         blocked_ids = set(blocked_order_ids)
 
+                        # Заблокированные не отгруженные (для отображения и логирования)
+                        not_shipped_blocked_ids = blocked_ids - shipped_ids
+
+                        # Используем существующее поле для совместимости с фронтендом
+                        # Показываем только НЕ отгруженные заблокированные заказы
+                        supply["canceled_order_ids"] = list(not_shipped_blocked_ids)
+
                         # Доступные = Все - (Отгруженные ∪ Заблокированные)
                         unavailable_ids = shipped_ids | blocked_ids
                         available_ids = all_order_ids - unavailable_ids
                         available_to_ship = len(available_ids)
-
-                        # Заблокированные не отгруженные (для логирования)
-                        not_shipped_blocked_ids = blocked_ids - shipped_ids
 
                         # Скрываем только если НЕТ доступных заказов
                         is_fully_processed = (available_to_ship == 0)
