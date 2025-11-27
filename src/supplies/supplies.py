@@ -603,7 +603,11 @@ class SuppliesService:
                         )
                         supply["shipped_count"] = len(unique_shipped_ids)
                     else:
+                        unique_shipped_ids = set()  # Пустое множество
                         supply["shipped_count"] = 0
+
+                    # Сохраняем для использования в логике проверки доступных заказов
+                    supply["_unique_shipped_ids"] = unique_shipped_ids
 
                     # Добавляем информацию о фиктивной доставке
                     is_fictitious_delivered = hanging_supply_data.get('is_fictitious_delivered', False)
@@ -638,22 +642,36 @@ class SuppliesService:
                         supply["canceled_order_ids"] = blocked_order_ids
 
                         # Проверяем наличие валидных заказов и полноту отгрузки
-                        count = len(supply.get('orders', []))
-                        blocked_count = len(blocked_order_ids)
-                        shipped_count = supply["shipped_count"]
-                        available_to_ship = count - blocked_count  # Валидные, не отгруженные
+                        # Используем теорию множеств для точного расчета
+                        all_order_ids = set(order_ids)
+                        shipped_ids = supply.get("_unique_shipped_ids", set())
+                        blocked_ids = set(blocked_order_ids)
 
-                        # Скрываем поставку если:
-                        # 1. Все валидные заказы уже отгружены (shipped_count >= available_to_ship)
-                        # 2. Нет валидных заказов вообще (available_to_ship == 0)
-                        is_fully_processed = (shipped_count >= available_to_ship) or (available_to_ship == 0)
+                        # Доступные = Все - (Отгруженные ∪ Заблокированные)
+                        unavailable_ids = shipped_ids | blocked_ids
+                        available_ids = all_order_ids - unavailable_ids
+                        available_to_ship = len(available_ids)
+
+                        # Заблокированные не отгруженные (для логирования)
+                        not_shipped_blocked_ids = blocked_ids - shipped_ids
+
+                        # Скрываем только если НЕТ доступных заказов
+                        is_fully_processed = (available_to_ship == 0)
 
                         if is_fully_processed:
-                            reason = 'все отгружено' if shipped_count >= available_to_ship else 'нет валидных заказов'
+                            # Определяем причину
+                            if len(all_order_ids - shipped_ids) == 0:
+                                reason = 'все заказы отгружены'
+                            elif len(not_shipped_blocked_ids) > 0:
+                                reason = 'все не отгруженные заблокированы'
+                            else:
+                                reason = 'нет доступных заказов'
+
                             logger.info(
                                 f"Скрываем поставку в доставке {supply['supply_id']} (аккаунт {supply['account']}): "
-                                f"shipped={shipped_count}, blocked={blocked_count}, "
-                                f"available={available_to_ship}, count={count} "
+                                f"всего={len(all_order_ids)}, отгружено={len(shipped_ids)}, "
+                                f"заблокировано_не_отгруженных={len(not_shipped_blocked_ids)}, "
+                                f"доступно={available_to_ship} "
                                 f"(причина: {reason})"
                             )
                             continue  # Не добавляем в результат - скрываем поставку!
@@ -698,6 +716,11 @@ class SuppliesService:
                         filtered_supplies.append(supply)
                 else:
                     filtered_supplies.append(supply)
+
+        # Очищаем временные данные перед возвратом
+        for supply in filtered_supplies:
+            if "_unique_shipped_ids" in supply:
+                del supply["_unique_shipped_ids"]
 
         return filtered_supplies
 
@@ -1027,7 +1050,7 @@ class SuppliesService:
                     result.append(self.create_supply_result(supply, supply_id, account, orders))
 
         # Автоматическая пометка висячих поставок с done=True как фиктивных
-        if hanging_only:
+        if hanging_only and not is_delivery:
             # Формируем список ТОЛЬКО активных поставок (done=False) для корректной пометки
             active_supplies_only_false = []
             for account, supplies_list in supplies_ids_dict.items():
