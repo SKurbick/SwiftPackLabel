@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from src.settings import settings
 from src.logger import app_logger as logger
 
@@ -61,6 +62,10 @@ def create_celery_app() -> Celery:
                 'schedule': 604800.0,  # каждую неделю (7 дней)
                 'args': [30],  # хранить логи за последние 30 дней
             },
+            'available_quantity': {
+                'task': 'sync_update_available_quantity',
+                'schedule': crontab(hour=23, minute=59)
+            }
         },
     )
     
@@ -76,6 +81,7 @@ celery_app = create_celery_app()
 celery_app.autodiscover_tasks([
     'src.celery_app.tasks.orders_sync',
     'src.celery_app.tasks.hanging_supplies_sync',
+    'src.celery_app.tasks.available_quantity_sync',
 ])
 
 
