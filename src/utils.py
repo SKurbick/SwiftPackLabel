@@ -1,8 +1,12 @@
 import re
 from datetime import datetime
 from pathlib import Path
+from fastapi import HTTPException
 from src.excel_data.service import ExcelDataService
 import json
+from src.logger import app_logger as logger
+from typing import Callable
+from functools import wraps
 
 
 def get_wb_tokens() -> dict:
@@ -40,3 +44,26 @@ def get_information_to_data():
             (wild_data and "Вилд" in wild_data[0] and "Модель" in wild_data[0])):
         return {item["Вилд"].lower(): item['Модель'] for item in wild_data}
     return {}
+
+
+def error_handler_http(
+        status_code: int = 500,
+        message: str = "Internal Server Error",
+        exceptions: tuple = (Exception,)
+):
+    """Декоратор для поднятия HTTPException при обнаружении исключения.
+    :param status_code: возвращаемый HTTP статус код при исключении.
+    :param message: возвращаемое сообщение при исключении.
+    :param exceptions: кортеж обрабатываемых исключений.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except exceptions as error:
+                logger.error('Error in %s: %s', func.__name__, error)
+                raise HTTPException(status_code=status_code, message=message)
+        return wrapper
+    return decorator
