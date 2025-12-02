@@ -30,6 +30,20 @@ class OrderSchema(BaseModel):
     order_id: int
     nm_id: int
     createdAt: Optional[str] = None
+    qr_code: Optional[str] = Field(None, description="QR-код стикера (part_a + part_b)")
+
+    @field_validator("createdAt", mode="before")
+    @classmethod
+    def convert_to_moscow_time(cls, v: Optional[str]) -> Optional[str]:
+        """Конвертирует UTC время в московское (UTC+3)."""
+        if not v:
+            return v
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            moscow_time = dt + timedelta(hours=3)
+            return moscow_time.strftime("%Y-%m-%dT%H:%M:%S+03:00")
+        except (ValueError, AttributeError):
+            return v
 
 
 class StickerSchema(OrderSchema):
@@ -64,6 +78,8 @@ class SupplyIdResult(SupplyBase):
                                          description="Количество отгруженных товаров (только для висячих поставок)")
     is_fictitious_delivered: Optional[bool] = Field(None,
                                                     description="Флаг фиктивной доставки (только для висячих поставок)")
+    canceled_order_ids: Optional[List[int]] = Field(None,
+                                                     description="Список order_id отмененных заказов (wb_status = canceled/canceled_by_client)")
 
     @field_validator("createdAt", mode="before")
     def convert_date(cls, v: str) -> str:
@@ -184,6 +200,13 @@ class MoveOrdersResponse(BaseSchema):
     removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
     processed_supplies: int = Field(description="Количество обработанных поставок")
     processed_wilds: int = Field(description="Количество обработанных wild-кодов")
+    # Статистика выполнения (вместо подробных списков заказов)
+    total_orders: int = Field(description="Общее количество заказов, отобранных для перемещения")
+    successful_count: int = Field(description="Количество успешно перемещенных заказов")
+    invalid_status_count: int = Field(description="Количество заказов с невалидным статусом WB")
+    blocked_but_shipped_count: int = Field(description="Количество заблокированных заказов, отгруженных с оригинальным supply_id")
+    failed_movement_count: int = Field(description="Количество заказов с ошибками при перемещении")
+    total_failed_count: int = Field(description="Общее количество неудачных попыток (невалидный статус + ошибки)")
     session_updated: Optional[bool] = Field(
         None,
         description="Был ли обновлен request_payload в исходной сессии"

@@ -94,3 +94,69 @@ class AssemblyTaskStatus:
                 f"для аккаунта {account}: {str(e)}"
             )
             return []
+
+    async def get_order_statuses_batch(
+        self,
+        account: str,
+        order_ids: List[int]
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Получает актуальные статусы заказов из таблицы assembly_task_status_model.
+
+        Для каждого order_id берется последняя актуальная запись
+        (по created_at_db DESC), так как в таблице может быть несколько
+        записей с разными статусами для одного заказа.
+
+        Args:
+            account: Аккаунт Wildberries
+            order_ids: Список ID заказов для проверки
+
+        Returns:
+            Dict[int, Dict[str, Any]]: Словарь {order_id: {'wb_status': '...', 'supplier_status': '...'}}
+            Пример:
+                {
+                    123456: {'wb_status': 'canceled', 'supplier_status': 'cancel'},
+                    789012: {'wb_status': 'waiting', 'supplier_status': 'new'}
+                }
+
+            Если заказ не найден в БД - он не будет в результате.
+        """
+        if not order_ids:
+            logger.debug("Пустой список order_ids для получения статусов")
+            return {}
+
+        try:
+            query = """
+                SELECT DISTINCT ON (id)
+                    id,
+                    wb_status,
+                    supplier_status
+                FROM assembly_task_status_model
+                WHERE id = ANY($1)
+                  AND account = $2
+                ORDER BY id, created_at_db DESC
+            """
+
+            result = await self.db.fetch(query, order_ids, account)
+
+            # Преобразуем в словарь {order_id: {wb_status, supplier_status}}
+            statuses = {}
+            for row in result:
+                statuses[row["id"]] = {
+                    "wb_status": row["wb_status"],
+                    "supplier_status": row["supplier_status"]
+                }
+
+            logger.info(
+                f"Получено {len(statuses)} статусов из {len(order_ids)} запрошенных "
+                f"заказов из assembly_task_status_model для аккаунта {account}"
+            )
+
+            return statuses
+
+        except Exception as e:
+            logger.error(
+                f"Ошибка получения статусов из assembly_task_status_model "
+                f"для аккаунта {account}: {str(e)}"
+            )
+            return {}

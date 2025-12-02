@@ -19,6 +19,11 @@ class OrderStatus(str, Enum):
     DELIVERED = "DELIVERED"
     FICTITIOUS_DELIVERED = "FICTITIOUS_DELIVERED"
     PARTIALLY_SHIPPED = "PARTIALLY_SHIPPED"
+    # Статусы блокировки заказов
+    BLOCKED_ALREADY_DELIVERED = "BLOCKED_ALREADY_DELIVERED"  # supplierStatus = "complete"
+    BLOCKED_CANCELED = "BLOCKED_CANCELED"  # supplierStatus = "cancel"
+    BLOCKED_INVALID_STATUS = "BLOCKED_INVALID_STATUS"  # другие некорректные статусы
+    SHIPPED_WITH_BLOCK = "SHIPPED_WITH_BLOCK"  # заказ отгружен несмотря на блокировку (с оригинальным supply_id)
 
 
 class OrderStatusLog:

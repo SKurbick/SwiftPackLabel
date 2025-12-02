@@ -4,6 +4,8 @@ from typing import Set, Dict, Any
 from src.logger import app_logger as logger
 from src.wildberries_api.supplies import Supplies
 from src.utils import get_wb_tokens
+from src.db import db as main_db
+from src.models.hanging_supplies import HangingSupplies
 
 class EmptySupplyCleaner:
     def __init__(self, redis_client):
@@ -158,8 +160,21 @@ class EmptySupplyCleaner:
                 # Удаляем через WB API
                 supplies_api = Supplies(account, wb_tokens[account])
                 await supplies_api.delete_supply(supply_id)
+                deleted_count += 1
+                logger.info(f"✓ Удалена поставка {supply_id} ({account}) из WB API")
 
-                
+                # Удаляем запись из hanging_supplies если она там есть
+                try:
+                    async with main_db.connection() as db_conn:
+                        hanging_model = HangingSupplies(db_conn)
+                        was_deleted = await hanging_model.delete_hanging_supply(supply_id, account)
+                        if was_deleted:
+                            logger.info(f"✓ Удалена запись из hanging_supplies: {supply_id} ({account})")
+                        else:
+                            logger.debug(f"Запись не найдена в hanging_supplies: {supply_id} ({account})")
+                except Exception as e:
+                    logger.warning(f"Ошибка удаления из hanging_supplies {supply_id}: {e}")
+
             except Exception as e:
                 logger.error(f"Ошибка удаления {supply_key}: {e}")
         

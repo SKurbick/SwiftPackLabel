@@ -7,7 +7,7 @@
 - Валидация и преобразование данных
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.models.order_status_log import OrderStatusLog, OrderStatus
 from src.logger import app_logger as logger
 
@@ -520,4 +520,232 @@ class OrderStatusService:
 
         except Exception as e:
             logger.error(f"Ошибка логирования частичной отгрузки: {str(e)}")
+            return 0
+
+    def _normalize_order_fields(self, order: Dict[str, Any], source: str) -> Optional[Dict[str, Any]]:
+        """
+        Безопасно извлекает поля из заказа для логирования/обработки.
+
+        Критически важно для корректного учёта остатков!
+
+        Args:
+            order: Заказ (может быть из invalid_status_orders или failed_movement_orders)
+            source: Источник для логирования ('invalid_status' или 'failed_movement')
+
+        Returns:
+            {'order_id': int, 'account': str, 'supplier_status': str, 'supply_id': str | None}
+            или None если критичные поля отсутствуют
+        """
+        # 1. order_id - КРИТИЧНО
+        order_id = order.get('id') if 'id' in order else order.get('order_id')
+        if order_id is None:
+            logger.error(
+                f"❌ КРИТИЧНО [{source}]: Отсутствует order_id. "
+                f"Доступные ключи: {list(order.keys())}"
+            )
+            return None
+
+        # 2. account - КРИТИЧНО
+        account = order.get('account')
+        if not account:
+            logger.error(f"❌ КРИТИЧНО [{source}]: Отсутствует account для заказа {order_id}")
+            return None
+
+        # 3. supplier_status - для маппинга в OrderStatus
+        supplier_status = (
+            order.get('blocked_supplier_status') if 'blocked_supplier_status' in order
+            else order.get('supplier_status', 'unknown')
+        )
+
+        # 4. supply_id - может быть NULL (допустимо)
+        supply_id = (
+            order.get('supply_id') if 'supply_id' in order and order.get('supply_id')
+            else order.get('original_supply_id')
+        )
+
+        if not supply_id:
+            logger.warning(
+                f"⚠️  [{source}]: Отсутствует supply_id для заказа {order_id} ({account}). "
+                f"Будет записан NULL в БД."
+            )
+
+        return {
+            'order_id': order_id,
+            'account': account,
+            'supplier_status': supplier_status,
+            'supply_id': supply_id
+        }
+
+    async def log_blocked_orders_status(
+        self,
+        invalid_status_orders: List[Dict[str, Any]],
+        failed_movement_orders: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Логирует блокированные заказы (с невалидным статусом или ошибками перемещения).
+
+        Используется после move_orders_between_supplies() для логирования заказов,
+        которые не удалось переместить из-за:
+        - Невалидного статуса WB (supplierStatus != "new"/"confirm")
+        - Ошибок при попытке перемещения
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом WB
+                [
+                    {
+                        'order_id': 12345,
+                        'account': 'acc1',
+                        'supplier_status': 'complete',  # или 'cancel', 'not_found', и т.д.
+                        'original_supply_id': 'WB-GI-123'
+                    },
+                    ...
+                ]
+            failed_movement_orders: Заказы с ошибками при перемещении
+                [
+                    {
+                        'order_id': 67890,
+                        'account': 'acc2',
+                        'original_supply_id': 'WB-GI-456',
+                        'error': 'Текст ошибки'
+                    },
+                    ...
+                ]
+
+        Returns:
+            int: Количество залогированных заказов
+
+        Note:
+            Статусы блокировки определяются по supplier_status:
+            - 'complete' -> BLOCKED_ALREADY_DELIVERED
+            - 'cancel' -> BLOCKED_CANCELED
+            - другие -> BLOCKED_INVALID_STATUS
+        """
+        if not invalid_status_orders and not failed_movement_orders:
+            logger.debug("Нет блокированных заказов для логирования")
+            return 0
+
+        try:
+            prepared_data = []
+
+            # 1. Обрабатываем заказы с невалидным статусом WB
+            for order in invalid_status_orders:
+                # Используем helper для безопасного извлечения полей
+                normalized = self._normalize_order_fields(order, "log_blocked_orders_status:invalid")
+                if not normalized:
+                    continue  # Критические поля отсутствуют, пропускаем
+
+                # Определяем тип блокировки по supplier_status
+                supplier_status = normalized['supplier_status']
+                if supplier_status == 'complete':
+                    status = OrderStatus.BLOCKED_ALREADY_DELIVERED
+                elif supplier_status == 'cancel':
+                    status = OrderStatus.BLOCKED_CANCELED
+                else:
+                    status = OrderStatus.BLOCKED_INVALID_STATUS
+
+                prepared_data.append({
+                    'order_id': normalized['order_id'],
+                    'status': status.value,
+                    'supply_id': normalized['supply_id'],
+                    'account': normalized['account']
+                })
+
+            # 2. Обрабатываем заказы с ошибками перемещения (тоже блокируем как INVALID_STATUS)
+            for order in failed_movement_orders:
+                # Используем helper для безопасного извлечения полей
+                normalized = self._normalize_order_fields(order, "log_blocked_orders_status:failed")
+                if not normalized:
+                    continue  # Критические поля отсутствуют, пропускаем
+
+                prepared_data.append({
+                    'order_id': normalized['order_id'],
+                    'status': OrderStatus.BLOCKED_INVALID_STATUS.value,
+                    'supply_id': normalized['supply_id'],
+                    'account': normalized['account']
+                })
+
+            # 3. Вставляем в БД через модель
+            if prepared_data:
+                count = await self.status_log.insert_orders_batch(prepared_data)
+
+                logger.info(
+                    f"Залогировано {count} блокированных заказов "
+                    f"(невалидный статус: {len(invalid_status_orders)}, "
+                    f"ошибки перемещения: {len(failed_movement_orders)})"
+                )
+
+                return count
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Ошибка логирования блокированных заказов: {str(e)}")
+            return 0
+
+    async def log_shipped_with_block_status(
+        self,
+        invalid_status_orders: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Логирует заблокированные заказы, которые были отгружены с оригинальным supply_id.
+
+        Используется в режиме финального круга, когда заказы с невалидным статусом
+        (complete/cancel) не смогли переместиться, но были отгружены в 1C/Shipment
+        с номером поставки, где они изначально находились.
+
+        Args:
+            invalid_status_orders: Заказы с невалидным статусом WB, которые были отгружены
+                [
+                    {
+                        'id': 12345,  # или 'order_id'
+                        'account': 'acc1',
+                        'supply_id': 'WB-GI-123',  # оригинальный supply_id
+                        ...
+                    },
+                    ...
+                ]
+
+        Returns:
+            int: Количество залогированных заказов
+
+        Note:
+            Этот метод вызывается ПОСЛЕ log_blocked_orders_status() и ТОЛЬКО в режиме
+            финального круга (move_to_final=True)
+        """
+        if not invalid_status_orders:
+            logger.debug("Нет заблокированных заказов для логирования SHIPPED_WITH_BLOCK")
+            return 0
+
+        try:
+            prepared_data = []
+
+            # Обрабатываем заказы с невалидным статусом, которые были отгружены
+            for order in invalid_status_orders:
+                # Используем helper для безопасного извлечения полей
+                normalized = self._normalize_order_fields(order, "log_shipped_with_block_status")
+                if not normalized:
+                    continue  # Критические поля отсутствуют, пропускаем
+
+                prepared_data.append({
+                    'order_id': normalized['order_id'],
+                    'status': OrderStatus.SHIPPED_WITH_BLOCK.value,
+                    'supply_id': normalized['supply_id'],
+                    'account': normalized['account']
+                })
+
+            # Вставляем в БД через модель
+            if prepared_data:
+                count = await self.status_log.insert_orders_batch(prepared_data)
+
+                logger.info(
+                    f"Залогировано {count} заблокированных заказов со статусом SHIPPED_WITH_BLOCK "
+                    f"(отгружены с оригинальным supply_id)"
+                )
+
+                return count
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Ошибка логирования SHIPPED_WITH_BLOCK: {str(e)}")
             return 0
