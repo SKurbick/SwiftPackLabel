@@ -646,3 +646,45 @@ class HangingSupplies:
             shipped_ids = await self.get_fictitious_shipped_order_ids(supply_id, account)
             result[(supply_id, account)] = shipped_ids
         return result
+
+    async def _sync_get_hanging_supplies_by_status(self, connection):
+        """
+        Получеие висячих поставок из hanging_supplies по активному статусу
+        (assembly_task_status_mode.wb_status = 'waiting' /
+        assembly_task_status_mode.supplier_status = 'confirm')
+        """
+        async with connection.transaction():
+            query = """
+            with filtered_orders as (
+            	select
+            		hs.id, 
+            		hs.supply_id,
+            		min((elem->>'createdAt')::timestamptz) as earliest_order_date
+            	from hanging_supplies hs 
+            	cross join lateral jsonb_array_elements(
+            		case
+            			when hs.order_data ? 'orders'
+            			then hs.order_data->'orders'
+            			else '[]'::jsonb
+            		end
+            	) as elem
+            	where hs.order_data->'orders' != '[]'::jsonb
+            	group by hs.id, hs.supply_id
+            )
+            select distinct hs.*
+            from hanging_supplies hs
+            join filtered_orders fo on hs.id = fo.id
+            join supplies_and_orders sao on hs.supply_id = sao.supply_id
+            join assembly_task_status_model atsm on sao.id = atsm.id
+            where atsm.wb_status = 'waiting' and
+            atsm.supplier_status = 'confirm' and
+            hs.is_fictitious_delivered is false and
+            fo.earliest_order_date < now() - interval '60 hours';
+            """
+
+            result = await connection.fetch(query)
+
+            return result
+
+    async def _sync_conversion_supply_into_fictitious_shipment(self):
+        pass
