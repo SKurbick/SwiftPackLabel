@@ -321,10 +321,15 @@ class QRLookupService:
                 o.supply_id as order_supply_id,
                 o.address as order_address,
                 o.comment as order_comment,
-                o.created_at as order_created_at
+                o.created_at as order_created_at,
+                atsm.wb_status as actual_wb_status,
+                atsm.supplier_status as actual_supplier_status,
+                osl.status as our_status
                 
             FROM qr_scans qr
             LEFT JOIN orders_wb o ON qr.order_id = o.id
+            LEFT JOIN assembly_task_status_model atsm  ON o.id = atsm.id
+            LEFT JOIN order_status_log osl ON o.id = osl.order_id
             WHERE qr.qr_data = $1
             LIMIT 1
         """
