@@ -2,7 +2,10 @@ import json
 from typing import List, Dict, Any, Optional, Set, Tuple
 from datetime import datetime, timedelta
 
+from numpy import record
+
 from src.logger import app_logger as logger
+from src.supplies.schema import HangingSuppliesWithOverdueOrders
 
 
 class HangingSupplies:
@@ -647,7 +650,7 @@ class HangingSupplies:
             result[(supply_id, account)] = shipped_ids
         return result
 
-    async def _sync_get_hanging_supplies_by_status(self, connection):
+    async def _sync_get_hanging_supplies_by_status(self, connection) -> list[HangingSuppliesWithOverdueOrders]:
         """
         Получеие висячих поставок из hanging_supplies по активному статусу
         (assembly_task_status_mode.wb_status = 'waiting' /
@@ -684,7 +687,13 @@ class HangingSupplies:
 
             result = await connection.fetch(query)
 
-            return result
+            return [HangingSuppliesWithOverdueOrders(
+                supply_id=record.get('supply_id'),
+                order_data=record.get('order_data'),
+                is_fictitious_delivered=record.get('is_fictitious_delivered'),
+                fictitious_delivered_at=record.get('fictitious_delivered_at'),
+                fictitious_delivery_operator=record.get('fictitious_delivery_operator'),
+            ) for record in result]
 
     async def _sync_conversion_supply_into_fictitious_shipment(self):
         pass
