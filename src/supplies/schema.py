@@ -287,3 +287,18 @@ class FictitiousDeliveryInfo(BaseSchema):
     fictitious_delivery_operator: Optional[str] = Field(None, description="Оператор фиктивной доставки")
     orders_count: int = Field(description="Количество заказов в поставке")
     shipped_count: int = Field(description="Количество отгруженных заказов")
+
+
+class HangingSuppliesWithOverdueOrders(BaseSchema):
+    """
+    Схема информации о висящей поставке со сборочными заданиями,
+    с момента создания которых прошло 60 и более часов.
+    """
+    supply_id: str = Field(description="ID висящей поставки")
+    order_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Данные сборочных заданий в формате JSON"
+    )
+    is_fictitious_delivered: bool = Field(description="Флаг фиктивной доставки")
+    fictitious_delivered_at: datetime | None = Field(description="Время перевода в фиктивную доставку")
+    fictitious_delivery_operator: str | None = Field(default="Оператор фиктивной доставки")
