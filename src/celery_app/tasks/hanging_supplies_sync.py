@@ -294,6 +294,22 @@ class HangingSuppliesService:
         """
         return await self.hanging_supplies_model.get_changes_statistics()
 
+    async def _sync_conversion_supply_into_fictitious_shipment(self):
+        logger.info("Поиск висячих поставок")
+        overdue_supplies = await self.hanging_supplies_model._sync_get_hanging_supplies_by_status()
+
+        if len(overdue_supplies) == 0:
+            logger.info("Поставок с просроченными сборочными заданиями не найдено")
+            return None
+
+        logger.info(f"Количество поставок с просроченными сборочными заданиями: {len(overdue_supplies)}")
+        logger.info("Выполняется автоперевод в фиктивную доставку")
+
+        supplies_ids = [supply.supply_id for supply in overdue_supplies]
+
+        await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(supplies_ids)
+        logger.info("Автоперевод выполнен")
+
 
 @celery_app.task(name='sync_hanging_supplies_with_data', soft_time_limit=600, time_limit=600)
 def sync_hanging_supplies_with_data(supplies_data: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -554,5 +570,52 @@ async def _cleanup_old_logs_async(days_to_keep: int) -> Dict[str, Any]:
         }
     finally:
         # Обязательно закрываем пул
+        if pool:
+            await pool.close()
+
+@celery_app.task(name="auto_conversion_hanging_supplies")
+def auto_conversion_hanging_supplies():
+    try:
+        logger.info("Выполнение фоновой периодической задачи перевода висячих поставок в фиктивную доставку")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        loop.run_until_complete(_auto_conversion())
+
+        logger.info("Автоперевод висячих поставок в фиктивную доставку выполнен успешно")
+
+    except Exception as error:
+        logger.error(f"Ошибка в выполненнии автоперевода висячих поставок в фиктивную доставку: {error}")
+
+async def _auto_conversion():
+    from src.settings import settings
+    import asyncpg
+
+    pool = None
+    try:
+        pool = await asyncpg.create_pool(
+                host=settings.db_app_host,
+                port=settings.db_app_port,
+                user=settings.db_app_user,
+                password=settings.db_app_password,
+                database=settings.dp_app_name,
+                min_size=1,
+                max_size=5,
+                command_timeout=60
+            )
+
+        async with pool.acquire() as connection:
+            hanging_supplies_service = HangingSuppliesService(connection)
+            await hanging_supplies_service._sync_conversion_supply_into_fictitious_shipment()
+
+    except Exception as error:
+        logger.error(f"Ошибка в выполнении фоновой периодической задачи перевода висячих поставок в фиктивную доставку: {error}")
+
+    finally:
         if pool:
             await pool.close()
