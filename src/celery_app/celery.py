@@ -65,6 +65,10 @@ def create_celery_app() -> Celery:
             'available_quantity': {
                 'task': 'sync_update_available_quantity',
                 'schedule': crontab(hour=20, minute=59) # 20:59 UTC == 23:59 Moscow
+            },
+            'auto_conversion_hanging_supplies_into_fictitious_shipment': {
+                'task': 'auto_conversion_hanging_supplies',
+                'schedule': 216000.0 # каждые 60 часов
             }
         },
     )
