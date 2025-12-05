@@ -295,10 +295,10 @@ class HangingSuppliesWithOverdueOrders(BaseSchema):
     с момента создания которых прошло 60 и более часов.
     """
     supply_id: str = Field(description="ID висящей поставки")
-    order_data: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Данные сборочных заданий в формате JSON"
-    )
+    # order_data: dict[str, Any] = Field(
+    #     default_factory=dict,
+    #     description="Данные сборочных заданий в формате JSON"
+    # )
     is_fictitious_delivered: bool = Field(description="Флаг фиктивной доставки")
     fictitious_delivered_at: datetime | None = Field(description="Время перевода в фиктивную доставку")
     fictitious_delivery_operator: str | None = Field(default="Оператор фиктивной доставки")
