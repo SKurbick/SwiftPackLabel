@@ -1027,7 +1027,7 @@ class SuppliesService:
                     result.append(self.create_supply_result(supply, supply_id, account, orders))
 
         # Автоматическая пометка висячих поставок с done=True как фиктивных
-        if hanging_only:
+        if hanging_only and not is_delivery:
             # Формируем список ТОЛЬКО активных поставок (done=False) для корректной пометки
             active_supplies_only_false = []
             for account, supplies_list in supplies_ids_dict.items():
