@@ -38,6 +38,7 @@ class OrderStatusLog:
         status (varchar): Статус заказа
         supply_id (varchar): ID поставки (может быть NULL)
         account (varchar): Аккаунт Wildberries
+        operator (varchar): Оператор, выполнивший операцию (может быть NULL)
         created_at (timestamp): Время создания записи
     """
 
@@ -70,7 +71,8 @@ class OrderStatusLog:
                         'order_id': 12345,              # ОБЯЗАТЕЛЬНО: bigint
                         'status': 'NEW',                # ОБЯЗАТЕЛЬНО: str (из OrderStatus)
                         'supply_id': None,              # ОПЦИОНАЛЬНО: str или None
-                        'account': 'account1'           # ОБЯЗАТЕЛЬНО: str
+                        'account': 'account1',          # ОБЯЗАТЕЛЬНО: str
+                        'operator': 'Ivan'              # ОПЦИОНАЛЬНО: str или None
                     },
                     ...
                 ]
@@ -87,8 +89,8 @@ class OrderStatusLog:
 
         try:
             query = """
-            INSERT INTO public.order_status_log (order_id, status, supply_id, account)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO public.order_status_log (order_id, status, supply_id, account, operator)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT DO NOTHING
             """
 
@@ -98,7 +100,8 @@ class OrderStatusLog:
                     order.get('order_id'),
                     order.get('status'),
                     order.get('supply_id'),
-                    order.get('account')
+                    order.get('account'),
+                    order.get('operator')  # Может быть None - это нормально
                 )
                 for order in orders_data
             ]

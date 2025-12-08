@@ -219,7 +219,8 @@ class OrderStatusService:
     async def process_and_log_moved_orders(
         self,
         moved_orders_details: List[Dict[str, Any]],
-        move_to_final: bool
+        move_to_final: bool,
+        operator: Optional[str] = None
     ) -> int:
         """
         Логирует перемещение заказов между поставками.
@@ -241,6 +242,7 @@ class OrderStatusService:
             move_to_final: Направление перемещения
                 True = в финальную поставку (IN_FINAL_SUPPLY)
                 False = в висячую поставку (IN_HANGING_SUPPLY)
+            operator: Оператор, выполнивший операцию (опционально)
 
         Returns:
             int: Количество залогированных заказов
@@ -261,7 +263,8 @@ class OrderStatusService:
                     'order_id': detail['order_id'],
                     'status': status.value,
                     'supply_id': detail['supply_id'],
-                    'account': detail['account']
+                    'account': detail['account'],
+                    'operator': operator
                 })
 
             # 3. Вставляем в БД через модель
@@ -474,7 +477,8 @@ class OrderStatusService:
 
     async def process_and_log_partially_shipped(
         self,
-        partially_shipped_data: List[Dict[str, Any]]
+        partially_shipped_data: List[Dict[str, Any]],
+        operator: Optional[str] = None
     ) -> int:
         """
         Логирует частичную отгрузку заказов из висячих поставок.
@@ -492,6 +496,7 @@ class OrderStatusService:
                     },
                     ...
                 ]
+            operator: Оператор, выполнивший операцию (опционально)
 
         Returns:
             int: Количество залогированных заказов
@@ -508,7 +513,8 @@ class OrderStatusService:
                     'order_id': detail['order_id'],
                     'status': OrderStatus.PARTIALLY_SHIPPED.value,
                     'supply_id': detail['supply_id'],
-                    'account': detail['account']
+                    'account': detail['account'],
+                    'operator': operator
                 })
 
             # Вставляем в БД через модель
@@ -579,7 +585,8 @@ class OrderStatusService:
     async def log_blocked_orders_status(
         self,
         invalid_status_orders: List[Dict[str, Any]],
-        failed_movement_orders: List[Dict[str, Any]]
+        failed_movement_orders: List[Dict[str, Any]],
+        operator: Optional[str] = None
     ) -> int:
         """
         Логирует блокированные заказы (с невалидным статусом или ошибками перемещения).
@@ -610,6 +617,7 @@ class OrderStatusService:
                     },
                     ...
                 ]
+            operator: Оператор, выполнивший операцию (опционально)
 
         Returns:
             int: Количество залогированных заказов
@@ -647,7 +655,8 @@ class OrderStatusService:
                     'order_id': normalized['order_id'],
                     'status': status.value,
                     'supply_id': normalized['supply_id'],
-                    'account': normalized['account']
+                    'account': normalized['account'],
+                    'operator': operator
                 })
 
             # 2. Обрабатываем заказы с ошибками перемещения (тоже блокируем как INVALID_STATUS)
@@ -661,7 +670,8 @@ class OrderStatusService:
                     'order_id': normalized['order_id'],
                     'status': OrderStatus.BLOCKED_INVALID_STATUS.value,
                     'supply_id': normalized['supply_id'],
-                    'account': normalized['account']
+                    'account': normalized['account'],
+                    'operator': operator
                 })
 
             # 3. Вставляем в БД через модель
@@ -684,7 +694,8 @@ class OrderStatusService:
 
     async def log_shipped_with_block_status(
         self,
-        invalid_status_orders: List[Dict[str, Any]]
+        invalid_status_orders: List[Dict[str, Any]],
+        operator: Optional[str] = None
     ) -> int:
         """
         Логирует заблокированные заказы, которые были отгружены с оригинальным supply_id.
@@ -704,6 +715,7 @@ class OrderStatusService:
                     },
                     ...
                 ]
+            operator: Оператор, выполнивший операцию (опционально)
 
         Returns:
             int: Количество залогированных заказов
@@ -730,7 +742,8 @@ class OrderStatusService:
                     'order_id': normalized['order_id'],
                     'status': OrderStatus.SHIPPED_WITH_BLOCK.value,
                     'supply_id': normalized['supply_id'],
-                    'account': normalized['account']
+                    'account': normalized['account'],
+                    'operator': operator
                 })
 
             # Вставляем в БД через модель
