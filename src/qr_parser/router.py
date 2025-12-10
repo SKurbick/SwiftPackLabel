@@ -93,3 +93,93 @@ async def lookup_by_qr_code(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Произошла внутренняя ошибка: {str(e)}"
         )
+
+
+@qr_parser.get(
+    "/lookup-by-order/{order_id}",
+    response_model=QRLookupResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Поиск данных по order_id",
+    description="Ищет данные в таблице qr_scans по order_id и возвращает связанную информацию о заказе"
+)
+async def lookup_by_order_id(
+        order_id: int,
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user),
+) -> QRLookupResponse:
+    """
+    Ищет данные по order_id и возвращает информацию о заказе и QR-скане.
+
+    Args:
+        order_id: ID заказа для поиска
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+
+    Returns:
+        QRLookupResponse: Найденные данные QR-скана и связанного заказа
+    """
+    try:
+        logger.info(
+            f"Запрос на поиск по order_id от пользователя {user.get('username', 'unknown')}: {order_id}")
+
+        lookup_service = QRLookupService(db=db)
+        result = await lookup_service.find_by_order_id(order_id)
+
+        if result.found:
+            logger.info(f"Успешно найдены данные по order_id: {order_id}")
+        else:
+            logger.info(f"Данные по order_id не найдены: {order_id}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Внутренняя ошибка при поиске по order_id: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Произошла внутренняя ошибка: {str(e)}"
+        )
+
+
+@qr_parser.get(
+    "/lookup-by-qr-number",
+    response_model=QRLookupResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Поиск данных по номеру QR (part_a + part_b)",
+    description="Ищет данные в таблице qr_scans по номеру QR (объединение part_a и part_b) и возвращает связанную информацию о заказе"
+)
+async def lookup_by_qr_number(
+        qr_number: str = Query(..., description="Номер QR (part_a + part_b), например 'ABC123XYZ'"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user),
+) -> QRLookupResponse:
+    """
+    Ищет данные по номеру QR (part_a + part_b) и возвращает информацию о заказе.
+
+    Args:
+        qr_number: Номер QR для поиска (part_a + part_b)
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+
+    Returns:
+        QRLookupResponse: Найденные данные QR-скана и связанного заказа
+    """
+    try:
+        logger.info(
+            f"Запрос на поиск по номеру QR от пользователя {user.get('username', 'unknown')}: {qr_number}")
+
+        lookup_service = QRLookupService(db=db)
+        result = await lookup_service.find_by_qr_number(qr_number)
+
+        if result.found:
+            logger.info(f"Успешно найдены данные по номеру QR: {qr_number}")
+        else:
+            logger.info(f"Данные по номеру QR не найдены: {qr_number}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Внутренняя ошибка при поиске по номеру QR: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Произошла внутренняя ошибка: {str(e)}"
+        )
