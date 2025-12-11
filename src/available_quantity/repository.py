@@ -34,32 +34,28 @@ class AvailableQuantityRepository:
         WHERE
             $1::varchar IS NULL OR product_id = $1::varchar AND
             $2::date IS NULL or created_at >= $2::date AND
-            $3::date IS NULL or created_at <= $3::date;
+            $3::date IS NULL or created_at <= $3::date
+            ORDER BY created_at DESC;
         """
 
         result = await self.db.fetch(query, product_id, start_date, end_date)
         return result
 
-    @staticmethod
-    async def _sync_update_available_quantity(connection):
-        async with connection.transaction():
-            query = """
-            WITH calculated_quantities AS (
-                SELECT 
-                    cb.product_id, 
-                    cb.warehouse_id, 
-                    (cb.physical_quantity - cb.reserved_quantity) AS available_quantity
-                FROM current_balances cb
-            )
-            INSERT INTO available_quantity (product_id, warehouse_id, available_quantity)
-            SELECT product_id, warehouse_id, available_quantity
-            FROM calculated_quantities
-            ON conflict (product_id, warehouse_id) 
-            DO UPDATE SET
-                available_quantity = excluded.available_quantity;
-            """
+    async def _sync_update_available_quantity(self):
+        query = """
+        WITH calculated_quantities AS (
+            SELECT 
+                cb.product_id, 
+                cb.warehouse_id, 
+                (cb.physical_quantity - cb.reserved_quantity) AS available_quantity
+            FROM current_balances cb
+        )
+        INSERT INTO available_quantity (product_id, warehouse_id, available_quantity)
+        SELECT product_id, warehouse_id, available_quantity
+        FROM calculated_quantities;
+        """
 
-            await connection.execute(query)
+        await self.db.execute(query)
 
 
 

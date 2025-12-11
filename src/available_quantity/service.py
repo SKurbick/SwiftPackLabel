@@ -8,7 +8,8 @@ from src.available_quantity.schema import AvailableQuantity
 class AvailableQuantityService:
     def __init__(
             self,
-            repository: AvailableQuantityRepository
+            repository
+
     ):
         self.repository = repository
 
@@ -42,6 +43,10 @@ class AvailableQuantityService:
             warehouse_id=row["warehouse_id"],
             available_quantity=row["available_quantity"]
         ) for row in available_quantities]
+
+    async def update_available_quantity(self):
+
+        await self.repository._sync_update_available_quantity()
 
 
 def get_available_quantity_service(
