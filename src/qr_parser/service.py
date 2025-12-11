@@ -288,15 +288,15 @@ class QRLookupService:
     async def _find_qr_and_order_data(self, qr_data: str) -> Optional[Dict[str, Any]]:
         """
         Ищет данные QR-скана и связанного заказа одним запросом через LEFT JOIN.
-        
+
         Args:
             qr_data: QR код для поиска
-            
+
         Returns:
             Optional[Dict[str, Any]]: Объединенные данные или None
         """
         query = """
-            SELECT 
+            SELECT
                 -- QR scan data with prefixes
                 qr.id as qr_id,
                 qr.order_id as qr_order_id,
@@ -305,7 +305,7 @@ class QRLookupService:
                 qr.part_a as qr_part_a,
                 qr.part_b as qr_part_b,
                 qr.created_at as qr_created_at,
-                
+
                 -- Order data with prefixes (may be NULL if no matching order)
                 o.id as order_id,
                 o.order_uid,
@@ -321,10 +321,15 @@ class QRLookupService:
                 o.supply_id as order_supply_id,
                 o.address as order_address,
                 o.comment as order_comment,
-                o.created_at as order_created_at
-                
+                o.created_at as order_created_at,
+                atsm.wb_status as actual_wb_status,
+                atsm.supplier_status as actual_supplier_status,
+                osl.status as our_status
+
             FROM qr_scans qr
             LEFT JOIN orders_wb o ON qr.order_id = o.id
+            LEFT JOIN assembly_task_status_model atsm  ON o.id = atsm.id
+            LEFT JOIN order_status_log osl ON o.id = osl.order_id
             WHERE qr.qr_data = $1
             LIMIT 1
         """
@@ -334,4 +339,176 @@ class QRLookupService:
             return dict(row) if row else None
         except Exception as e:
             logger.error(f"Ошибка при объединенном поиске QR-скана и заказа: {str(e)}")
+            raise
+
+    async def find_by_order_id(self, order_id: int) -> QRLookupResponse:
+        """
+        Ищет данные по order_id в таблице qr_scans и соответствующий заказ в orders_wb.
+
+        Args:
+            order_id: ID заказа для поиска
+
+        Returns:
+            QRLookupResponse: Найденные данные или пустой ответ
+        """
+        logger.info(f"Поиск данных по order_id: {order_id}")
+
+        try:
+            data = await self._find_by_order_id(order_id)
+
+            if not data:
+                logger.warning(f"Данные по order_id не найдены: {order_id}")
+                return QRLookupResponse(
+                    found=False,
+                    data=None
+                )
+
+            logger.info(f"Найдены данные по order_id {order_id}")
+            return QRLookupResponse(
+                found=True,
+                data=data
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка при поиске по order_id {order_id}: {str(e)}")
+            raise
+
+    async def _find_by_order_id(self, order_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Ищет данные QR-скана и связанного заказа по order_id через LEFT JOIN.
+
+        Args:
+            order_id: ID заказа для поиска
+
+        Returns:
+            Optional[Dict[str, Any]]: Объединенные данные или None
+        """
+        query = """
+            SELECT
+                qr.id as qr_id,
+                qr.order_id as qr_order_id,
+                qr.qr_data,
+                qr.account as qr_account,
+                qr.part_a as qr_part_a,
+                qr.part_b as qr_part_b,
+                qr.created_at as qr_created_at,
+
+                o.id as order_id,
+                o.order_uid,
+                o.rid as order_rid,
+                o.article as order_article,
+                o.nm_id as order_nm_id,
+                o.chrt_id as order_chrt_id,
+                o.color_code as order_color_code,
+                o.price as order_price,
+                o.sale_price as order_sale_price,
+                o.converted_price as order_converted_price,
+                o.delivery_type as order_delivery_type,
+                o.supply_id as order_supply_id,
+                o.address as order_address,
+                o.comment as order_comment,
+                o.created_at as order_created_at,
+                atsm.wb_status as actual_wb_status,
+                atsm.supplier_status as actual_supplier_status,
+                osl.status as our_status
+
+            FROM qr_scans qr
+            LEFT JOIN orders_wb o ON qr.order_id = o.id
+            LEFT JOIN assembly_task_status_model atsm ON o.id = atsm.id
+            LEFT JOIN order_status_log osl ON o.id = osl.order_id
+            WHERE qr.order_id = $1
+            LIMIT 1
+        """
+
+        try:
+            row = await self.db.fetchrow(query, order_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка при поиске по order_id: {str(e)}")
+            raise
+
+    async def find_by_qr_number(self, qr_number: str) -> QRLookupResponse:
+        """
+        Ищет данные по номеру QR (part_a + part_b) в таблице qr_scans.
+
+        Args:
+            qr_number: Номер QR (part_a + part_b), например 'ABC123XYZ'
+
+        Returns:
+            QRLookupResponse: Найденные данные или пустой ответ
+        """
+        logger.info(f"Поиск данных по номеру QR: {qr_number}")
+
+        try:
+            data = await self._find_by_qr_number(qr_number)
+
+            if not data:
+                logger.warning(f"Данные по номеру QR не найдены: {qr_number}")
+                return QRLookupResponse(
+                    found=False,
+                    data=None
+                )
+
+            logger.info(f"Найдены данные по номеру QR {qr_number}")
+            return QRLookupResponse(
+                found=True,
+                data=data
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка при поиске по номеру QR {qr_number}: {str(e)}")
+            raise
+
+    async def _find_by_qr_number(self, qr_number: str) -> Optional[Dict[str, Any]]:
+        """
+        Ищет данные QR-скана и связанного заказа по номеру QR (part_a + part_b).
+
+        Args:
+            qr_number: Номер QR для поиска (part_a + part_b)
+
+        Returns:
+            Optional[Dict[str, Any]]: Объединенные данные или None
+        """
+        query = """
+            SELECT
+                qr.id as qr_id,
+                qr.order_id as qr_order_id,
+                qr.qr_data,
+                qr.account as qr_account,
+                qr.part_a as qr_part_a,
+                qr.part_b as qr_part_b,
+                qr.created_at as qr_created_at,
+
+                o.id as order_id,
+                o.order_uid,
+                o.rid as order_rid,
+                o.article as order_article,
+                o.nm_id as order_nm_id,
+                o.chrt_id as order_chrt_id,
+                o.color_code as order_color_code,
+                o.price as order_price,
+                o.sale_price as order_sale_price,
+                o.converted_price as order_converted_price,
+                o.delivery_type as order_delivery_type,
+                o.supply_id as order_supply_id,
+                o.address as order_address,
+                o.comment as order_comment,
+                o.created_at as order_created_at,
+                atsm.wb_status as actual_wb_status,
+                atsm.supplier_status as actual_supplier_status,
+                osl.status as our_status
+
+            FROM qr_scans qr
+            LEFT JOIN orders_wb o ON qr.order_id = o.id
+            LEFT JOIN assembly_task_status_model atsm ON o.id = atsm.id
+            LEFT JOIN order_status_log osl ON o.id = osl.order_id
+            WHERE CONCAT(qr.part_a, qr.part_b) = $1
+            LIMIT 1
+        """
+
+        try:
+            row = await self.db.fetchrow(query, qr_number)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка при поиске по номеру QR: {str(e)}")
             raise

@@ -299,10 +299,10 @@ async def shipment_of_fictions_supply(
     """
     logger.info(f"Запрос на фиктивную отгрузку {request.shipped_quantity} заказов "
                 f"из {len(request.supplies)} поставок от {user.get('username', 'unknown')}")
-    
+
     try:
         supply_service = SuppliesService(db)
-        operator = user.get('username', 'unknown')
+        operator = request.operator  # Может быть None
         
         result = await supply_service.shipment_fictitious_supplies_with_quantity(
             supplies=request.supplies,
@@ -361,7 +361,12 @@ async def shipment_hanging_actual_quantity(
 
     try:
         supply_service = SuppliesService(db)
-        result = await supply_service.shipment_hanging_actual_quantity_implementation(supply_data, user)
+        operator = supply_data.operator
+        result = await supply_service.shipment_hanging_actual_quantity_implementation(
+            supply_data,
+            user,
+            operator
+        )
 
         return JSONResponse(
             content=result,
@@ -402,6 +407,7 @@ async def move_orders_between_supplies(
 
     try:
         supply_service = SuppliesService(db)
+        operator = request_data.operator
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
 
         # Извлекаем внутренние данные для логирования (не включаются в API response)
@@ -415,7 +421,8 @@ async def move_orders_between_supplies(
         if moved_orders_details:
             logged_count = await status_service.process_and_log_moved_orders(
                 moved_orders_details,
-                request_data.move_to_final
+                request_data.move_to_final,
+                operator
             )
             logger.info(
                 f"Залогировано {logged_count} успешно перемещенных заказов со статусом "
@@ -426,7 +433,8 @@ async def move_orders_between_supplies(
         if invalid_status_orders or failed_movement_orders:
             blocked_count = await status_service.log_blocked_orders_status(
                 invalid_status_orders,
-                failed_movement_orders
+                failed_movement_orders,
+                operator
             )
             logger.info(
                 f"Залогировано {blocked_count} блокированных заказов "
@@ -440,7 +448,8 @@ async def move_orders_between_supplies(
                 shipment_success = result.get('_shipment_success', False)
                 if shipment_success:
                     shipped_with_block_count = await status_service.log_shipped_with_block_status(
-                        invalid_status_orders
+                        invalid_status_orders,
+                        operator
                     )
                     logger.info(
                         f"Залогировано {shipped_with_block_count} заблокированных заказов "

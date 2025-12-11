@@ -634,27 +634,38 @@ class SuppliesService:
                             else:
                                 valid_order_ids.append(order_id)
 
-                        # Используем существующее поле для совместимости с фронтендом
-                        supply["canceled_order_ids"] = blocked_order_ids
+                        # Получаем все множества заказов
+                        all_order_ids = set(order_ids)
+                        blocked_order_ids_set = set(blocked_order_ids)
+                        valid_order_ids_set = set(valid_order_ids)
+                        shipped_order_ids_set = unique_shipped_ids  # Уже вычислено выше (строка 603-606)
 
-                        # Проверяем наличие валидных заказов и полноту отгрузки
-                        count = len(supply.get('orders', []))
-                        blocked_count = len(blocked_order_ids)
-                        shipped_count = supply["shipped_count"]
-                        available_to_ship = count - blocked_count  # Валидные, не отгруженные
+                        # Для фронтенда показываем только невалидные заказы, которые НЕ были отгружены
+                        # Это исключает заказы, которые были отгружены валидными, а потом изменили статус
+                        truly_blocked_order_ids = blocked_order_ids_set - shipped_order_ids_set
+                        supply["canceled_order_ids"] = list(truly_blocked_order_ids)
 
-                        # Скрываем поставку если:
-                        # 1. Все валидные заказы уже отгружены (shipped_count >= available_to_ship)
-                        # 2. Нет валидных заказов вообще (available_to_ship == 0)
-                        is_fully_processed = (shipped_count >= available_to_ship) or (available_to_ship == 0)
+                        # Вычисляем ДОСТУПНЫЕ для отгрузки заказы
+                        # Доступные = Валидные по статусу СЕЙЧАС - УЖЕ отгруженные
+                        available_order_ids = valid_order_ids_set - shipped_order_ids_set
 
-                        if is_fully_processed:
-                            reason = 'все отгружено' if shipped_count >= available_to_ship else 'нет валидных заказов'
+                        # ПОСТАВКА СКРЫВАЕТСЯ только если НЕТ доступных заказов
+                        should_hide = len(available_order_ids) == 0
+
+                        if should_hide:
+                            # Определяем причину для детального логирования
+                            if len(valid_order_ids_set) == 0:
+                                reason = 'нет валидных заказов (все заблокированы)'
+                            elif len(shipped_order_ids_set) >= len(valid_order_ids_set):
+                                reason = 'все валидные заказы уже отгружены'
+                            else:
+                                reason = 'нет доступных заказов'
+
                             logger.info(
                                 f"Скрываем поставку в доставке {supply['supply_id']} (аккаунт {supply['account']}): "
-                                f"shipped={shipped_count}, blocked={blocked_count}, "
-                                f"available={available_to_ship}, count={count} "
-                                f"(причина: {reason})"
+                                f"total={len(all_order_ids)}, valid={len(valid_order_ids_set)}, "
+                                f"blocked={len(blocked_order_ids_set)}, shipped={len(shipped_order_ids_set)}, "
+                                f"available={len(available_order_ids)} (причина: {reason})"
                             )
                             continue  # Не добавляем в результат - скрываем поставку!
                     else:
@@ -1027,7 +1038,7 @@ class SuppliesService:
                     result.append(self.create_supply_result(supply, supply_id, account, orders))
 
         # Автоматическая пометка висячих поставок с done=True как фиктивных
-        if hanging_only:
+        if hanging_only and not is_delivery:
             # Формируем список ТОЛЬКО активных поставок (done=False) для корректной пометки
             active_supplies_only_false = []
             for account, supplies_list in supplies_ids_dict.items():
@@ -3442,12 +3453,14 @@ class SuppliesService:
 
     async def shipment_hanging_actual_quantity_implementation(self,
                                                               supply_data: SupplyIdWithShippedBodySchema,
-                                                              user: dict) -> Dict[str, Any]:
+                                                              user: dict,
+                                                              operator: Optional[str] = None) -> Dict[str, Any]:
         """
         Отгрузка фактического количества из висячих поставок с созданием новых поставок.
         Args:
             supply_data: Данные о поставках с количеством для отгрузки
             user: Данные пользователя
+            operator: Оператор, выполнивший операцию (опционально)
         Returns:
             Dict[str, Any]: Результат операции со статистикой
         """
@@ -3633,7 +3646,10 @@ class SuppliesService:
                     })
 
                 status_service = OrderStatusService(self.db)
-                logged_count = await status_service.process_and_log_partially_shipped(partially_shipped_data)
+                logged_count = await status_service.process_and_log_partially_shipped(
+                    partially_shipped_data,
+                    operator
+                )
                 logger.info(f"Залогировано {logged_count} заказов со статусом PARTIALLY_SHIPPED")
 
             # 6.2. ВАЖНО: НЕ сохраняем фактические поставки как висячие
