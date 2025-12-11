@@ -164,6 +164,19 @@ class SupplyIdWithShippedBodySchema(BaseSchema):
 
     supplies: List[SupplyId]
     shipped_count: int = Field(description="Фактическое количество товаров для отгрузки из висячих поставок")
+    operator: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Оператор, выполняющий операцию (опционально)"
+    )
+
+    @field_validator('operator')
+    @classmethod
+    def validate_operator(cls, v):
+        """Валидация оператора."""
+        if v is not None and not v.strip():
+            raise ValueError("Поле operator не может быть пустой строкой")
+        return v.strip() if v else None
 
 
 class SupplyOrderItem(BaseModel):
@@ -191,6 +204,19 @@ class MoveOrdersRequest(BaseSchema):
         default=False,
         description="Флаг перемещения в финальную поставку (по умолчанию висячая)"
     )
+    operator: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Оператор, выполняющий операцию (опционально)"
+    )
+
+    @field_validator('operator')
+    @classmethod
+    def validate_operator(cls, v):
+        """Валидация оператора."""
+        if v is not None and not v.strip():
+            raise ValueError("Поле operator не может быть пустой строкой")
+        return v.strip() if v else None
 
 
 class MoveOrdersResponse(BaseSchema):
@@ -245,24 +271,37 @@ class FictitiousShipmentRequest(BaseSchema):
     """Схема запроса для фиктивной отгрузки поставок."""
     supplies: Dict[str, str] = Field(description="Объект поставок {supply_id: account}")
     shipped_quantity: int = Field(gt=0, description="Количество товара для фиктивной отгрузки")
-    
+    operator: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Оператор, выполняющий операцию (опционально)"
+    )
+
     @field_validator('supplies')
     @classmethod
     def validate_supplies(cls, v):
         """Валидация объекта поставок."""
         if not v or len(v) == 0:
             raise ValueError("Объект supplies не может быть пустым")
-        
+
         if not isinstance(v, dict):
             raise ValueError("Поле supplies должно быть объектом")
-            
+
         for supply_id, account in v.items():
             if not isinstance(supply_id, str) or not isinstance(account, str):
                 raise ValueError("Все ключи и значения в supplies должны быть строками")
             if not supply_id.strip() or not account.strip():
                 raise ValueError("supply_id и account не могут быть пустыми строками")
-        
+
         return v
+
+    @field_validator('operator')
+    @classmethod
+    def validate_operator(cls, v):
+        """Валидация оператора."""
+        if v is not None and not v.strip():
+            raise ValueError("Поле operator не может быть пустой строкой")
+        return v.strip() if v else None
 
 
 class FictitiousDeliveryResponse(BaseSchema):

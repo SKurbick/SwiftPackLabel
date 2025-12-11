@@ -3453,12 +3453,14 @@ class SuppliesService:
 
     async def shipment_hanging_actual_quantity_implementation(self,
                                                               supply_data: SupplyIdWithShippedBodySchema,
-                                                              user: dict) -> Dict[str, Any]:
+                                                              user: dict,
+                                                              operator: Optional[str] = None) -> Dict[str, Any]:
         """
         Отгрузка фактического количества из висячих поставок с созданием новых поставок.
         Args:
             supply_data: Данные о поставках с количеством для отгрузки
             user: Данные пользователя
+            operator: Оператор, выполнивший операцию (опционально)
         Returns:
             Dict[str, Any]: Результат операции со статистикой
         """
@@ -3644,7 +3646,10 @@ class SuppliesService:
                     })
 
                 status_service = OrderStatusService(self.db)
-                logged_count = await status_service.process_and_log_partially_shipped(partially_shipped_data)
+                logged_count = await status_service.process_and_log_partially_shipped(
+                    partially_shipped_data,
+                    operator
+                )
                 logger.info(f"Залогировано {logged_count} заказов со статусом PARTIALLY_SHIPPED")
 
             # 6.2. ВАЖНО: НЕ сохраняем фактические поставки как висячие
