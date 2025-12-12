@@ -4280,15 +4280,18 @@ class SuppliesService:
             raise Exception(f"Image combination error: {str(e)}")
 
     async def shipment_fictitious_supplies_with_quantity(self, supplies: Dict[str, str],
-                                                         shipped_quantity: int, operator: str) -> Dict[str, Any]:
+                                                         shipped_quantity: int,
+                                                         user: dict,
+                                                         operator: Optional[str] = None) -> Dict[str, Any]:
         """
         Фиктивная отгрузка поставок с указанным количеством.
-        
+
         Args:
             supplies: Объект поставок {supply_id: account}
             shipped_quantity: Количество для отгрузки
-            operator: Оператор
-            
+            user: Данные пользователя из JWT (для author в 1C)
+            operator: Оператор из запроса для логирования в БД (может быть None)
+
         Returns:
             Dict[str, Any]: Результат операции
         """
@@ -4401,9 +4404,14 @@ class SuppliesService:
             )
 
         # 6. Отправка данных в shipment_of_goods и 1C - ТОЛЬКО заказы со стикерами
-        await self._send_shipment_data_to_external_systems(orders_with_stickers, supplies, operator)
+        # author для 1C берется из user (JWT), operator для БД из запроса
+        await self._send_shipment_data_to_external_systems(
+            orders_with_stickers, supplies,
+            author=user.get('username', 'unknown')
+        )
 
         # 7. Сохраняем фиктивно отгруженные order_id в БД - ТОЛЬКО заказы со стикерами
+        # operator может быть None - это нормально для БД
         await self._save_fictitious_shipped_orders_batch(orders_with_stickers, supplies, operator)
 
         # Возвращаем только PDF стикеры
@@ -4580,7 +4588,7 @@ class SuppliesService:
 
     async def _send_shipment_data_to_external_systems(self, selected_orders: List[Dict],
                                            supplies: Dict[str, str],
-                                           operator: str) -> bool:
+                                           author: str) -> bool:
         """
         Отправляет данные об отгрузке в shipment_of_goods и 1C.
         НОВОЕ: Также снимает резерв через add_shipped_goods API.
@@ -4588,7 +4596,7 @@ class SuppliesService:
         Args:
             selected_orders: Выбранные заказы для отгрузки
             supplies: Словарь {supply_id: account}
-            operator: Оператор, выполняющий операцию
+            author: Автор отгрузки из JWT (для 1C API)
 
         Returns:
             bool: True если отправка успешна
@@ -4616,7 +4624,7 @@ class SuppliesService:
             shipment_success = await self.save_shipments(
                 supply_ids=delivery_supplies,
                 order_wild_map=order_wild_map,
-                author=operator
+                author=author
             )
 
             # 5. Отправляем в 1C
@@ -4672,15 +4680,15 @@ class SuppliesService:
 
     async def _save_fictitious_shipped_orders_and_build_results(self, selected_orders: List[Dict],
                                                                 supplies: Dict[str, str],
-                                                                operator: str) -> List[Dict[str, Any]]:
+                                                                operator: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Сохраняет фиктивно отгруженные order_id в БД и формирует результаты.
-        
+
         Args:
             selected_orders: Выбранные для отгрузки заказы
             supplies: Объект поставок {supply_id: account}
-            operator: Оператор
-            
+            operator: Оператор (может быть None)
+
         Returns:
             List[Dict[str, Any]]: Список результатов по каждой поставке
         """
@@ -4716,14 +4724,14 @@ class SuppliesService:
 
     async def _save_fictitious_shipped_orders_batch(self, selected_orders: List[Dict],
                                                    supplies: Dict[str, str],
-                                                   operator: str) -> None:
+                                                   operator: Optional[str] = None) -> None:
         """
         Сохраняет фиктивно отгруженные order_id в БД (упрощенная версия).
-        
+
         Args:
             selected_orders: Выбранные для отгрузки заказы
             supplies: Объект поставок {supply_id: account}
-            operator: Оператор
+            operator: Оператор (может быть None)
         """
         hanging_supplies = HangingSupplies(self.db)
 

@@ -302,17 +302,18 @@ async def shipment_of_fictions_supply(
 
     try:
         supply_service = SuppliesService(db)
-        operator = request.operator  # Может быть None
-        
+        # operator из запроса для логирования в БД (может быть None)
+        # user передается для author в 1C API
         result = await supply_service.shipment_fictitious_supplies_with_quantity(
             supplies=request.supplies,
             shipped_quantity=request.shipped_quantity,
-            operator=operator
+            user=user,
+            operator=request.operator
         )
         
         # Всегда возвращаем PDF стикеры
         if result.get("stickers_pdf"):
-            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{operator}.pdf"
+            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{request.operator or user.get('username', 'unknown')}.pdf"
             return StreamingResponse(
                 result["stickers_pdf"],
                 media_type="application/pdf", 
@@ -361,11 +362,12 @@ async def shipment_hanging_actual_quantity(
 
     try:
         supply_service = SuppliesService(db)
-        operator = supply_data.operator
+        # operator из запроса для логирования в БД (может быть None)
+        # user передается для author в 1C API
         result = await supply_service.shipment_hanging_actual_quantity_implementation(
             supply_data,
             user,
-            operator
+            supply_data.operator  # operator для БД, может быть None
         )
 
         return JSONResponse(
@@ -407,6 +409,8 @@ async def move_orders_between_supplies(
 
     try:
         supply_service = SuppliesService(db)
+        # operator из запроса для логирования в БД (может быть None)
+        # Для 1C API используется user внутри метода
         operator = request_data.operator
         result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
 

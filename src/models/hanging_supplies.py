@@ -598,17 +598,17 @@ class HangingSupplies:
             logger.error(f"Ошибка получения фиктивно отгруженных order_id для поставки {supply_id} ({account}): {str(e)}")
             return []
 
-    async def add_fictitious_shipped_order_ids(self, supply_id: str, account: str, 
-                                              order_ids: List[int], operator: str) -> bool:
+    async def add_fictitious_shipped_order_ids(self, supply_id: str, account: str,
+                                              order_ids: List[int], operator: Optional[str] = None) -> bool:
         """
         Добавляет новые фиктивно отгруженные order_id в поле fictitious_shipped_order_ids.
-        
+
         Args:
             supply_id: ID поставки
             account: Аккаунт Wildberries
             order_ids: Список order_id для добавления
-            operator: Оператор, выполняющий операцию
-            
+            operator: Оператор, выполняющий операцию (может быть None)
+
         Returns:
             bool: True если обновление прошло успешно, False иначе
         """

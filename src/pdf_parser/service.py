@@ -222,7 +222,7 @@ class DocumentProcessingService:
             shipment_success = await supplies_service._send_shipment_data_to_external_systems(
                 selected_orders=selected_orders,
                 supplies=supplies,
-                operator=user.get('username', 'unknown')
+                author=user.get('username', 'unknown')
             )
 
             # 5.5. Обрабатываем QR-данные после успешной отгрузки
