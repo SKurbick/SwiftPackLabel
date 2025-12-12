@@ -295,20 +295,41 @@ class HangingSuppliesService:
         return await self.hanging_supplies_model.get_changes_statistics()
 
     async def _sync_conversion_supply_into_fictitious_shipment(self):
-        logger.info("Поиск висячих поставок")
-        overdue_supplies = await self.hanging_supplies_model._sync_get_hanging_supplies_by_status()
+        """Логика автоперевода висячих поставок."""
+        without_overdue_marker, without_invalid_marker = False, False # маркеры отсутствия поставок
 
+        logger.info("Поиск висячих поставок с просроченными сборочными заданиями более 60 часов")
+        overdue_supplies = await self.hanging_supplies_model._sync_get_hanging_supplies_by_status()
+        # если поставки с просроченными сборочными отсутствуют
         if len(overdue_supplies) == 0:
             logger.info("Поставок с просроченными сборочными заданиями не найдено")
+            without_overdue_marker = True
+
+        logger.info("Поиск висячих поставок с отправленными сборочными заданиями")
+        supplies_with_invalid_statuses = await self.hanging_supplies_model._sync_get_hanging_supplies_with_invalid_status()
+        # если поставки с отправленными сборочными отсутствуют
+        if len(supplies_with_invalid_statuses) == 0:
+            logger.info("Поставок с отправленными сборочными заданиями не найдено")
+            without_invalid_marker = True
+
+        if not without_overdue_marker:
+            logger.info(f"Количество поставок с просроченными сборочными заданиями: {len(overdue_supplies)}")
+            logger.info("Выполняется автоперевод в фиктивную доставку")
+            supplies_ids = [supply.supply_id for supply in overdue_supplies]
+            await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(supplies_ids)
+            logger.info("Автоперевод выполнен")
+
+        if not without_invalid_marker:
+            logger.info(f"Количество поставок с отправленными сборочными заданиями: {len(overdue_supplies)}")
+            logger.info("Выполняется автоперевод в фиктивную доставку")
+            invalid_statuses_supplies_ids = [supply.supply_id for supply in supplies_with_invalid_statuses]
+            await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(invalid_statuses_supplies_ids)
+            logger.info("Автоперевод выполнен")
+
+        if without_overdue_marker and without_invalid_marker:
+            logger.info("Поставок с просроченными или отправленными сборочными заданиями не найдено.")
             return None
-
-        logger.info(f"Количество поставок с просроченными сборочными заданиями: {len(overdue_supplies)}")
-        logger.info("Выполняется автоперевод в фиктивную доставку")
-
-        supplies_ids = [supply.supply_id for supply in overdue_supplies]
-
-        await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(supplies_ids)
-        logger.info("Автоперевод выполнен")
+        return None
 
 
 @celery_app.task(name='sync_hanging_supplies_with_data', soft_time_limit=600, time_limit=600)
@@ -604,8 +625,8 @@ async def _auto_conversion():
                 user=settings.db_app_user,
                 password=settings.db_app_password,
                 database=settings.dp_app_name,
-                min_size=1,
-                max_size=5,
+                min_size=5,
+                max_size=10,
                 command_timeout=60
             )
 
