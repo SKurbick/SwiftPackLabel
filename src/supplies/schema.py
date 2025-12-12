@@ -328,12 +328,14 @@ class FictitiousDeliveryInfo(BaseSchema):
     shipped_count: int = Field(description="Количество отгруженных заказов")
 
 
-class HangingSuppliesWithOverdueOrders(BaseSchema):
+class BaseHangingSuppliesData(BaseSchema):
+    supply_id: str = Field(description="ID висящей поставки")
+
+class HangingSuppliesWithOverdueOrders(BaseHangingSuppliesData):
     """
     Схема информации о висящей поставке со сборочными заданиями,
     с момента создания которых прошло 60 и более часов.
     """
-    supply_id: str = Field(description="ID висящей поставки")
     # order_data: dict[str, Any] = Field(
     #     default_factory=dict,
     #     description="Данные сборочных заданий в формате JSON"
