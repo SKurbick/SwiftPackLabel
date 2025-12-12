@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from numpy import record
 
 from src.logger import app_logger as logger
-from src.supplies.schema import HangingSuppliesWithOverdueOrders
+from src.supplies.schema import HangingSuppliesWithOverdueOrders, BaseHangingSuppliesData
 
 
 class HangingSupplies:
@@ -705,3 +705,44 @@ class HangingSupplies:
         """
 
         await self.db.execute(update_query, supplies_ids)
+
+
+    async def _sync_get_hanging_supplies_with_invalid_status(self) -> list[BaseHangingSuppliesData]:
+        """
+        Получение ID висячих поставок, в которых ХОТЯ БЫ ОДНО сборочное задание было отправлено
+        (status_model_view."Статус_ВБ" != 'waiting'), а остальные имеют статус waiting
+        :return: список ID висячих поставок
+        """
+        query = """
+        WITH get_hanging_supply AS (
+            SELECT id, supply_id, created_at
+            FROM hanging_supplies hs
+            WHERE hs.is_fictitious_delivered = false
+        ),
+        get_statuses AS (
+            SELECT wild, 
+                   "Номер_СЗ" AS order_id, 
+                   "Наш_статус" AS our_status, 
+                   "Статус_поставщика" AS supply_status, 
+                   "Статус_ВБ" AS wb_status, 
+                   "Номер_поставки" AS supply_id
+            FROM status_model_view smv 
+            WHERE smv."Наш_статус" = 'IN_HANGING_SUPPLY' 
+              AND smv."Статус_поставщика" = 'complete'
+        ),
+        supply_with_waiting AS (
+            SELECT DISTINCT supply_id
+            FROM get_statuses
+            WHERE wb_status = 'waiting'
+        )
+        SELECT distinct ghs.id
+        FROM get_hanging_supply ghs
+        JOIN get_statuses gs ON ghs.supply_id = gs.supply_id
+        WHERE ghs.supply_id IN (SELECT supply_id FROM supply_with_waiting)
+        """
+
+        result = await self.db.fetch(query)
+
+        return [BaseHangingSuppliesData(
+            supply_id=record.get('supply_id')
+        ) for record in result]
