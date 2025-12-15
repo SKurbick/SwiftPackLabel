@@ -68,7 +68,7 @@ def create_celery_app() -> Celery:
             },
             'auto_conversion_hanging_supplies_into_fictitious_shipment': {
                 'task': 'auto_conversion_hanging_supplies',
-                'schedule': 120.0 # каждый час
+                'schedule': 3600 # каждый час
             }
         },
     )
