@@ -65,8 +65,8 @@ class Supplies(Account):
         # Добавляем заказ в поставку
         self.async_client.retries = 90
         self.async_client.delay = 61
-        url = f"{self.url}/{supply_id}/orders/{order_id}"
-        response = await self.async_client.patch(url, headers=self.headers)
+        url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
+        response = await self.async_client.patch(url, json={"orders": [order_id]}, headers=self.headers)
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return response
 
