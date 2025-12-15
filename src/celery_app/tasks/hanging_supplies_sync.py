@@ -313,16 +313,24 @@ class HangingSuppliesService:
             without_invalid_marker = True
 
         if not without_overdue_marker:
-            logger.info(f"Количество поставок с просроченными сборочными заданиями: {len(overdue_supplies)}")
+            supplies_ids = set(supply.supply_id for supply in overdue_supplies)
+            logger.info(f"Количество поставок с просроченными сборочными заданиями: {len(supplies_ids)}")
             logger.info("Выполняется автоперевод в фиктивную доставку")
-            supplies_ids = [supply.supply_id for supply in overdue_supplies]
             await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(supplies_ids)
             logger.info("Автоперевод выполнен")
 
+            logger.info(f'Выполняется перевод сборочных заданий в статус "IN_HANGING_SUPPLY"')
+            data = [
+                (overdue_supply.order_id, overdue_supply.supply_id, overdue_supply.account)
+                for overdue_supply in overdue_supplies
+            ]
+            await self.hanging_supplies_model._sync_update_orders_status(data)
+            logger.info(f'Присвоение статусов выполнено успешно')
+
         if not without_invalid_marker:
-            logger.info(f"Количество поставок с отправленными сборочными заданиями: {len(overdue_supplies)}")
+            invalid_statuses_supplies_ids = set(supply.supply_id for supply in supplies_with_invalid_statuses)
+            logger.info(f"Количество поставок с отправленными сборочными заданиями: {len(invalid_statuses_supplies_ids)}")
             logger.info("Выполняется автоперевод в фиктивную доставку")
-            invalid_statuses_supplies_ids = [supply.supply_id for supply in supplies_with_invalid_statuses]
             await self.hanging_supplies_model._sync_conversion_supply_into_fictitious_shipment(invalid_statuses_supplies_ids)
             logger.info("Автоперевод выполнен")
 
