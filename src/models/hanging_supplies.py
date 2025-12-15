@@ -658,43 +658,57 @@ class HangingSupplies:
         """
         query = """
         with filtered_orders as (
-        	select
-        		hs.id, 
-        		hs.supply_id,
-        		min((elem->>'createdAt')::timestamptz) as earliest_order_date
-        	from hanging_supplies hs 
-        	cross join lateral jsonb_array_elements(
-        		case
-        			when hs.order_data ? 'orders'
-        			then hs.order_data->'orders'
-        			else '[]'::jsonb
-        		end
-        	) as elem
-        	where hs.order_data->'orders' != '[]'::jsonb
-        	group by hs.id, hs.supply_id
+            select
+                hs.id, 
+                hs.supply_id,
+                min((elem->>'createdAt')::timestamptz) as earliest_order_date
+            from hanging_supplies hs 
+            cross join lateral jsonb_array_elements(
+                case
+                    when hs.order_data ? 'orders'
+                    then hs.order_data->'orders'
+                    else '[]'::jsonb
+                end
+            ) as elem
+            where hs.order_data->'orders' != '[]'::jsonb
+            group by hs.id, hs.supply_id
+        ),
+        filtered_hanging_supplies as (
+            select distinct hs.id, hs.supply_id, hs.account
+            from hanging_supplies hs
+            join filtered_orders fo on hs.id = fo.id
+            join supplies_and_orders sao on hs.supply_id = sao.supply_id
+            join assembly_task_status_model atsm on sao.id = atsm.id
+            where atsm.wb_status = 'waiting' 
+                and atsm.supplier_status = 'confirm' 
+                and hs.is_fictitious_delivered is false 
+                and fo.earliest_order_date < now() - interval '60 hours'
         )
-        select distinct hs.*
-        from hanging_supplies hs
-        join filtered_orders fo on hs.id = fo.id
-        join supplies_and_orders sao on hs.supply_id = sao.supply_id
-        join assembly_task_status_model atsm on sao.id = atsm.id
-        where atsm.wb_status = 'waiting' and
-        atsm.supplier_status = 'confirm' and
-        hs.is_fictitious_delivered is false and
-        fo.earliest_order_date < now() - interval '60 hours';
+        select 
+            fhs.supply_id,
+            fhs.account,
+            elem->>'id' as order_id
+        from filtered_hanging_supplies fhs
+        join hanging_supplies hs on fhs.id = hs.id
+        cross join lateral jsonb_array_elements(
+            case
+                when hs.order_data ? 'orders'
+                then hs.order_data->'orders'
+                else '[]'::jsonb
+            end
+        ) as elem
+        order by fhs.supply_id, order_id;
         """
 
         result = await self.db.fetch(query)
 
         return [HangingSuppliesWithOverdueOrders(
             supply_id=record.get('supply_id'),
-            # order_data=record.get('order_data'),
-            is_fictitious_delivered=record.get('is_fictitious_delivered'),
-            fictitious_delivered_at=record.get('fictitious_delivered_at'),
-            fictitious_delivery_operator=record.get('fictitious_delivery_operator'),
+            account=record.get('account'),
+            order_id=record.get('order_id')
         ) for record in result]
 
-    async def _sync_conversion_supply_into_fictitious_shipment(self, supplies_ids: list[str]):
+    async def _sync_conversion_supply_into_fictitious_shipment(self, supplies_ids: set[str]):
         """Автоперевод висячих поставок в фиктивную доставку."""
         update_query = """
         UPDATE hanging_supplies
@@ -705,6 +719,19 @@ class HangingSupplies:
         """
 
         await self.db.execute(update_query, supplies_ids)
+
+    async def _sync_update_orders_status(self, orders: list[tuple]) -> None:
+        """
+        Автоперевод сборочных заданий в статус IN_HANGING_SUPPLY, просроченных на > 60 часов
+        в рамках перевода висячих поставок.
+        """
+        update_query = """
+        INSERT INTO order_status_log 
+            (order_id, status, supply_id, account)
+        VALUES($1, 'IN_HANGING_SUPPLY', $2, $3)
+        """
+
+        await self.db.executemany(update_query, orders)
 
 
     async def _sync_get_hanging_supplies_with_invalid_status(self) -> list[BaseHangingSuppliesData]:
@@ -735,7 +762,7 @@ class HangingSupplies:
             FROM get_statuses
             WHERE wb_status = 'waiting'
         )
-        SELECT distinct ghs.id
+        SELECT distinct ghs.supply_id
         FROM get_hanging_supply ghs
         JOIN get_statuses gs ON ghs.supply_id = gs.supply_id
         WHERE ghs.supply_id IN (SELECT supply_id FROM supply_with_waiting)
