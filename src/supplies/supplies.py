@@ -603,6 +603,7 @@ class SuppliesService:
                         )
                         supply["shipped_count"] = len(unique_shipped_ids)
                     else:
+                        unique_shipped_ids = set()
                         supply["shipped_count"] = 0
 
                     # Добавляем информацию о фиктивной доставке
