@@ -29,10 +29,35 @@ class Supplies(Account):
 
         return supplies
 
-    async def get_supply_orders(self, supply_id: str):
-        response = await self.async_client.get(f"{self.url}/{supply_id}/orders", headers=self.headers)
+    async def get_supply_order_ids(self, supply_id: str) -> list[int]:
+        url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/order-ids"
+        response = await self.async_client.get(url, headers=self.headers)
+
+        if response is None:
+            logger.warning(f"Не удалось получить order-ids для поставки {supply_id}, account {self.account}")
+            return []
+
         response_json = parse_json(response)
-        return {self.account: {supply_id: {"orders": response_json.get('orders', [])}}}
+        order_ids = response_json.get('orderIds', response_json.get('orders', []))
+        logger.info(f"Получены {len(order_ids)} order-ids для поставки {supply_id}, account {self.account}")
+        return order_ids
+
+    async def get_supply_orders(self, supply_id: str):
+        order_ids = await self.get_supply_order_ids(supply_id)
+
+        if not order_ids:
+            logger.info(f"Поставка {supply_id} пуста (нет заказов), account {self.account}")
+            return {self.account: {supply_id: {"orders": []}}}
+
+        orders_api = Orders(self.account, self.token)
+        all_orders = await orders_api.get_orders()
+
+        order_ids_set = set(order_ids)
+        filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
+
+        logger.info(f"Получены детали для {len(filtered_orders)}/{len(order_ids)} заказов поставки {supply_id}, account {self.account}")
+
+        return {self.account: {supply_id: {"orders": filtered_orders}}}
 
     async def create_supply(self, name: str) -> dict:
         """
@@ -107,3 +132,43 @@ class Supplies(Account):
         response = await self.async_client.get(f"{self.url}/{supply_id}/barcode?type=png", headers=self.headers)
         logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
         return parse_json(response)
+
+    async def get_supply_orders_batch(self, supply_ids: list[str]) -> dict:
+        import asyncio
+
+        if not supply_ids:
+            return {self.account: {}}
+
+        logger.info(f"Пакетное получение заказов для {len(supply_ids)} поставок, account {self.account}")
+
+        tasks = [self.get_supply_order_ids(supply_id) for supply_id in supply_ids]
+        order_ids_results = await asyncio.gather(*tasks)
+
+        supply_order_ids_map = {}
+        all_order_ids = set()
+        for supply_id, order_ids in zip(supply_ids, order_ids_results):
+            supply_order_ids_map[supply_id] = set(order_ids)
+            all_order_ids.update(order_ids)
+
+        logger.info(f"Получены order-ids для {len(supply_ids)} поставок, всего уникальных заказов: {len(all_order_ids)}, account {self.account}")
+
+        if all_order_ids:
+            orders_api = Orders(self.account, self.token)
+            all_orders = await orders_api.get_orders()
+            logger.info(f"Получено {len(all_orders)} заказов из API, account {self.account}")
+        else:
+            all_orders = []
+
+        orders_by_id = {order.get('id'): order for order in all_orders}
+
+        result = {self.account: {}}
+        for supply_id in supply_ids:
+            order_ids_for_supply = supply_order_ids_map.get(supply_id, set())
+            orders_for_supply = [
+                orders_by_id[oid] for oid in order_ids_for_supply
+                if oid in orders_by_id
+            ]
+            result[self.account][supply_id] = {"orders": orders_for_supply}
+
+        logger.info(f"Пакетная обработка завершена для {len(supply_ids)} поставок, account {self.account}")
+        return result

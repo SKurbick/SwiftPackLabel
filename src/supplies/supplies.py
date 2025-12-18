@@ -467,13 +467,37 @@ class SuppliesService:
 
     @staticmethod
     async def get_information_orders_to_supplies(supply_ids: List[dict]) -> List[Dict[str, Dict]]:
-        logger.info(f'Получение информации о заказах по конкретным поставкам,количество поставок : {len(supply_ids)}')
-        tasks = []
+        logger.info(f'Получение информации о заказах по конкретным поставкам, количество групп: {len(supply_ids)}')
+
+        supplies_by_account: Dict[str, List[str]] = {}
         for supplies in supply_ids:
-            for account, supply in supplies.items():
-                for sup in supply:
-                    tasks.append(Supplies(account, get_wb_tokens()[account]).get_supply_orders(sup.get("id")))
-        return await asyncio.gather(*tasks)
+            for account, supply_list in supplies.items():
+                if account not in supplies_by_account:
+                    supplies_by_account[account] = []
+                for sup in supply_list:
+                    supply_id = sup.get("id")
+                    if supply_id:
+                        supplies_by_account[account].append(supply_id)
+
+        total_supplies = sum(len(sups) for sups in supplies_by_account.values())
+        logger.info(f'Пакетная обработка: {len(supplies_by_account)} аккаунтов, {total_supplies} поставок')
+
+        wb_tokens = get_wb_tokens()
+        tasks = []
+        for account, supply_ids_list in supplies_by_account.items():
+            supplies_api = Supplies(account, wb_tokens[account])
+            tasks.append(supplies_api.get_supply_orders_batch(supply_ids_list))
+
+        batch_results = await asyncio.gather(*tasks)
+
+        results = []
+        for batch_result in batch_results:
+            for account, supplies_data in batch_result.items():
+                for supply_id, orders_data in supplies_data.items():
+                    results.append({account: {supply_id: orders_data}})
+
+        logger.info(f'Возвращено {len(results)} элементов в старом формате')
+        return results
 
     @staticmethod
     def group_result(result: List[dict]) -> Dict[str, Dict]:

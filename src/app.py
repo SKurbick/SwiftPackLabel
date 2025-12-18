@@ -5,6 +5,7 @@ from src.db import check_db_connected, check_db_disconnected
 from src.routes import router
 from src.auth.init_superuser import create_initial_superuser
 from src.cache import global_cache
+from src.middleware import DuplicateRequestMiddleware
 
 
 def include_router(application: FastAPI) -> None:
@@ -20,6 +21,8 @@ def add_middleware(application: FastAPI, *args, **kwargs) -> None: # noqa
 def start_application() -> FastAPI:
     application = FastAPI(title='SwiftPackLabel', debug=settings.debug)
     include_router(application)
+
+    # CORS middleware (внешний слой)
     add_middleware(
         application,
         CORSMiddleware,
@@ -28,6 +31,11 @@ def start_application() -> FastAPI:
         allow_methods=['*'],
         allow_headers=['*']
     )
+
+    # Защита от дублирующих запросов (двойной клик)
+    # Выполняется ПОСЛЕ CORS, использует Redis для блокировки
+    application.add_middleware(DuplicateRequestMiddleware)
+
     return application
 
 
