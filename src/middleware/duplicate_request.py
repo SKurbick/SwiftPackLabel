@@ -266,9 +266,16 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
         КРИТИЧНО: Body уже был прочитан в middleware,
         нужно "вернуть" его для Pydantic валидации в endpoint.
         """
-        # Создаём новую функцию receive, которая вернёт сохранённый body
+        body_sent = False
+        original_receive = request._receive
+
         async def receive():
-            return {"type": "http.request", "body": body}
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            # После отдачи body - ждём disconnect от оригинального receive
+            return await original_receive()
 
         # Заменяем receive в request
         request._receive = receive

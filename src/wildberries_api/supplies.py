@@ -60,8 +60,11 @@ class Supplies(Account):
         # Оптимизация: используем БД если доступна
         if db:
             from src.models.assembly_task_status import AssemblyTaskStatus
-            assembly_task = AssemblyTaskStatus(db)
-            orders_from_db = await assembly_task.get_orders_details_by_ids(order_ids)
+            from src.db import db as db_pool
+            # Используем пул соединений для параллельных запросов
+            async with db_pool.connection() as conn:
+                assembly_task = AssemblyTaskStatus(conn)
+                orders_from_db = await assembly_task.get_orders_details_by_ids(order_ids)
 
             # Проверяем что все заказы найдены
             missing_ids = set(order_ids) - set(orders_from_db.keys())
@@ -230,8 +233,11 @@ class Supplies(Account):
         orders_by_id = {}
         if db:
             from src.models.assembly_task_status import AssemblyTaskStatus
-            assembly_task = AssemblyTaskStatus(db)
-            orders_from_db = await assembly_task.get_orders_details_by_ids(list(all_order_ids))
+            from src.db import db as db_pool
+            # Используем пул соединений для избежания конфликтов при параллельных запросах
+            async with db_pool.connection() as conn:
+                assembly_task = AssemblyTaskStatus(conn)
+                orders_from_db = await assembly_task.get_orders_details_by_ids(list(all_order_ids))
             orders_by_id = orders_from_db
 
             missing_ids = all_order_ids - set(orders_by_id.keys())
