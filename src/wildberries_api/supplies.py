@@ -42,13 +42,73 @@ class Supplies(Account):
         logger.info(f"Получены {len(order_ids)} order-ids для поставки {supply_id}, account {self.account}")
         return order_ids
 
-    async def get_supply_orders(self, supply_id: str):
+    async def get_supply_orders(self, supply_id: str, db=None):
+        """
+        Получает заказы поставки с деталями.
+
+        Оптимизированный подход:
+        1. Получаем order_ids из WB API (быстро)
+        2. Если db передан - получаем детали из БД (быстро)
+        3. Fallback на WB API для отсутствующих в БД
+        """
         order_ids = await self.get_supply_order_ids(supply_id)
 
         if not order_ids:
             logger.info(f"Поставка {supply_id} пуста (нет заказов), account {self.account}")
             return {self.account: {supply_id: {"orders": []}}}
 
+        # Оптимизация: используем БД если доступна
+        if db:
+            from src.models.assembly_task_status import AssemblyTaskStatus
+            assembly_task = AssemblyTaskStatus(db)
+            orders_from_db = await assembly_task.get_orders_details_by_ids(order_ids)
+
+            # Проверяем что все заказы найдены
+            missing_ids = set(order_ids) - set(orders_from_db.keys())
+
+            if not missing_ids:
+                # Все заказы найдены в БД
+                orders_list = list(orders_from_db.values())
+                logger.info(f"Получены детали для {len(orders_list)}/{len(order_ids)} заказов поставки {supply_id} из БД, account {self.account}")
+                return {self.account: {supply_id: {"orders": orders_list}}}
+
+            # Есть недостающие - получаем их из WB API
+            logger.info(f"Поставка {supply_id}: {len(missing_ids)} заказов не найдено в БД, получаем из WB API")
+            orders_api = Orders(self.account, self.token)
+
+            # Пробуем сначала new_orders (быстрее)
+            new_orders = await orders_api.get_new_orders()
+            for order in new_orders:
+                oid = order.get('id')
+                if oid in missing_ids:
+                    orders_from_db[oid] = {
+                        "id": oid,
+                        "article": order.get("article", ""),
+                        "nmId": order.get("nmId"),
+                        "createdAt": order.get("createdAt", ""),
+                        "convertedPrice": order.get("convertedPrice", 0),
+                    }
+                    missing_ids.discard(oid)
+
+            # Если всё ещё есть недостающие - полный запрос
+            if missing_ids:
+                all_orders = await orders_api.get_orders()
+                for order in all_orders:
+                    oid = order.get('id')
+                    if oid in missing_ids:
+                        orders_from_db[oid] = {
+                            "id": oid,
+                            "article": order.get("article", ""),
+                            "nmId": order.get("nmId"),
+                            "createdAt": order.get("createdAt", ""),
+                            "convertedPrice": order.get("convertedPrice", 0),
+                        }
+
+            orders_list = list(orders_from_db.values())
+            logger.info(f"Получены детали для {len(orders_list)}/{len(order_ids)} заказов поставки {supply_id} (гибрид БД+API), account {self.account}")
+            return {self.account: {supply_id: {"orders": orders_list}}}
+
+        # Fallback: старый метод через полный get_orders()
         orders_api = Orders(self.account, self.token)
         all_orders = await orders_api.get_orders()
 
@@ -133,7 +193,15 @@ class Supplies(Account):
         logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
         return parse_json(response)
 
-    async def get_supply_orders_batch(self, supply_ids: list[str]) -> dict:
+    async def get_supply_orders_batch(self, supply_ids: list[str], db=None) -> dict:
+        """
+        Пакетное получение заказов для нескольких поставок.
+
+        Оптимизированный подход:
+        1. Получаем order_ids из WB API для всех поставок (параллельно)
+        2. Если db передан - получаем детали из БД одним запросом
+        3. Fallback на WB API для отсутствующих в БД
+        """
         import asyncio
 
         if not supply_ids:
@@ -152,14 +220,60 @@ class Supplies(Account):
 
         logger.info(f"Получены order-ids для {len(supply_ids)} поставок, всего уникальных заказов: {len(all_order_ids)}, account {self.account}")
 
-        if all_order_ids:
+        if not all_order_ids:
+            result = {self.account: {}}
+            for supply_id in supply_ids:
+                result[self.account][supply_id] = {"orders": []}
+            return result
+
+        # Оптимизация: используем БД если доступна
+        orders_by_id = {}
+        if db:
+            from src.models.assembly_task_status import AssemblyTaskStatus
+            assembly_task = AssemblyTaskStatus(db)
+            orders_from_db = await assembly_task.get_orders_details_by_ids(list(all_order_ids))
+            orders_by_id = orders_from_db
+
+            missing_ids = all_order_ids - set(orders_by_id.keys())
+            logger.info(f"Получено {len(orders_by_id)} заказов из БД, отсутствует {len(missing_ids)}, account {self.account}")
+
+            if missing_ids:
+                # Fallback для недостающих
+                orders_api = Orders(self.account, self.token)
+
+                # Сначала new_orders
+                new_orders = await orders_api.get_new_orders()
+                for order in new_orders:
+                    oid = order.get('id')
+                    if oid in missing_ids:
+                        orders_by_id[oid] = {
+                            "id": oid,
+                            "article": order.get("article", ""),
+                            "nmId": order.get("nmId"),
+                            "createdAt": order.get("createdAt", ""),
+                            "convertedPrice": order.get("convertedPrice", 0),
+                        }
+                        missing_ids.discard(oid)
+
+                # Если всё ещё есть недостающие
+                if missing_ids:
+                    all_orders = await orders_api.get_orders()
+                    for order in all_orders:
+                        oid = order.get('id')
+                        if oid in missing_ids:
+                            orders_by_id[oid] = {
+                                "id": oid,
+                                "article": order.get("article", ""),
+                                "nmId": order.get("nmId"),
+                                "createdAt": order.get("createdAt", ""),
+                                "convertedPrice": order.get("convertedPrice", 0),
+                            }
+        else:
+            # Fallback: старый метод
             orders_api = Orders(self.account, self.token)
             all_orders = await orders_api.get_orders()
             logger.info(f"Получено {len(all_orders)} заказов из API, account {self.account}")
-        else:
-            all_orders = []
-
-        orders_by_id = {order.get('id'): order for order in all_orders}
+            orders_by_id = {order.get('id'): order for order in all_orders}
 
         result = {self.account: {}}
         for supply_id in supply_ids:

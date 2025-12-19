@@ -100,16 +100,19 @@ class EmptySupplyCleaner:
                     if account not in wb_tokens:
                         continue
                     
-                    # Получаем заказы для каждой поставки
+                    # Получаем количество заказов для каждой поставки
+                    # Используем get_supply_order_ids вместо get_supply_orders для скорости
+                    # (не нужны детали заказов, только количество)
+                    supplies_api = Supplies(account, wb_tokens[account])
                     for supply in supplies:
                         supply_id = supply['id']
                         supply_key = self._make_supply_key(supply_id, account)
-                        
+
                         try:
-                            orders_data = await Supplies(account, wb_tokens[account]).get_supply_orders(supply_id)
-                            orders_count = len(orders_data.get(account, {}).get(supply_id, {}).get('orders', []))
+                            order_ids = await supplies_api.get_supply_order_ids(supply_id)
+                            orders_count = len(order_ids)
                             supplies_data[supply_key] = orders_count
-                            
+
                         except Exception as e:
                             logger.warning(f"Ошибка получения заказов {supply_key}: {e}")
                             # БЕЗОПАСНОСТЬ: В случае ошибки НЕ включаем поставку в анализ
@@ -188,22 +191,20 @@ class EmptySupplyCleaner:
         """
         try:
             logger.info(f"Выполняется дополнительная API проверка поставки {supply_id} ({account})")
-            
+
             supplies_api = Supplies(account, token)
-            
-            # Получаем заказы поставки напрямую из WB API
-            orders_data = await supplies_api.get_supply_orders(supply_id)
-            
-            # Проверяем количество заказов
-            orders_count = len(orders_data.get(account, {}).get(supply_id, {}).get('orders', []))
-            
+
+            # Получаем только order_ids (быстрее чем get_supply_orders)
+            order_ids = await supplies_api.get_supply_order_ids(supply_id)
+            orders_count = len(order_ids)
+
             if orders_count > 0:
                 logger.warning(f"API ПРОВЕРКА: Поставка {supply_id} ({account}) содержит {orders_count} заказов")
                 return False
-            
+
             logger.info(f"API ПРОВЕРКА: Поставка {supply_id} ({account}) подтверждена как пустая")
             return True
-            
+
         except Exception as e:
             logger.error(f"API ПРОВЕРКА: Ошибка при проверке поставки {supply_id} ({account}): {e}")
             # В случае ошибки НЕ разрешаем удаление (принцип безопасности)

@@ -167,13 +167,20 @@ class AssemblyTaskStatus:
     ) -> Dict[int, Dict[str, Any]]:
         """
         Получает данные заказов по списку order_ids для использования в поставках.
-        Возвращает только необходимые поля в формате WB API.
+        Возвращает поля в формате WB API для обратной совместимости.
+
+        Используемые поля после get_supply_orders:
+        - id: везде
+        - article: везде
+        - nmId: много мест
+        - createdAt: много мест
+        - convertedPrice: integration_1c.py, supplies.py:1904
 
         Args:
             order_ids: Список ID заказов
 
         Returns:
-            Dict[int, Dict]: {order_id: {id, nmId, article, createdAt}}
+            Dict[int, Dict]: {order_id: {id, nmId, article, createdAt, convertedPrice}}
         """
         if not order_ids:
             return {}
@@ -184,7 +191,8 @@ class AssemblyTaskStatus:
                     id,
                     local_vendor_code,
                     nm_id,
-                    created_at
+                    created_at,
+                    converted_price
                 FROM assembly_task_status_model
                 WHERE id = ANY($1)
                 ORDER BY id, created_at_db DESC
@@ -197,9 +205,10 @@ class AssemblyTaskStatus:
                 order_id = row["id"]
                 orders[order_id] = {
                     "id": order_id,
-                    "article": row["local_vendor_code"],
+                    "article": row["local_vendor_code"] or "",
                     "nmId": row["nm_id"],
                     "createdAt": row["created_at"].isoformat() if row["created_at"] else "",
+                    "convertedPrice": int(row["converted_price"]) if row["converted_price"] else 0,
                 }
 
             logger.info(

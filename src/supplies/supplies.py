@@ -557,6 +557,7 @@ class SuppliesService:
                                 "article": order.get("article", ""),
                                 "nmId": order.get("nmId"),
                                 "createdAt": order.get("createdAt", ""),
+                                "convertedPrice": order.get("convertedPrice", 0),
                             }
                             found_ids.add(order_id)
 
@@ -573,6 +574,7 @@ class SuppliesService:
                                     "article": order.get("article", ""),
                                     "nmId": order.get("nmId"),
                                     "createdAt": order.get("createdAt", ""),
+                                    "convertedPrice": order.get("convertedPrice", 0),
                                 }
 
                     return account, found_orders
@@ -1258,7 +1260,7 @@ class SuppliesService:
         tasks: List = [
             Supplies(
                 supply.account, get_wb_tokens()[supply.account]
-            ).get_supply_orders(supply.supply_id)
+            ).get_supply_orders(supply.supply_id, db=self.db)
             for supply in supply_ids.supplies
         ]
         result: Dict[str, Dict] = self.group_result(await asyncio.gather(*tasks))
@@ -1415,7 +1417,7 @@ class SuppliesService:
         """
         try:
             supply = Supplies(account, get_wb_tokens()[account])
-            supply_data = await supply.get_supply_orders(supply_id)
+            supply_data = await supply.get_supply_orders(supply_id, db=self.db)
 
             if not supply_data or account not in supply_data or supply_id not in supply_data[account]:
                 logger.error(f"Не удалось получить данные о поставке {supply_id} для аккаунта {account}")
@@ -1585,10 +1587,10 @@ class SuppliesService:
             # Логируем статус FICTITIOUS_DELIVERED для всех заказов поставки
             if self.db:
                 try:
-                    # Получаем все заказы поставки из WB API
+                    # Получаем все заказы поставки (оптимизировано через БД)
                     wb_tokens = get_wb_tokens()
                     supplies_api = Supplies(account, wb_tokens[account])
-                    supply_orders_response = await supplies_api.get_supply_orders(supply_id)
+                    supply_orders_response = await supplies_api.get_supply_orders(supply_id, db=self.db)
 
                     # Извлекаем список заказов из вложенной структуры
                     # Структура: {account: {supply_id: {"orders": [...]}}}
@@ -2107,9 +2109,9 @@ class SuppliesService:
                     logger.error(f"Токен для аккаунта {account} не найден")
                     continue
 
-                # Создаем задачу для получения заказов
+                # Создаем задачу для получения заказов (оптимизировано через БД)
                 supplies_api = Supplies(account, wb_tokens[account])
-                task = supplies_api.get_supply_orders(supply_item.supply_id)
+                task = supplies_api.get_supply_orders(supply_item.supply_id, db=self.db)
                 tasks.append(task)
                 task_metadata.append((wild_code, account, supply_item.supply_id))
 
@@ -4580,8 +4582,8 @@ class SuppliesService:
             hanging_supply = await hanging_supplies_model.get_hanging_supply_by_id(supply_id, account)
             is_fictitious_delivered = hanging_supply.get('is_fictitious_delivered', False) if hanging_supply else False
 
-            # 2. Получаем заказы из WB API
-            orders_data = await Supplies(account, get_wb_tokens()[account]).get_supply_orders(supply_id)
+            # 2. Получаем заказы (оптимизировано через БД)
+            orders_data = await Supplies(account, get_wb_tokens()[account]).get_supply_orders(supply_id, db=self.db)
             orders = orders_data.get(account, {supply_id: {'orders': []}}).get(supply_id).get('orders', [])
 
             # 3. ВАЛИДАЦИЯ: Блокируем операцию если поставка фиктивно доставлена, но WB API не вернул заказы
