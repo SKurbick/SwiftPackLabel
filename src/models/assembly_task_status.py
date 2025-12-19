@@ -160,3 +160,54 @@ class AssemblyTaskStatus:
                 f"для аккаунта {account}: {str(e)}"
             )
             return {}
+
+    async def get_orders_details_by_ids(
+        self,
+        order_ids: List[int]
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Получает данные заказов по списку order_ids для использования в поставках.
+        Возвращает только необходимые поля в формате WB API.
+
+        Args:
+            order_ids: Список ID заказов
+
+        Returns:
+            Dict[int, Dict]: {order_id: {id, nmId, article, createdAt}}
+        """
+        if not order_ids:
+            return {}
+
+        try:
+            query = """
+                SELECT DISTINCT ON (id)
+                    id,
+                    local_vendor_code,
+                    nm_id,
+                    created_at
+                FROM assembly_task_status_model
+                WHERE id = ANY($1)
+                ORDER BY id, created_at_db DESC
+            """
+
+            result = await self.db.fetch(query, order_ids)
+
+            orders = {}
+            for row in result:
+                order_id = row["id"]
+                orders[order_id] = {
+                    "id": order_id,
+                    "article": row["local_vendor_code"],
+                    "nmId": row["nm_id"],
+                    "createdAt": row["created_at"].isoformat() if row["created_at"] else "",
+                }
+
+            logger.info(
+                f"Получено {len(orders)} из {len(order_ids)} заказов из БД"
+            )
+
+            return orders
+
+        except Exception as e:
+            logger.error(f"Ошибка получения деталей заказов: {str(e)}")
+            return {}

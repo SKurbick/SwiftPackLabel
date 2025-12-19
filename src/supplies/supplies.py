@@ -465,8 +465,15 @@ class SuppliesService:
 
         return filtered_supplies
 
-    @staticmethod
-    async def get_information_orders_to_supplies(supply_ids: List[dict]) -> List[Dict[str, Dict]]:
+    async def get_information_orders_to_supplies(self, supply_ids: List[dict]) -> List[Dict[str, Dict]]:
+        """
+        Получает информацию о заказах по конкретным поставкам.
+
+        Гибридный подход (оптимизированный):
+        1. Order IDs из WB API (параллельно по всем аккаунтам)
+        2. Детали заказов из БД (один batch запрос)
+        3. Fallback на WB API для заказов отсутствующих в БД (параллельно)
+        """
         logger.info(f'Получение информации о заказах по конкретным поставкам, количество групп: {len(supply_ids)}')
 
         supplies_by_account: Dict[str, List[str]] = {}
@@ -480,21 +487,128 @@ class SuppliesService:
                         supplies_by_account[account].append(supply_id)
 
         total_supplies = sum(len(sups) for sups in supplies_by_account.values())
-        logger.info(f'Пакетная обработка: {len(supplies_by_account)} аккаунтов, {total_supplies} поставок')
+        logger.info(f'Гибридный подход: {len(supplies_by_account)} аккаунтов, {total_supplies} поставок')
 
         wb_tokens = get_wb_tokens()
-        tasks = []
-        for account, supply_ids_list in supplies_by_account.items():
+
+        # Шаг 1: Получаем order_ids из WB API ПАРАЛЛЕЛЬНО по всем аккаунтам
+        all_supply_order_ids: Dict[str, Dict[str, List[int]]] = {}
+        all_order_ids: List[int] = []
+        order_ids_by_account: Dict[str, Set[int]] = {}
+
+        async def fetch_order_ids_for_account(account: str, supply_ids_list: List[str]):
+            """Получает order_ids для всех поставок одного аккаунта параллельно."""
             supplies_api = Supplies(account, wb_tokens[account])
-            tasks.append(supplies_api.get_supply_orders_batch(supply_ids_list))
+            tasks = [supplies_api.get_supply_order_ids(sid) for sid in supply_ids_list]
+            results = await asyncio.gather(*tasks)
+            return account, dict(zip(supply_ids_list, results))
 
-        batch_results = await asyncio.gather(*tasks)
+        # Параллельный запрос по всем аккаунтам
+        account_tasks = [
+            fetch_order_ids_for_account(account, supply_ids_list)
+            for account, supply_ids_list in supplies_by_account.items()
+        ]
+        account_results = await asyncio.gather(*account_tasks)
 
+        # Собираем результаты
+        for account, supply_order_ids in account_results:
+            all_supply_order_ids[account] = supply_order_ids
+            order_ids_by_account[account] = set()
+            for order_ids in supply_order_ids.values():
+                all_order_ids.extend(order_ids)
+                order_ids_by_account[account].update(order_ids)
+
+        logger.info(f'Получено {len(all_order_ids)} order_ids из WB API (параллельно по {len(supplies_by_account)} аккаунтам)')
+
+        # Шаг 2: Получаем детали заказов из БД одним batch запросом
+        orders_details: Dict[int, Dict] = {}
+        if all_order_ids and self.db:
+            assembly_task_service = AssemblyTaskStatus(self.db)
+            orders_details = await assembly_task_service.get_orders_details_by_ids(all_order_ids)
+            logger.info(f'Получено {len(orders_details)} деталей заказов из БД')
+
+        # Шаг 3: Fallback - получаем отсутствующие заказы из WB API ПАРАЛЛЕЛЬНО
+        missing_order_ids = set(all_order_ids) - set(orders_details.keys())
+        if missing_order_ids:
+            logger.warning(f'Fallback: {len(missing_order_ids)} заказов не найдено в БД, получаем из WB API')
+
+            # Группируем missing по аккаунтам
+            missing_by_account: Dict[str, Set[int]] = {}
+            for account, account_order_ids in order_ids_by_account.items():
+                account_missing = account_order_ids & missing_order_ids
+                if account_missing:
+                    missing_by_account[account] = account_missing
+
+            async def fetch_missing_orders(account: str, missing_ids: Set[int]):
+                """Получает недостающие заказы для одного аккаунта."""
+                try:
+                    orders_api = Orders(account, wb_tokens[account])
+                    # Получаем только новые заказы (они с большей вероятностью отсутствуют в БД)
+                    # Это быстрее чем get_orders() который возвращает ВСЕ заказы
+                    all_orders = await orders_api.get_new_orders()
+
+                    found_orders = {}
+                    found_ids = set()
+                    for order in all_orders:
+                        order_id = order.get('id')
+                        if order_id in missing_ids:
+                            found_orders[order_id] = {
+                                "id": order_id,
+                                "article": order.get("article", ""),
+                                "nmId": order.get("nmId"),
+                                "createdAt": order.get("createdAt", ""),
+                            }
+                            found_ids.add(order_id)
+
+                    # Если не все нашли в new_orders, пробуем полный список
+                    still_missing = missing_ids - found_ids
+                    if still_missing:
+                        logger.info(f'Fallback {account}: {len(still_missing)} не найдено в new_orders, пробуем get_orders')
+                        all_orders = await orders_api.get_orders()
+                        for order in all_orders:
+                            order_id = order.get('id')
+                            if order_id in still_missing:
+                                found_orders[order_id] = {
+                                    "id": order_id,
+                                    "article": order.get("article", ""),
+                                    "nmId": order.get("nmId"),
+                                    "createdAt": order.get("createdAt", ""),
+                                }
+
+                    return account, found_orders
+                except Exception as e:
+                    logger.error(f'Fallback ошибка для аккаунта {account}: {e}')
+                    return account, {}
+
+            # Параллельный fallback по всем аккаунтам с missing
+            fallback_tasks = [
+                fetch_missing_orders(account, missing_ids)
+                for account, missing_ids in missing_by_account.items()
+            ]
+            fallback_results = await asyncio.gather(*fallback_tasks)
+
+            # Объединяем результаты fallback
+            for account, found_orders in fallback_results:
+                orders_details.update(found_orders)
+                logger.info(f'Fallback: получено {len(found_orders)} заказов для {account}')
+
+        # Шаг 4: Формируем результат в старом формате
         results = []
-        for batch_result in batch_results:
-            for account, supplies_data in batch_result.items():
-                for supply_id, orders_data in supplies_data.items():
-                    results.append({account: {supply_id: orders_data}})
+        still_missing = 0
+        for account, supply_data in all_supply_order_ids.items():
+            for supply_id, order_ids in supply_data.items():
+                orders_list = []
+                for oid in order_ids:
+                    if oid in orders_details:
+                        orders_list.append(orders_details[oid])
+                    else:
+                        still_missing += 1
+                        logger.warning(f'Заказ {oid} не найден ни в БД ни в WB API для поставки {supply_id}')
+
+                results.append({account: {supply_id: {"orders": orders_list}}})
+
+        if still_missing > 0:
+            logger.error(f'ВНИМАНИЕ: {still_missing} заказов не найдено ни в БД ни в WB API!')
 
         logger.info(f'Возвращено {len(results)} элементов в старом формате')
         return results
