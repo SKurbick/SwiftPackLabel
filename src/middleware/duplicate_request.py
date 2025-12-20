@@ -3,21 +3,24 @@ Middleware для предотвращения дублирующих запро
 
 Использует Redis SETNX для атомарной блокировки идентичных запросов.
 При недоступности Redis - graceful degradation (запросы проходят без проверки).
+
+ВАЖНО: Реализован как чистый ASGI middleware (не BaseHTTPMiddleware)
+для корректной работы со StreamingResponse.
 """
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send, Message
 from src.cache.global_cache import global_cache
 from src.logger import app_logger as logger
 import hashlib
 import json
 import time
-from typing import Optional, Set, Any
+from typing import Optional, Set, Any, List
 
 
-class DuplicateRequestMiddleware(BaseHTTPMiddleware):
+class DuplicateRequestMiddleware:
     """
-    Middleware для предотвращения дублирующих запросов.
+    Чистый ASGI Middleware для предотвращения дублирующих запросов.
 
     Принцип работы:
     1. Формирует уникальный ключ из: path + user_token + hash(body)
@@ -25,12 +28,8 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
     3. Если ключ уже существует - запрос дублирующий - 409 Conflict
     4. После обработки запроса - удаляет ключ
 
-    ВАЖНО: User недоступен на этапе middleware (auth через Depends),
-    поэтому используем Bearer token для идентификации.
-
-    Graceful Degradation:
-    - Если Redis недоступен - пропускает запрос БЕЗ блокировки
-    - Логирует предупреждение для мониторинга
+    ВАЖНО: Реализован как чистый ASGI middleware для совместимости
+    со StreamingResponse (BaseHTTPMiddleware имеет известные проблемы).
     """
 
     # Эндпоинты для защиты
@@ -55,56 +54,99 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
     LOCK_PREFIX: str = "dup:"
     MAX_BODY_SIZE: int = 1024 * 1024  # 1MB для хеширования
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        """Основной обработчик middleware."""
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
-        # 1. Быстрые проверки - пропускаем ненужные запросы
-        if not self._should_protect(request):
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI interface."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        # 2. Проверяем Redis
+        # Быстрая проверка - нужна ли защита
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+
+        if not self._should_protect_path(path, method):
+            await self.app(scope, receive, send)
+            return
+
+        # Проверяем Redis
         redis = self._get_redis_safe()
         if redis is None:
             logger.warning(
                 f"[DuplicateMiddleware] Redis недоступен, "
-                f"пропускаем проверку для {request.url.path}"
+                f"пропускаем проверку для {path}"
             )
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        # 3. Читаем и сохраняем body
-        try:
-            body = await self._read_body_safe(request)
-        except Exception as e:
-            logger.error(f"[DuplicateMiddleware] Ошибка чтения body: {e}")
-            return await call_next(request)
+        # Читаем body
+        body_chunks: List[bytes] = []
 
-        # 4. Генерируем ключ блокировки
-        lock_key = self._generate_lock_key(request, body)
+        async def receive_wrapper() -> Message:
+            message = await receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                if body:
+                    body_chunks.append(body)
+            return message
 
-        # 5. Пытаемся получить блокировку
+        # Собираем всё тело запроса
+        body = b""
+        while True:
+            message = await receive_wrapper()
+            if message["type"] == "http.request":
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                return
+
+        body = b"".join(body_chunks)
+
+        # Ограничиваем размер для хеширования
+        body_for_hash = body[:self.MAX_BODY_SIZE] if len(body) > self.MAX_BODY_SIZE else body
+
+        # Генерируем ключ блокировки
+        lock_key = self._generate_lock_key(scope, body_for_hash)
+
+        # Пытаемся получить блокировку
         acquired = await self._try_acquire_lock(redis, lock_key)
 
         if not acquired:
-            return self._create_conflict_response(request, lock_key)
+            # Отправляем 409 Conflict
+            response = self._create_conflict_response(path, lock_key)
+            await response(scope, receive, send)
+            return
 
-        # 6. Обрабатываем запрос
+        # Создаём новый receive который вернёт сохранённый body
+        body_sent = False
+
+        async def cached_receive() -> Message:
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {
+                    "type": "http.request",
+                    "body": body,
+                    "more_body": False,
+                }
+            # После отдачи body ждём disconnect
+            return await receive()
+
+        # Обрабатываем запрос
         try:
-            response = await self._process_request_with_body(request, call_next, body)
-            self._add_protection_headers(response, lock_key)
-            return response
+            await self.app(scope, cached_receive, send)
         finally:
             await self._release_lock_safe(redis, lock_key)
 
     # ==================== ПРОВЕРКИ ====================
 
-    def _should_protect(self, request: Request) -> bool:
+    def _should_protect_path(self, path: str, method: str) -> bool:
         """Определяет нужна ли защита для этого запроса."""
-        # Только POST и PATCH
-        if request.method not in ("POST", "PATCH"):
+        if method not in ("POST", "PATCH"):
             return False
 
-        # Проверяем путь
-        path = request.url.path
         for protected in self.PROTECTED_PATHS:
             if path == protected or path.startswith(protected + "/"):
                 return True
@@ -120,86 +162,54 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
             logger.error(f"[DuplicateMiddleware] Ошибка доступа к Redis: {e}")
         return None
 
-    # ==================== ЧТЕНИЕ BODY ====================
-
-    async def _read_body_safe(self, request: Request) -> bytes:
-        """Безопасно читает body с ограничением размера."""
-        body = await request.body()
-
-        # Ограничиваем размер для хеширования
-        if len(body) > self.MAX_BODY_SIZE:
-            logger.warning(
-                f"[DuplicateMiddleware] Body слишком большой ({len(body)} bytes), "
-                f"хешируем первые {self.MAX_BODY_SIZE} bytes"
-            )
-            return body[:self.MAX_BODY_SIZE]
-
-        return body
-
     # ==================== ГЕНЕРАЦИЯ КЛЮЧА ====================
 
-    def _generate_lock_key(self, request: Request, body: bytes) -> str:
+    def _generate_lock_key(self, scope: Scope, body: bytes) -> str:
         """
         Генерирует уникальный ключ блокировки.
 
         Формат: dup:{path_hash}:{user_hash}:{body_hash}
-
-        ВАЖНО:
-        - User берётся из Authorization header (token), НЕ из request.state
-        - Исключаем изменяющиеся поля (operation_id) из body hash
         """
         # 1. Path hash
-        path = request.url.path
+        path = scope.get("path", "")
         path_hash = hashlib.md5(path.encode()).hexdigest()[:8]
 
         # 2. User hash (из Bearer token)
-        user_hash = self._extract_user_identifier(request)
+        user_hash = self._extract_user_identifier(scope)
 
         # 3. Body hash (с исключением динамических полей)
         body_hash = self._hash_body_excluding_fields(body)
 
         return f"{self.LOCK_PREFIX}{path_hash}:{user_hash}:{body_hash}"
 
-    def _extract_user_identifier(self, request: Request) -> str:
+    def _extract_user_identifier(self, scope: Scope) -> str:
         """
         Извлекает идентификатор пользователя из Authorization header.
-
-        ВАЖНО: На этапе middleware user ещё не авторизован через Depends!
-        Поэтому используем сам токен (или его хеш) как идентификатор.
         """
-        auth_header = request.headers.get("Authorization", "")
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
 
         if auth_header.startswith("Bearer "):
-            token = auth_header[7:]  # Убираем "Bearer "
-            # Хешируем токен (не храним в открытом виде)
+            token = auth_header[7:]
             return hashlib.md5(token.encode()).hexdigest()[:12]
 
         # Fallback: IP + User-Agent
-        client_ip = request.client.host if request.client else "unknown"
-        user_agent = request.headers.get("User-Agent", "")[:50]
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
+        user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="ignore")[:50]
         fallback = f"{client_ip}:{user_agent}"
         return hashlib.md5(fallback.encode()).hexdigest()[:12]
 
     def _hash_body_excluding_fields(self, body: bytes) -> str:
         """
         Хеширует body, исключая динамические поля.
-
-        Это важно! Например, operation_id меняется между запросами,
-        но это НЕ означает что запросы разные по сути.
         """
         try:
-            # Пытаемся распарсить как JSON
             data = json.loads(body.decode('utf-8'))
-
-            # Рекурсивно удаляем исключённые поля
             cleaned_data = self._remove_excluded_fields(data)
-
-            # Сериализуем обратно (с сортировкой ключей для стабильности)
             cleaned_body = json.dumps(cleaned_data, sort_keys=True)
             return hashlib.sha256(cleaned_body.encode()).hexdigest()[:16]
-
         except (json.JSONDecodeError, UnicodeDecodeError):
-            # Не JSON - хешируем как есть (multipart, binary, etc.)
             return hashlib.sha256(body).hexdigest()[:16]
 
     def _remove_excluded_fields(self, data: Any) -> Any:
@@ -223,7 +233,7 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
             result = await redis.set(
                 lock_key,
                 value=f"{time.time()}",
-                nx=True,   # Only if Not eXists
+                nx=True,
                 ex=self.LOCK_TIMEOUT
             )
 
@@ -238,7 +248,6 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
 
         except Exception as e:
             logger.error(f"[DuplicateMiddleware] Ошибка получения блокировки: {e}")
-            # При ошибке - пропускаем (graceful degradation)
             return True
 
     async def _release_lock_safe(self, redis, lock_key: str) -> None:
@@ -252,51 +261,12 @@ class DuplicateRequestMiddleware(BaseHTTPMiddleware):
                 f"Истечёт автоматически через {self.LOCK_TIMEOUT} сек."
             )
 
-    # ==================== ОБРАБОТКА ЗАПРОСА ====================
-
-    async def _process_request_with_body(
-        self,
-        request: Request,
-        call_next,
-        body: bytes
-    ) -> Response:
-        """
-        Обрабатывает запрос, восстанавливая body для route handler.
-
-        КРИТИЧНО: Body уже был прочитан в middleware,
-        нужно "вернуть" его для Pydantic валидации в endpoint.
-        """
-        body_sent = False
-        original_receive = request._receive
-
-        async def receive():
-            nonlocal body_sent
-            if not body_sent:
-                body_sent = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            # После отдачи body - ждём disconnect от оригинального receive
-            return await original_receive()
-
-        # Заменяем receive в request
-        request._receive = receive
-
-        return await call_next(request)
-
-    def _add_protection_headers(self, response: Response, lock_key: str) -> None:
-        """Добавляет заголовки для отладки."""
-        try:
-            response.headers["X-Duplicate-Protected"] = "true"
-            response.headers["X-Lock-Key"] = lock_key[:20] + "..."
-        except Exception:
-            pass  # Streaming responses могут не поддерживать headers
-
     # ==================== ОТВЕТ ОБ ОШИБКЕ ====================
 
-    def _create_conflict_response(self, request: Request, lock_key: str) -> JSONResponse:
+    def _create_conflict_response(self, path: str, lock_key: str) -> JSONResponse:
         """Создаёт ответ о конфликте (дублирующий запрос)."""
         logger.warning(
-            f"[DuplicateMiddleware] ЗАБЛОКИРОВАН дублирующий запрос: "
-            f"{request.method} {request.url.path} [key={lock_key}]"
+            f"[DuplicateMiddleware] ЗАБЛОКИРОВАН дублирующий запрос: {path} [key={lock_key}]"
         )
 
         return JSONResponse(
