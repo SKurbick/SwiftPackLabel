@@ -4953,3 +4953,115 @@ class SuppliesService:
             ))
         
         return SupplyIdBodySchema(supplies=supplies_list)
+
+    # ==================== МЕТОДЫ ДЛЯ ПЕРЕМЕЩЕНИЯ ПО QR-КОДАМ ====================
+
+    def _create_empty_qr_result(self, message: str, not_found_qrs: List[str] = None) -> Dict[str, Any]:
+        """
+        Создает результат для случая отсутствия заказов (версия для QR).
+
+        Args:
+            message: Сообщение об ошибке
+            not_found_qrs: Список ненайденных QR-кодов
+
+        Returns:
+            Dict[str, Any]: Результат с нулевой статистикой
+        """
+        return {
+            "success": False,
+            "message": message,
+            "removed_order_ids": [],
+            "processed_supplies": 0,
+            "processed_wilds": 0,
+            # Статистика (все нули для пустого результата)
+            "total_orders": 0,
+            "successful_count": 0,
+            "invalid_status_count": 0,
+            "blocked_but_shipped_count": 0,
+            "failed_movement_count": 0,
+            "total_failed_count": 0,
+            # QR-специфичные поля
+            "total_qr_codes": len(not_found_qrs) if not_found_qrs else 0,
+            "not_found_qr_codes": not_found_qrs or [],
+            "invalid_status_details": []
+        }
+
+    async def move_orders_by_qr_implementation(
+        self,
+        request_data,
+        user: dict
+    ) -> Dict[str, Any]:
+        """
+        Перемещение заказов по QR-кодам.
+
+        ЛОГИКА ИДЕНТИЧНА move_orders_between_supplies_implementation,
+        но вместо автоотбора по remove_count — явные order_ids из QR.
+
+        Args:
+            request_data: MoveOrdersByQRRequest с QR-кодами
+            user: Данные пользователя
+
+        Returns:
+            Dict[str, Any]: Результат операции перемещения
+        """
+        from src.models.qr_scan_db import QRScanDB
+
+        logger.info(
+            f"Начало перемещения заказов по QR от пользователя {user.get('username', 'unknown')}: "
+            f"{len(request_data.qr_codes)} QR-кодов"
+        )
+
+        # 1. Резолвим QR-коды и получаем полные данные заказов (один метод вместо двух)
+        qr_scan_db = QRScanDB(self.db)
+        orders_data, not_found_qrs = await qr_scan_db.fetch_orders_by_qr_codes(
+            request_data.qr_codes
+        )
+
+        if not orders_data:
+            logger.warning("Не найдено ни одного заказа по QR-кодам")
+            return self._create_empty_qr_result(
+                "Не найдено ни одного заказа по переданным QR-кодам",
+                not_found_qrs
+            )
+
+        logger.info(f"Всего отобрано {len(orders_data)} заказов для перемещения")
+
+        # 3. Группируем по (wild_code, account) для создания поставок
+        participating_combinations = set()
+        for order in orders_data:
+            participating_combinations.add((order['wild_code'], order['account']))
+
+        logger.info(f"Участвующие комбинации (wild, account): {participating_combinations}")
+
+        # 4. Создание целевых поставок (ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ МЕТОД)
+        new_supplies = await self._create_target_supplies(
+            participating_combinations, request_data, user)
+
+        # 5. Выполнение перемещения заказов с валидацией (ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ МЕТОД)
+        moved_order_ids, invalid_status_orders, failed_movement_orders = await self._execute_orders_move(
+            orders_data, new_supplies)
+
+        # 6. Отправка данных во внешние системы (ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ МЕТОД)
+        shipment_success, blocked_prepared_count = await self._process_external_systems_integration(
+            request_data, orders_data, moved_order_ids, new_supplies, user,
+            invalid_status_orders, failed_movement_orders)
+
+        # 7. Формирование результата (ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ МЕТОД)
+        result = self._create_success_result(
+            moved_order_ids, new_supplies, orders_data,
+            invalid_status_orders, failed_movement_orders,
+            request_data.move_to_final, shipment_success, blocked_prepared_count)
+
+        # 8. Добавляем QR-специфичные поля
+        result['total_qr_codes'] = len(request_data.qr_codes)
+        result['not_found_qr_codes'] = not_found_qrs
+        result['invalid_status_details'] = []  # Детали валидации уже в invalid_status_orders
+
+        logger.info(
+            f"Перемещение по QR завершено: "
+            f"успешно {result['successful_count']}, "
+            f"не найдено QR {len(not_found_qrs)}, "
+            f"невалидный статус {result['invalid_status_count']}"
+        )
+
+        return result

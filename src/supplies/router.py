@@ -7,7 +7,8 @@ from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
     SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest, \
-    FictitiousDeliveryRequest, FictitiousDeliveryResponse, FictitiousShipmentRequest
+    FictitiousDeliveryRequest, FictitiousDeliveryResponse, FictitiousShipmentRequest, \
+    MoveOrdersByQRRequest, MoveOrdersByQRResponse
 from src.supplies.supplies import SuppliesService
 from src.db import get_db_connection, AsyncGenerator
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
@@ -518,6 +519,138 @@ async def move_orders_between_supplies(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при перемещении заказов: {str(e)}"
+        )
+
+
+@supply.post("/move-orders-by-qr",
+             status_code=status.HTTP_200_OK,
+             response_model=MoveOrdersByQRResponse,
+             summary="Перемещение заказов по QR-кодам",
+             description="Перемещает заказы по списку QR-кодов. Поддерживает два формата: barcode (*CN+tGIpw) и part_a+part_b (wild1440015)")
+async def move_orders_by_qr(
+        request_data: MoveOrdersByQRRequest = Body(..., description="Данные с QR-кодами для перемещения"),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user)
+) -> MoveOrdersByQRResponse:
+    """
+    Перемещает сборочные задания по списку QR-кодов.
+
+    В отличие от /move-orders, где система автоматически выбирает заказы по remove_count,
+    здесь оператор явно указывает конкретные QR-коды для перемещения.
+
+    Поддерживаемые форматы QR-кодов:
+    - Barcode (qr_data): начинается с '*', например '*CN+tGIpw' - от сканера
+    - Part format: part_a + part_b, например '11111112222' - ручной ввод
+
+    Args:
+        request_data: Список QR-кодов и параметры перемещения
+        db: Соединение с базой данных
+        user: Данные текущего пользователя
+
+    Returns:
+        MoveOrdersByQRResponse: Результат операции перемещения с детализацией по QR-кодам
+    """
+    logger.info(f"Запрос на перемещение заказов по QR от {user.get('username', 'unknown')}")
+    logger.info(f"Получено {len(request_data.qr_codes)} QR-кодов для перемещения")
+
+    try:
+        supply_service = SuppliesService(db)
+        operator = request_data.operator
+        result = await supply_service.move_orders_by_qr_implementation(request_data, user)
+
+        # === ЛОГИКА ИДЕНТИЧНА move_orders_between_supplies ===
+
+        # Извлекаем внутренние данные для логирования (не включаются в API response)
+        moved_orders_details = result.pop('_moved_orders_details', None)
+        invalid_status_orders = result.pop('_invalid_status_orders', [])
+        failed_movement_orders = result.pop('_failed_movement_orders', [])
+        shipment_success = result.pop('_shipment_success', False)
+
+        status_service = OrderStatusService(db)
+
+        # Логируем успешно перемещенные заказы
+        if moved_orders_details:
+            logged_count = await status_service.process_and_log_moved_orders(
+                moved_orders_details,
+                request_data.move_to_final,
+                operator
+            )
+            logger.info(
+                f"Залогировано {logged_count} успешно перемещенных заказов со статусом "
+                f"{'IN_FINAL_SUPPLY' if request_data.move_to_final else 'IN_HANGING_SUPPLY'}"
+            )
+
+        # Логируем блокированные заказы (с невалидным статусом или ошибками)
+        if invalid_status_orders or failed_movement_orders:
+            blocked_count = await status_service.log_blocked_orders_status(
+                invalid_status_orders,
+                failed_movement_orders,
+                operator
+            )
+            logger.info(
+                f"Залогировано {blocked_count} блокированных заказов "
+                f"(невалидный статус: {len(invalid_status_orders)}, "
+                f"ошибки перемещения: {len(failed_movement_orders)})"
+            )
+
+            # Если финальный режим, логируем SHIPPED_WITH_BLOCK для невалидных заказов
+            if request_data.move_to_final and invalid_status_orders and shipment_success:
+                shipped_with_block_count = await status_service.log_shipped_with_block_status(
+                    invalid_status_orders,
+                    operator
+                )
+                logger.info(
+                    f"Залогировано {shipped_with_block_count} заблокированных заказов "
+                    f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
+                )
+
+        # Обновление сессии
+        session_updated = None
+        if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
+            removed_order_ids = result["removed_order_ids"].copy()
+
+            # В финальном режиме также удаляем из сессии заблокированные заказы
+            if request_data.move_to_final and invalid_status_orders and shipment_success:
+                blocked_order_ids = [
+                    order.get('id') if 'id' in order else order.get('order_id')
+                    for order in invalid_status_orders
+                    if order.get('id') is not None or order.get('order_id') is not None
+                ]
+                removed_order_ids.extend(blocked_order_ids)
+                logger.info(
+                    f"Удаление из сессии: {len(result['removed_order_ids'])} перемещённых + "
+                    f"{len(blocked_order_ids)} заблокированных = {len(removed_order_ids)} всего"
+                )
+
+            session_updated = await SupplyOperationsDB.update_response_data_after_move(
+                request_data.operation_id,
+                removed_order_ids
+            )
+
+        return MoveOrdersByQRResponse(
+            success=result.get("success", True),
+            message=result.get("message", "Операция перемещения заказов по QR выполнена"),
+            removed_order_ids=result.get("removed_order_ids", []),
+            processed_supplies=result.get("processed_supplies", 0),
+            processed_wilds=result.get("processed_wilds", 0),
+            total_orders=result.get("total_orders", 0),
+            successful_count=result.get("successful_count", 0),
+            invalid_status_count=result.get("invalid_status_count", 0),
+            blocked_but_shipped_count=result.get("blocked_but_shipped_count", 0),
+            failed_movement_count=result.get("failed_movement_count", 0),
+            total_failed_count=result.get("total_failed_count", 0),
+            session_updated=session_updated,
+            # QR-специфичные поля
+            total_qr_codes=result.get("total_qr_codes", 0),
+            not_found_qr_codes=result.get("not_found_qr_codes", []),
+            invalid_status_details=result.get("invalid_status_details", [])
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при перемещении заказов по QR: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при перемещении заказов по QR: {str(e)}"
         )
 
 

@@ -341,3 +341,89 @@ class HangingSuppliesWithOverdueOrders(BaseSchema):
     is_fictitious_delivered: bool = Field(description="Флаг фиктивной доставки")
     fictitious_delivered_at: datetime | None = Field(description="Время перевода в фиктивную доставку")
     fictitious_delivery_operator: str | None = Field(default="Оператор фиктивной доставки")
+
+
+# ==================== СХЕМЫ ДЛЯ ПЕРЕМЕЩЕНИЯ ПО QR-КОДАМ ====================
+
+
+class MoveOrdersByQRRequest(BaseSchema):
+    """Схема запроса для перемещения заказов по QR-кодам."""
+    qr_codes: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Список QR-кодов в любом формате: barcode (*CN+tGIpw) или part_a+part_b (wild1440015)"
+    )
+    operation_id: Optional[str] = Field(
+        None,
+        description="ID исходной операции создания поставок для актуализации request_payload"
+    )
+    move_to_final: bool = Field(
+        default=False,
+        description="Флаг перемещения в финальную поставку (по умолчанию висячая)"
+    )
+    operator: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Оператор, выполняющий операцию (опционально)"
+    )
+
+    @field_validator('qr_codes')
+    @classmethod
+    def deduplicate_qr_codes(cls, v):
+        """Дедупликация и нормализация QR-кодов."""
+        seen = set()
+        unique = []
+        for qr in v:
+            qr_clean = qr.strip()
+            if qr_clean and qr_clean not in seen:
+                seen.add(qr_clean)
+                unique.append(qr_clean)
+        if not unique:
+            raise ValueError("Список QR-кодов пуст после дедупликации")
+        return unique
+
+    @field_validator('operator')
+    @classmethod
+    def validate_operator(cls, v):
+        """Валидация оператора."""
+        if v is not None and not v.strip():
+            raise ValueError("Поле operator не может быть пустой строкой")
+        return v.strip() if v else None
+
+
+class QRResolutionResult(BaseSchema):
+    """Результат резолвинга одного QR-кода."""
+    qr_code: str = Field(description="Исходный QR-код")
+    order_id: Optional[int] = Field(None, description="ID заказа (если найден)")
+    account: Optional[str] = Field(None, description="Аккаунт Wildberries")
+    supply_id: Optional[str] = Field(None, description="ID текущей поставки")
+    status: str = Field(description="Статус резолвинга: found, not_found, invalid_status")
+    error_message: Optional[str] = Field(None, description="Сообщение об ошибке (если есть)")
+
+
+class MoveOrdersByQRResponse(BaseSchema):
+    """Схема ответа для перемещения заказов по QR-кодам."""
+    success: bool = Field(description="Успешность операции")
+    message: str = Field(description="Сообщение о результате")
+    removed_order_ids: List[int] = Field(description="ID заказов которые были удалены/перемещены")
+    processed_supplies: int = Field(description="Количество обработанных поставок")
+    processed_wilds: int = Field(description="Количество обработанных wild-кодов")
+    # Статистика выполнения
+    total_orders: int = Field(description="Общее количество заказов, отобранных для перемещения")
+    successful_count: int = Field(description="Количество успешно перемещенных заказов")
+    invalid_status_count: int = Field(description="Количество заказов с невалидным статусом WB")
+    blocked_but_shipped_count: int = Field(description="Количество заблокированных заказов, отгруженных с оригинальным supply_id")
+    failed_movement_count: int = Field(description="Количество заказов с ошибками при перемещении")
+    total_failed_count: int = Field(description="Общее количество неудачных попыток (невалидный статус + ошибки)")
+    session_updated: Optional[bool] = Field(
+        None,
+        description="Был ли обновлен request_payload в исходной сессии"
+    )
+    # Дополнительные поля для QR
+    total_qr_codes: int = Field(description="Общее количество переданных QR-кодов")
+    not_found_qr_codes: List[str] = Field(description="Список QR-кодов, которые не были найдены")
+    invalid_status_details: List[QRResolutionResult] = Field(
+        default_factory=list,
+        description="Детали по QR-кодам с невалидным статусом"
+    )

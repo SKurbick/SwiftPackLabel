@@ -512,3 +512,84 @@ class QRLookupService:
         except Exception as e:
             logger.error(f"Ошибка при поиске по номеру QR: {str(e)}")
             raise
+
+    async def find_batch_mixed_formats(
+        self,
+        qr_codes: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch-поиск по списку QR-кодов с АВТООПРЕДЕЛЕНИЕМ ФОРМАТА.
+        Оптимизация: разделяет на два запроса по формату.
+
+        Поддерживаемые форматы:
+        - Barcode (qr_data): начинается с '*', например '*CN+tGIpw'
+        - Part format: part_a + part_b, например 'wild1440015'
+
+        Args:
+            qr_codes: Смешанный список (barcodes + part formats)
+
+        Returns:
+            Dict[str, Dict]: {qr_code: order_data}
+        """
+        # Разделяем по формату
+        barcodes = [qr for qr in qr_codes if qr.startswith('*')]
+        part_formats = [qr for qr in qr_codes if not qr.startswith('*')]
+
+        results = {}
+
+        # Batch-поиск по barcode (qr_data)
+        if barcodes:
+            query_barcode = """
+                SELECT
+                    qr.qr_data as qr_code,
+                    qr.order_id as qr_order_id,
+                    qr.account as qr_account,
+                    qr.part_a as qr_part_a,
+                    qr.part_b as qr_part_b,
+                    o.article as order_article,
+                    o.supply_id as order_supply_id,
+                    atsm.supplier_status,
+                    atsm.wb_status
+                FROM qr_scans qr
+                LEFT JOIN orders_wb o ON qr.order_id = o.id
+                LEFT JOIN assembly_task_status_model atsm ON o.id = atsm.id
+                WHERE qr.qr_data = ANY($1::text[])
+            """
+            try:
+                rows = await self.db.fetch(query_barcode, barcodes)
+                for row in rows:
+                    results[row['qr_code']] = dict(row)
+                logger.info(f"Batch-поиск по barcode: найдено {len(rows)} из {len(barcodes)}")
+            except Exception as e:
+                logger.error(f"Ошибка batch-поиска по barcode: {str(e)}")
+                raise
+
+        # Batch-поиск по part_a + part_b
+        if part_formats:
+            query_parts = """
+                SELECT
+                    CONCAT(qr.part_a, qr.part_b) as qr_code,
+                    qr.order_id as qr_order_id,
+                    qr.account as qr_account,
+                    qr.part_a as qr_part_a,
+                    qr.part_b as qr_part_b,
+                    o.article as order_article,
+                    o.supply_id as order_supply_id,
+                    atsm.supplier_status,
+                    atsm.wb_status
+                FROM qr_scans qr
+                LEFT JOIN orders_wb o ON qr.order_id = o.id
+                LEFT JOIN assembly_task_status_model atsm ON o.id = atsm.id
+                WHERE CONCAT(qr.part_a, qr.part_b) = ANY($1::text[])
+            """
+            try:
+                rows = await self.db.fetch(query_parts, part_formats)
+                for row in rows:
+                    results[row['qr_code']] = dict(row)
+                logger.info(f"Batch-поиск по part format: найдено {len(rows)} из {len(part_formats)}")
+            except Exception as e:
+                logger.error(f"Ошибка batch-поиска по part format: {str(e)}")
+                raise
+
+        logger.info(f"Общий результат batch-поиска: найдено {len(results)} из {len(qr_codes)} QR-кодов")
+        return results
