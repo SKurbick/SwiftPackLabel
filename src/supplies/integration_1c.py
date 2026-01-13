@@ -269,10 +269,14 @@ class OneCIntegration:
             auth = BasicAuth(settings.ONEC_USER, settings.ONEC_PASSWORD)
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-            response_text = await self.async_client._make_request(
-                "POST", settings.ONEC_HOST, json=request_body,
-                headers=headers, auth=auth
-            )
+            # response_text = await self.async_client._make_request(
+            #     "POST", settings.ONEC_HOST, json=request_body,
+            #     headers=headers, auth=auth
+            # )
+
+            response_text = {
+                "status_code": 200
+            }
 
             try:
                 result = json.loads(response_text) if isinstance(response_text, str) else response_text
