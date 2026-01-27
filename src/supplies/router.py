@@ -3,8 +3,8 @@ from typing import List, Dict
 from starlette.responses import StreamingResponse, JSONResponse
 from fastapi import APIRouter, Depends, Body, status, HTTPException, Path, Query
 
+from src.auth import UserPermissions, get_info_from_token
 from src.logger import app_logger as logger
-from src.auth.dependencies import get_current_user
 from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, WildFilterRequest, DeliverySupplyInfo, \
     SupplyIdWithShippedBodySchema, MoveOrdersRequest, MoveOrdersResponse, SupplyBarcodeListRequest, \
     FictitiousDeliveryRequest, FictitiousDeliveryResponse, FictitiousShipmentRequest, \
@@ -30,7 +30,7 @@ async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> SupplyIdResponseSchema:
     """
     Получить список поставок с фильтрацией по висячим и доставке.
@@ -47,6 +47,8 @@ async def get_supplies(
     Returns:
         SupplyIdResponseSchema: Список поставок с их деталями
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     logger.info("get_supplies function called (no cache available)")
     return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only, is_delivery=is_delivery)
 
@@ -61,7 +63,7 @@ async def upload_stickers_to_orders(
         supply_ids: SupplyIdBodySchema = Body(),
         allow_partial: bool = Query(False, description="Разрешить частичную печать (без полной сверки заказов)"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Генерирует и возвращает ZIP-архив, содержащий PDF со стикерами и лист подбора
@@ -70,11 +72,14 @@ async def upload_stickers_to_orders(
         supply_ids: Информация о поставках для которых нужно создать стикеры
         allow_partial: Разрешить частичную печать (по умолчанию False)
         db: Соединение с базой данных
+        user: UserPermission by token
     Returns:
         StreamingResponse: ZIP-архив, содержащий два PDF файла:
             - stickers.pdf: PDF с стикерами для печати
             - selection_sheet.pdf: PDF с листом подбора
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     supplies_service = SuppliesService(db)
     result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids, allow_partial)
     selection_sheet_content = await create_table_pdf(result_stickers)
@@ -100,7 +105,7 @@ async def upload_stickers_to_orders(
 async def generate_stickers_by_wild(
         wild_filter: WildFilterRequest = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Генерирует и возвращает PDF-файл со стикерами для конкретного wild и указанных заказов в поставках.
@@ -111,6 +116,8 @@ async def generate_stickers_by_wild(
     Returns:
         StreamingResponse: PDF-файл со стикерами для печати
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     supplies_service = SuppliesService(db)
     result_stickers = await supplies_service.filter_and_fetch_stickers_by_wild(wild_filter)
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
@@ -130,7 +137,7 @@ async def deliver_supplies(
         supply_ids: List[DeliverySupplyInfo] = Body(..., description="Список поставок для перевода в статус доставки"),
         order_wild_map: Dict[str, str] = Body(..., description="Соответствие заказов и артикулов wild"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> JSONResponse:
     """
     Переводит указанные поставки в статус доставки и формирует структурированные данные для 1C.
@@ -142,7 +149,9 @@ async def deliver_supplies(
     Returns:
         Словарь с ключом "accounts", содержащий список данных по аккаунтам, wild-артикулам и поставкам
     """
-    logger.info(f"Запрос на перевод поставок в статус доставки от {user.get('username', 'unknown')}")
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на перевод поставок в статус доставки от user ID: {user.user_id}")
     logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок и {len(order_wild_map)} заказов")
     try:
         supply_service = SuppliesService(db)
@@ -178,7 +187,7 @@ async def deliver_supplies(
 async def deliver_supplies_hanging(
         supply_ids: List[DeliverySupplyInfo] = Body(..., description="Список поставок для перевода в статус доставки"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ):
     """
     Переводит указанные висячие поставки в статус доставки.
@@ -189,7 +198,9 @@ async def deliver_supplies_hanging(
     Returns:
         dict: Словарь с информацией об успешности выполнения
     """
-    logger.info(f"Запрос на перевод висячих поставок в статус доставки от {user.get('username', 'unknown')}")
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на перевод висячих поставок в статус доставки от user ID: {user.user_id}")
     logger.info(f"Получен запрос на доставку для {len(supply_ids)} поставок : {supply_ids}")
     try:
         supply_service = SuppliesService(db)
@@ -210,7 +221,7 @@ async def deliver_supplies_hanging(
 async def deliver_fictitious_supply(
         request: FictitiousDeliveryRequest = Body(..., description="Данные фиктивной поставки"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> FictitiousDeliveryResponse:
     """
     Переводит фиктивные висячие поставки в статус доставки.
@@ -231,12 +242,14 @@ async def deliver_fictitious_supply(
     Raises:
         HTTPException: В случае ошибки обработки запроса
     """
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     logger.info(f"Запрос на перевод фиктивных поставок {list(request.supplies.keys())} "
-                f"в статус доставки от {user.get('username', 'unknown')}")
+                f"в статус доставки от user c ID: {user.user_id}")
 
     try:
         supply_service = SuppliesService(db)
-        operator = user.get('username', 'unknown')
+        operator = f"User-ID: {user.user_id}"
 
         # Обработка поставок (одной или нескольких)
         logger.info(f"Обработка {len(request.supplies)} фиктивных поставок")
@@ -274,7 +287,7 @@ async def deliver_fictitious_supply(
 async def shipment_of_fictions_supply(
         request: FictitiousShipmentRequest = Body(..., description="Данные для фиктивной отгрузки"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Выполняет фиктивную отгрузку заказов из поставок.
@@ -298,8 +311,10 @@ async def shipment_of_fictions_supply(
     Raises:
         HTTPException: В случае ошибки обработки запроса или недостатка заказов
     """
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     logger.info(f"Запрос на фиктивную отгрузку {request.shipped_quantity} заказов "
-                f"из {len(request.supplies)} поставок от {user.get('username', 'unknown')}")
+                f"из {len(request.supplies)} поставок от user c ID: {user.user_id}")
 
     try:
         supply_service = SuppliesService(db)
@@ -308,13 +323,13 @@ async def shipment_of_fictions_supply(
         result = await supply_service.shipment_fictitious_supplies_with_quantity(
             supplies=request.supplies,
             shipped_quantity=request.shipped_quantity,
-            user=user,
+            user={"username": f"User-ID: {user.user_id}"},
             operator=request.operator
         )
         
         # Всегда возвращаем PDF стикеры
         if result.get("stickers_pdf"):
-            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{request.operator or user.get('username', 'unknown')}.pdf"
+            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{request.operator or f'User-ID: {user.user_id}'}.pdf"
             return StreamingResponse(
                 result["stickers_pdf"],
                 media_type="application/pdf", 
@@ -346,7 +361,7 @@ async def shipment_hanging_actual_quantity(
         supply_data: SupplyIdWithShippedBodySchema = Body(...,
                                                           description="Данные висячих поставок с фактическим количеством для отгрузки"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> JSONResponse:
     """
     Отгружает фактическое количество товаров из висячих поставок.
@@ -357,7 +372,9 @@ async def shipment_hanging_actual_quantity(
     Returns:
         JSONResponse: Результат отгрузки фактического количества
     """
-    logger.info(f"Запрос на отгрузку фактического количества висячих поставок от {user.get('username', 'unknown')}")
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на отгрузку фактического количества висячих поставок от user c ID: {user.user_id}")
     logger.info(
         f"Получен запрос для {len(supply_data.supplies)} висячих поставок с фактическим количеством={supply_data.shipped_count}")
 
@@ -367,7 +384,7 @@ async def shipment_hanging_actual_quantity(
         # user передается для author в 1C API
         result = await supply_service.shipment_hanging_actual_quantity_implementation(
             supply_data,
-            user,
+            {"username": f"User-ID: {user.user_id}"},
             supply_data.operator  # operator для БД, может быть None
         )
 
@@ -391,7 +408,7 @@ async def shipment_hanging_actual_quantity(
 async def move_orders_between_supplies(
         request_data: MoveOrdersRequest = Body(..., description="Данные о заказах для перемещения"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> MoveOrdersResponse:
     """
     Перемещает сборочные задания между поставками.
@@ -404,7 +421,9 @@ async def move_orders_between_supplies(
     Returns:
         MoveOrdersResponse: Результат операции перемещения
     """
-    logger.info(f"Запрос на перемещение заказов от {user.get('username', 'unknown')}")
+    if not user.creating_a_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на перемещение заказов от user c ID: {user.user_id}")
     total_remove_count = sum(wild_item.remove_count for wild_item in request_data.orders.values())
     logger.info(f"Получен запрос на перемещение {total_remove_count} заказов из {len(request_data.orders)} wild-кодов")
 
@@ -413,7 +432,7 @@ async def move_orders_between_supplies(
         # operator из запроса для логирования в БД (может быть None)
         # Для 1C API используется user внутри метода
         operator = request_data.operator
-        result = await supply_service.move_orders_between_supplies_implementation(request_data, user)
+        result = await supply_service.move_orders_between_supplies_implementation(request_data, {'username': f"User-ID: {user.user_id}"})
 
         # Извлекаем внутренние данные для логирования (не включаются в API response)
         moved_orders_details = result.pop('_moved_orders_details', None)
@@ -530,7 +549,7 @@ async def move_orders_between_supplies(
 async def move_orders_by_qr(
         request_data: MoveOrdersByQRRequest = Body(..., description="Данные с QR-кодами для перемещения"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> MoveOrdersByQRResponse:
     """
     Перемещает сборочные задания по списку QR-кодов.
@@ -550,13 +569,15 @@ async def move_orders_by_qr(
     Returns:
         MoveOrdersByQRResponse: Результат операции перемещения с детализацией по QR-кодам
     """
-    logger.info(f"Запрос на перемещение заказов по QR от {user.get('username', 'unknown')}")
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на перемещение заказов по QR от user c ID: {user.user_id}")
     logger.info(f"Получено {len(request_data.qr_codes)} QR-кодов для перемещения")
 
     try:
         supply_service = SuppliesService(db)
         operator = request_data.operator
-        result = await supply_service.move_orders_by_qr_implementation(request_data, user)
+        result = await supply_service.move_orders_by_qr_implementation(request_data, {"username": f"User-ID: {user.user_id}"})
 
         # === ЛОГИКА ИДЕНТИЧНА move_orders_between_supplies ===
 
@@ -659,7 +680,7 @@ async def move_orders_by_qr(
              summary="Очистка пустых поставок",
              description="Находит и удаляет поставки без заказов после двойной проверки")
 async def clean_empty_supplies(
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> JSONResponse:
     """
     Обработка пустых поставок:
@@ -668,7 +689,9 @@ async def clean_empty_supplies(
     3. Удаляет поставки пустые два раза подряд
     4. Обновляет список отслеживаемых
     """
-    logger.info(f"Запуск очистки пустых поставок от {user.get('username')}")
+    if not user.transfer_of_delivery_to_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запуск очистки пустых поставок от user c ID: {user.user_id}")
 
     try:
 
@@ -695,7 +718,7 @@ async def clean_empty_supplies(
 async def get_supply_stickers(
         request: SupplyBarcodeListRequest = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Получить PNG файл с объединенными стикерами для списка поставок.
@@ -708,6 +731,8 @@ async def get_supply_stickers(
     Returns:
         StreamingResponse: PNG файл с объединенными стикерами
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         supply_service = SuppliesService()
         png_buffer = await supply_service.get_multiple_supply_stickers(request.supplies)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
-from src.auth.dependencies import get_current_user
+from src.auth import UserPermissions, get_info_from_token
 from src.excel_data.schema import (
     WildModelResponse, MessageResponse, WildModelListResponse,
     WildModelRecord, WildModelCreate, WildModelUpdate
@@ -18,7 +18,7 @@ excel_data = APIRouter(prefix='/excel-data', tags=['Excel Data'])
                 status_code=status.HTTP_201_CREATED)
 async def upload_excel_file(
     file: UploadFile = File(...),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> MessageResponse:
     """
     Загружает Excel-файл с данными формата wild-модель.
@@ -32,6 +32,8 @@ async def upload_excel_file(
     Raises:
         HTTPException: Если файл не соответствует требованиям
     """
+    if not user.ability_to_upload_excel_file_to_fines:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     if not file.filename.endswith('.xlsx'):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -41,14 +43,14 @@ async def upload_excel_file(
     excel_service = ExcelDataService()
     excel_service.upload_excel(file_content)
     
-    logger.info(f"Пользователь {user.get('username')} загрузил новый Excel-файл")
+    logger.info(f"Пользователь с ID: {user.user_id} загрузил новый Excel-файл")
     return MessageResponse(message="Файл успешно загружен и данные обновлены")
 
 
 @excel_data.get("/download", 
                response_description="Excel-файл с текущими данными")
 async def download_excel_file(
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Скачивает текущие данные в формате Excel-файла.
@@ -57,10 +59,12 @@ async def download_excel_file(
     Returns:
         StreamingResponse: Excel-файл с данными
     """
+    if not user.download_excel_files:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     excel_service = ExcelDataService()
     excel_buffer = excel_service.download_excel()
     
-    logger.info(f"Пользователь {user.get('username')} скачал текущий Excel-файл")
+    logger.info(f"Пользователь с ID: {user.user_id} скачал текущий Excel-файл")
     return StreamingResponse(
         excel_buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -71,7 +75,7 @@ async def download_excel_file(
 # Новые CRUD эндпоинты
 @excel_data.get("/records", response_model=WildModelListResponse)
 async def get_all_records(
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> WildModelListResponse:
     """
     Возвращает все записи из файла с индексами.
@@ -79,6 +83,8 @@ async def get_all_records(
     Returns:
         WildModelListResponse: Список всех записей с индексами
     """
+    if not user.download_excel_files:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     excel_service = ExcelDataService()
     return excel_service.get_all_records()
 
@@ -87,7 +93,7 @@ async def get_all_records(
 async def update_record(
     index: int,
     record: WildModelUpdate,
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> WildModelRecord:
     """
     Обновляет запись по номеру строки (индексу).
@@ -100,6 +106,8 @@ async def update_record(
     Returns:
         WildModelRecord: Обновленная запись
     """
+    if not user.ability_to_upload_excel_file_to_fines:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     excel_service = ExcelDataService()
     return excel_service.update_record(index, record)
 
@@ -107,7 +115,7 @@ async def update_record(
 @excel_data.post("/records", response_model=WildModelRecord, status_code=status.HTTP_201_CREATED)
 async def create_record(
     record: WildModelCreate,
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> WildModelRecord:
     """
     Добавляет новую запись в файл.
@@ -119,6 +127,8 @@ async def create_record(
     Returns:
         WildModelRecord: Созданная запись с индексом
     """
+    if not user.ability_to_upload_excel_file_to_fines:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     excel_service = ExcelDataService()
     return excel_service.create_record(record)
 
@@ -126,7 +136,7 @@ async def create_record(
 @excel_data.delete("/records/{index}", response_model=MessageResponse)
 async def delete_record(
     index: int,
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> MessageResponse:
     """
     Удаляет запись по номеру строки (индексу).
@@ -138,6 +148,8 @@ async def delete_record(
     Returns:
         MessageResponse: Сообщение об успешном удалении
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     excel_service = ExcelDataService()
     
     if not excel_service.delete_record(index):

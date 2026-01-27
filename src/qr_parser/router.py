@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 
-from src.auth.dependencies import get_current_user
+from src.auth import UserPermissions, get_info_from_token
 from src.db import get_db_connection, AsyncGenerator
 from src.qr_parser.schema import WildParserRequest, WildParserResponse, QRLookupRequest, QRLookupResponse
 from src.qr_parser.service import WildParserService, QRLookupService
@@ -19,7 +19,7 @@ qr_parser = APIRouter(prefix='/qr-parser', tags=['QR Parser'])
 async def parse_wild_string(
         request: WildParserRequest = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user),
+        user: UserPermissions = Depends(get_info_from_token),
 ) -> WildParserResponse:
     """
     Парсит строку формата 'wild123/23' и возвращает информацию о товаре.
@@ -29,9 +29,11 @@ async def parse_wild_string(
     Returns:
         WildParserResponse: Информация о товаре, извлеченная из строки
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         logger.info(
-            f"Запрос на парсинг строки wild от пользователя {user.get('username', 'unknown')}: {request.wild_string}")
+            f"Запрос на парсинг строки wild от пользователя c ID: {user.user_id}: {request.wild_string}")
         parser_service = WildParserService(db=db)
         result = await parser_service.parse_wild_string(request.wild_string)
         logger.info(f"Успешно разобрана строка wild: {request.wild_string}")
@@ -60,7 +62,7 @@ async def parse_wild_string(
 async def lookup_by_qr_code(
         qr_data: str = Query(..., description="QR код стикера, например '*CN+tGIpw'"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user),
+        user: UserPermissions = Depends(get_info_from_token),
 ) -> QRLookupResponse:
     """
     Ищет данные по QR-коду стикера и возвращает информацию о заказе.
@@ -73,9 +75,11 @@ async def lookup_by_qr_code(
     Returns:
         QRLookupResponse: Найденные данные QR-скана и связанного заказа
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         logger.info(
-            f"Запрос на поиск по QR-коду от пользователя {user.get('username', 'unknown')}: {qr_data}")
+            f"Запрос на поиск по QR-коду от пользователя {user.user_id}: {qr_data}")
         
         lookup_service = QRLookupService(db=db)
         result = await lookup_service.find_by_qr_data(qr_data)
@@ -105,7 +109,7 @@ async def lookup_by_qr_code(
 async def lookup_by_order_id(
         order_id: int,
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user),
+        user: UserPermissions = Depends(get_info_from_token),
 ) -> QRLookupResponse:
     """
     Ищет данные по order_id и возвращает информацию о заказе и QR-скане.
@@ -118,9 +122,11 @@ async def lookup_by_order_id(
     Returns:
         QRLookupResponse: Найденные данные QR-скана и связанного заказа
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         logger.info(
-            f"Запрос на поиск по order_id от пользователя {user.get('username', 'unknown')}: {order_id}")
+            f"Запрос на поиск по order_id от пользователя c ID: {user.user_id}: {order_id}")
 
         lookup_service = QRLookupService(db=db)
         result = await lookup_service.find_by_order_id(order_id)
@@ -150,7 +156,7 @@ async def lookup_by_order_id(
 async def lookup_by_qr_number(
         qr_number: str = Query(..., description="Номер QR (part_a + part_b), например 'ABC123XYZ'"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user),
+        user: UserPermissions = Depends(get_info_from_token),
 ) -> QRLookupResponse:
     """
     Ищет данные по номеру QR (part_a + part_b) и возвращает информацию о заказе.
@@ -163,9 +169,11 @@ async def lookup_by_qr_number(
     Returns:
         QRLookupResponse: Найденные данные QR-скана и связанного заказа
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         logger.info(
-            f"Запрос на поиск по номеру QR от пользователя {user.get('username', 'unknown')}: {qr_number}")
+            f"Запрос на поиск по номеру QR от пользователя c ID: {user.user_id}: {qr_number}")
 
         lookup_service = QRLookupService(db=db)
         result = await lookup_service.find_by_qr_number(qr_number)

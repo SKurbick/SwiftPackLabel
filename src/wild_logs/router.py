@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, Response, status
-from src.auth.dependencies import get_current_user
+from fastapi import APIRouter, Depends, Response, status, HTTPException
+
+from src.auth import UserPermissions, get_info_from_token
 from src.db import get_db_connection, AsyncGenerator
 from src.wild_logs.schema import WildLogCreate, ShiftSupervisorData
 from src.wild_logs.service import WildLogService
@@ -16,7 +17,7 @@ wild_logs = APIRouter(prefix='/wild-logs', tags=['Wild Logs'])
 async def create_wild_log(
     log_data: WildLogCreate,
     db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> Response:
     """
     Записывает информацию об операции с wild-кодом в базу данных.
@@ -28,6 +29,8 @@ async def create_wild_log(
     Returns:
         Response: Пустой ответ со статусом 204 No Content
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     service = WildLogService(db)
     await service.create_log(log_data)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -41,7 +44,7 @@ async def create_wild_log(
 async def update_supervisor_info(
     supervisor_data: ShiftSupervisorData,
     db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> Response:
     """
     Обновляет информацию о старшем операторе для записей с указанным session_id.
@@ -53,6 +56,8 @@ async def update_supervisor_info(
     Returns:
         Response: Пустой ответ со статусом 204 No Content
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     service = WildLogService(db)
     await service.update_supervisor_info(supervisor_data)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

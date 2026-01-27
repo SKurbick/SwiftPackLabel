@@ -1,7 +1,8 @@
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
 from enum import Enum
-from src.auth.dependencies import get_current_user
+
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+
+from src.auth import UserPermissions, get_info_from_token
 from src.cache.global_cache import global_cache
 from src.logger import app_logger as logger
 
@@ -24,7 +25,7 @@ cache = APIRouter(prefix='/cache', tags=['Cache'])
             description="Обновляет кэш системы - весь или конкретный тип")
 async def refresh_cache(
         cache_type: CacheType = Query(CacheType.ALL, description="Тип кэша для обновления"),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> dict:
     """
     Обновление кэша системы.
@@ -41,7 +42,9 @@ async def refresh_cache(
     Returns:
         dict: Результат обновления кэша
     """
-    logger.info(f"Обновление кэша типа '{cache_type}' запущено пользователем {user.get('username', 'unknown')}")
+    if not user.creating_a_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Обновление кэша типа '{cache_type}' запущено пользователем c ID: {user.user_id}")
     
     if not global_cache.is_connected:
         raise HTTPException(
@@ -80,7 +83,7 @@ async def refresh_cache(
             raise HTTPException(status_code=400, detail=f"Неизвестный тип кэша: {cache_type}")
         
         if success:
-            logger.info(f"Обновление кэша '{cache_type}' завершено успешно пользователем {user.get('username', 'unknown')}")
+            logger.info(f"Обновление кэша '{cache_type}' завершено успешно пользователем c ID: {user.user_id}")
         else:
             logger.error(f"Обновление кэша '{cache_type}' завершилось с ошибкой")
             

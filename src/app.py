@@ -3,7 +3,6 @@ from fastapi import FastAPI, status
 from src.settings import settings
 from src.db import check_db_connected, check_db_disconnected
 from src.routes import router
-from src.auth.init_superuser import create_initial_superuser
 from src.cache import global_cache
 from src.middleware import DuplicateRequestMiddleware
 
@@ -46,7 +45,6 @@ app = start_application()
 async def startup() -> None:
     await check_db_connected()
     await global_cache.connect()
-    await create_initial_superuser()
     # Начальная инициализация кэша
     await global_cache.warm_up_cache()
     # Запуск автоматического фонового обновления каждые 5 минут

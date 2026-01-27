@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Depends, Body, HTTPException, status
 
 from src.logger import app_logger as logger
-from src.auth.dependencies import get_current_user
+from src.auth import UserPermissions, get_info_from_token
 from src.cards.cards import CardsService
 from src.cards.schema import DimensionsUpdateRequest
 from src.db import get_db_connection, AsyncGenerator
@@ -21,13 +21,14 @@ cards = APIRouter(prefix='/cards', tags=['Cards'])
 async def update_dimensions(
     dimensions: DimensionsUpdateRequest = Body(..., description="Данные о размерах и весе товара"),
     db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> None:
     """
     Обновляет размеры и вес товара по артикулу продавца (wild).
     """
-    username = user.get('username', 'unknown')
-    logger.info(f"Пользователь {username} запросил обновление размеров для артикула {dimensions.wild}")
+    if not user.changing_product_characteristics:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Пользователь с ID: {user.user_id} запросил обновление размеров для артикула {dimensions.wild}")
 
     cards_service = CardsService(db)
 

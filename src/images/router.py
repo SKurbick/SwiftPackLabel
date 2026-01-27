@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from pathlib import Path
 import urllib.parse
 
-from src.auth.dependencies import get_current_user,get_current_superuser
+from src.auth import UserPermissions, get_info_from_token
 from src.images.service import ImageService
 from src.images.schema import ImageUploadResponse, ImageInfoResponse, ImageDeleteResponse, ImageListResponse
 from src.logger import app_logger as logger
@@ -14,7 +14,7 @@ images = APIRouter(prefix='/images', tags=['Images'])
 @images.post("/upload", response_model=ImageUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_image(
     file: UploadFile = File(..., description="Файл изображения для загрузки"),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> ImageUploadResponse:
     """
     Загрузка изображения на сервер.
@@ -27,7 +27,9 @@ async def upload_image(
     Returns:
         ImageUploadResponse: Результат загрузки изображения
     """
-    logger.info(f"Запрос на загрузку изображения от {user.get('username', 'unknown')}")
+    if not user.changing_product_characteristics:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на загрузку изображения от user ID: {user.user_id}")
     
     try:
         if not file.content_type or not file.content_type.startswith('image/'):
@@ -84,7 +86,7 @@ async def upload_image(
 @images.get("/{filename}", status_code=status.HTTP_200_OK)
 async def get_image(
     filename: str,
-    user: dict = Depends(get_current_superuser)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> Response:
     """
     Получение изображения по имени файла.
@@ -96,7 +98,9 @@ async def get_image(
     Returns:
         Response: Изображение в бинарном формате
     """
-    logger.info(f"Запрос на получение изображения {filename} от {user.get('username', 'unknown')}")
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на получение изображения {filename} от user ID: {user.user_id}")
     
     try:
         image_service = ImageService()
@@ -152,7 +156,7 @@ async def get_image(
 @images.get("/{filename}/info", response_model=ImageInfoResponse, status_code=status.HTTP_200_OK)
 async def get_image_info(
     filename: str,
-    user: dict = Depends(get_current_superuser)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> ImageInfoResponse:
     """
     Получение информации об изображении.
@@ -164,7 +168,9 @@ async def get_image_info(
     Returns:
         ImageInfoResponse: Информация об изображении
     """
-    logger.info(f"Запрос на получение информации об изображении {filename} от {user.get('username', 'unknown')}")
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на получение информации об изображении {filename} от user ID: {user.user_id}")
     
     try:
         image_service = ImageService()
@@ -191,7 +197,7 @@ async def get_image_info(
 @images.delete("/{filename}", response_model=ImageDeleteResponse, status_code=status.HTTP_200_OK)
 async def delete_image(
     filename: str,
-    user: dict = Depends(get_current_superuser)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> ImageDeleteResponse:
     """
     Удаление изображения.
@@ -203,7 +209,9 @@ async def delete_image(
     Returns:
         ImageDeleteResponse: Результат удаления изображения
     """
-    logger.info(f"Запрос на удаление изображения {filename} от {user.get('username', 'unknown')}")
+    if not user.changing_product_characteristics:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на удаление изображения {filename} от {user.user_id}")
     
     try:
         image_service = ImageService()
@@ -233,7 +241,7 @@ async def delete_image(
 
 @images.get("/", response_model=ImageListResponse, status_code=status.HTTP_200_OK)
 async def list_images(
-    user: dict = Depends(get_current_superuser)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> ImageListResponse:
     """
     Получение списка всех изображений.
@@ -244,7 +252,9 @@ async def list_images(
     Returns:
         ImageListResponse: Список названий файлов изображений
     """
-    logger.info(f"Запрос на получение списка изображений от {user.get('username', 'unknown')}")
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Запрос на получение списка изображений от user ID: {user.user_id}")
     
     try:
         image_service = ImageService()

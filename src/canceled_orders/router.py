@@ -3,8 +3,8 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.auth import UserPermissions, get_info_from_token
 from src.logger import app_logger as logger
-from src.auth.dependencies import get_current_user
 from src.canceled_orders.service import CanceledOrdersService
 from src.canceled_orders.schema import (
     SupplyCanceledCheckRequest,
@@ -27,15 +27,16 @@ canceled_orders = APIRouter(prefix='/canceled-orders', tags=['Canceled Orders'])
 async def check_supply_canceled(
     request: SupplyCanceledCheckRequest,
     db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> SupplyCanceledCheckResponse:
     """
     Проверяет наличие отмененных заказов в поставке.
 
     Для каждого заказа берется последний статус (по created_at_db DESC).
     """
-    username = user.get('username', 'unknown')
-    logger.info(f"Пользователь {username} запросил проверку отмененных заказов для поставки {request.supply_id}")
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
+    logger.info(f"Пользователь с ID: {user.user_id} запросил проверку отмененных заказов для поставки {request.supply_id}")
 
     service = CanceledOrdersService(db)
 
@@ -66,7 +67,7 @@ async def check_supply_canceled(
 async def check_supplies_canceled(
     request: BulkSupplyCanceledCheckRequest,
     db: AsyncGenerator = Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> BulkSupplyCanceledCheckResponse:
     """
     Проверяет наличие отмененных заказов в списке поставок.
@@ -74,9 +75,10 @@ async def check_supplies_canceled(
     Оптимизирован для массовой проверки - делает один запрос к БД.
     Для каждого заказа берется последний статус (по created_at_db DESC).
     """
-    username = user.get('username', 'unknown')
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     logger.info(
-        f"Пользователь {username} запросил массовую проверку отмененных заказов "
+        f"Пользователь c ID: {user.user_id} запросил массовую проверку отмененных заказов "
         f"для {len(request.supply_ids)} поставок"
     )
 
