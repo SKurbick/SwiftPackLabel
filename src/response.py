@@ -228,7 +228,7 @@ class AsyncHttpClient:
         return await self.request("PATCH", url, json=json, data=data, headers=headers)
 
 
-def parse_json(response_text: str) -> dict:
+def parse_json(response_text: str) -> dict | None:
     """Преобразует строку ответа в JSON или выбрасывает исключение.
     Args:
         response_text: Строка ответа от сервера.
@@ -237,6 +237,8 @@ def parse_json(response_text: str) -> dict:
     Raises:
         ValueError: Если строка не является корректным JSON.
     """
+    if response_text is None:
+        return {}
     try:
         return json.loads(response_text)
     except json.JSONDecodeError as e:
