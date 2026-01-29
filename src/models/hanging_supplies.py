@@ -705,3 +705,20 @@ class HangingSupplies:
         """
 
         await self.db.execute(update_query, supplies_ids)
+
+    async def get_all_orders_by_supply_id(self, supply_id: str):
+        """Получение номеров СЗ по номеру поставки."""
+        query = """
+        SELECT DISTINCT ON (osl.order_id)
+            osl.order_id,
+            osl.supply_id,
+            osl.account
+        FROM order_status_log osl
+        WHERE osl.supply_id = $1
+        ORDER BT osl.order_id, osl.created_at DESC;
+        """
+
+        return await self.db.fetch(query, supply_id)
+    
+    async def mark_order_as_fictitious_delivered(self, orders_ids):
+        pass
