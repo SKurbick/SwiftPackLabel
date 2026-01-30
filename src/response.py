@@ -50,8 +50,12 @@ class HttpClient:
                 )
             except requests.RequestException as e:
                 print(type(e))
-                logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {url} - {e}")
-                time.sleep(self.delay)
+                if e.response.status_code == 404:
+                    logger.warning(f'Получен статус код 404 для метода {method} {url}. Повторные попытки отменены.')
+                    return None
+                else:
+                    logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {url} - {e}")
+                    time.sleep(self.delay)
         return None
 
     def request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None,
