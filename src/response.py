@@ -19,6 +19,7 @@ class HttpClient:
     def _make_request(self, method: str, url: str, **kwargs) -> str | None:
 
         for attempt in range(self.retries):
+            print("CLIENT ID:", id(self))
             print("ATTEMPT:", attempt + 1)
 
             try:
