@@ -11,51 +11,39 @@ from src.logger import app_logger as logger
 class HttpClient:
 
     def __init__(self, timeout: int = 120, retries: int = 1, delay: int = 0):
-        """Инициализирует HttpClient.
-        Args:
-            timeout: Таймаут для каждого запроса в секундах.
-            retries: Количество попыток перед тем, как считать запрос неудачным.
-        """
-        self.timeout: int = timeout
-        self.retries: int = retries
-        self.session: Session = Session()
-        self.delay: int = delay
+        self.timeout = timeout
+        self.retries = retries
+        self.delay = delay
+        self.session = Session()
 
-    def _make_request(self, method: str, url: str, **kwargs: object) -> str | None:
-        """Выполняет HTTP-запрос с повторными попытками.
-        Args:
-            method: HTTP-метод (например, "GET", "POST").
-            url: URL-адрес для запроса.
-            **kwargs: Дополнительные аргументы для передачи в `requests.Session.request`.
-        Returns:
-            Объект ответа, если запрос успешен, иначе None.
-        """
+    def _make_request(self, method: str, url: str, **kwargs) -> str | None:
+
         for attempt in range(self.retries):
-            try:
-                response: Response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            print("ATTEMPT:", attempt + 1)
 
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    timeout=self.timeout,
+                    **kwargs
+                )
+
+                # if 404:
                 if response.status_code == 404:
-                    logger.warning(f'Получен статус код 404 для метода {method} {url}. Повторные попытки отменены.')
+                    logger.warning(f"404 for {method} {url}. Stop retry.")
                     return None
 
                 response.raise_for_status()
                 return response.text
-            except requests.HTTPError as e:
-                status_code = e.response.status_code if e.response else None
-                if status_code == 404:
-                    logger.warning(f'Получен статус код 404 для метода {method} {url}. Повторные попытки отменены.')
-                    return None
-                logger.warning(
-                    f"Попытка {attempt + 1}: HTTP ошибка {status_code} во время {method} {url} - {e}"
-                )
+
             except requests.RequestException as e:
-                print(type(e))
-                if e.response.status_code == 404:
-                    logger.warning(f'Получен статус код 404 для метода {method} {url}. Повторные попытки отменены.')
-                    return None
-                else:
-                    logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {url} - {e}")
-                    time.sleep(self.delay)
+                logger.warning(
+                    f"Attempt {attempt + 1}: error {method} {url} - {e}"
+                )
+
+                time.sleep(self.delay)
+
         return None
 
     def request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None,
