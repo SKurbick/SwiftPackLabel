@@ -33,6 +33,11 @@ class HttpClient:
         for attempt in range(self.retries):
             try:
                 response: Response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+
+                if response.status_code == 404:
+                    logger.warning(f'Получен статус код 404 для метода {method} {url}. Повторные попытки отменены.')
+                    return None
+
                 response.raise_for_status()
                 return response.text
             except requests.HTTPError as e:
