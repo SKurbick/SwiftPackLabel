@@ -44,6 +44,7 @@ class HttpClient:
                     f"Попытка {attempt + 1}: HTTP ошибка {status_code} во время {method} {url} - {e}"
                 )
             except requests.RequestException as e:
+                print(type(e))
                 logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {url} - {e}")
                 time.sleep(self.delay)
         return None
