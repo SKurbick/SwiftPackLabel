@@ -25,7 +25,7 @@ class OrderDetail(BaseSchema):
     id: int
     nm_id:int
     article: str
-    photo: str = "Нет фото"
+    photo: str | None = "Нет фото"
     subject_name: str = "Нет наименования"
     price: int
     account: str

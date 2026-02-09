@@ -3,4 +3,5 @@
 **/__pycache__/
 src/logging/*.log
 src/.env
-src/tokens.jsontokens.json
+src/tokens.json
+tokens.json
