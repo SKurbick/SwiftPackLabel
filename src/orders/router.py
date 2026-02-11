@@ -3,10 +3,10 @@ import uuid
 from typing import Dict
 from datetime import datetime
 
+from src.auth import UserPermissions, get_info_from_token
 from src.logger import app_logger as logger
 from src.orders.orders import OrdersService
 from src.orders.order_status_service import OrderStatusService
-from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
 from src.cache import global_cached
@@ -23,7 +23,7 @@ orders = APIRouter(prefix='/orders', tags=['Orders'])
 async def get_orders(
         request: Request,
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user),
+        user: UserPermissions = Depends(get_info_from_token),
         time_delta: float = Query(1, description="Фильтрация по времени создания заказа (в часах)"),
         wild: str = Query(None, description="Фильтрация по wild"),
         positive_stock: bool = Query(False, description="Фильтрация по остатку: True - положительные, False - нулевые и отрицательные")
@@ -43,8 +43,10 @@ async def get_orders(
     Returns:
         Dict[str, GroupedOrderInfo]: Словарь с данными о заказах по артикулам
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     start_time = time.time()
-    logger.info(f"Запрос на получение сгруппированных заказов от {user.get('username', 'unknown')}")
+    logger.info(f"Запрос на получение сгруппированных заказов от user ID: {user.user_id}")
     try:
         orders_service = OrdersService(db)
 
@@ -76,7 +78,7 @@ async def get_orders(
 async def add_fact_orders_and_supply_name(
         payload: OrdersWithSupplyNameIn = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> SupplyAccountWildOut:
     """
     Создает поставки на основе фактического количества заказов для каждого wild.
@@ -95,11 +97,13 @@ async def add_fact_orders_and_supply_name(
         GET /api/v1/orders/operations/{operation_id} или
         GET /api/v1/orders/operations/latest
     """
+    if not user.creating_a_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     start_time = time.time()
 
     operation_id = f"supply_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     
-    logger.info(f"Обработка операции {operation_id} от {user.get('username', 'unknown')}")
+    logger.info(f"Обработка операции {operation_id} от user ID: {user.user_id}")
     logger.info(f"Поставки будут помечены как висячие: {payload.is_hanging}")
 
     try:
@@ -164,7 +168,7 @@ async def get_order_sticker(
         order_id: int = Path(..., description="Номер сборочного задания"),
         account: str = Query(..., description="Наименование аккаунта"),
         db: AsyncGenerator = Depends(get_db_connection),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ) -> StreamingResponse:
     """
     Получить PNG стикер для конкретного сборочного задания.
@@ -178,6 +182,8 @@ async def get_order_sticker(
     Returns:
         StreamingResponse: PNG файл стикера
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         orders_service = OrdersService(db)
         png_buffer = await orders_service.get_single_order_sticker(order_id, account)
@@ -209,7 +215,7 @@ async def get_order_sticker(
 async def get_sessions_list(
         limit: int = Query(50, ge=1, le=200, description="Количество сессий для получения"),
         offset: int = Query(0, ge=0, description="Смещение для пагинации"),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ):
     """
     Получить общий список всех сессий с базовой информацией.
@@ -222,6 +228,8 @@ async def get_sessions_list(
     Returns:
         List: Список сессий с базовой информацией (operation_id, supply_name, created_at, status)
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         sessions = await SupplyOperationsDB.get_sessions_list(limit=limit, offset=offset)
         
@@ -243,7 +251,7 @@ async def get_sessions_list(
 @orders.get("/sessions/{operation_id}", status_code=status.HTTP_200_OK)
 async def get_session_full_info(
         operation_id: str = Path(..., description="ID сессии для получения полной информации"),
-        user: dict = Depends(get_current_user)
+        user: UserPermissions = Depends(get_info_from_token)
 ):
     """
     Получить полную информацию о сессии по ID.
@@ -258,6 +266,8 @@ async def get_session_full_info(
     Raises:
         404: Сессия не найдена
     """
+    if not user.viewing:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     try:
         session = await SupplyOperationsDB.get_session_full_info(operation_id)
         

@@ -1,12 +1,11 @@
 """
 API роутер для парсинга PDF листов подбора
 """
-from typing import Dict, Any
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, status, Depends, Body
 from fastapi.responses import JSONResponse
 
-from src.auth.dependencies import get_current_user
+from src.auth import UserPermissions, get_info_from_token
 from src.pdf_parser.service import DocumentProcessingService
 from src.db import get_db_connection
 
@@ -24,11 +23,13 @@ async def parse_document_and_ship(
     file: UploadFile = File(..., description="PDF или Excel файл листа подбора"),
     account: str = Body(..., description="Аккаунт Wildberries для поставки"),
     db=Depends(get_db_connection),
-    user: dict = Depends(get_current_user)
+    user: UserPermissions = Depends(get_info_from_token)
 ) -> JSONResponse:
     """
     Парсит PDF или Excel лист подбора и сразу отправляет данные в фиктивную отгрузку.
     """
+    if not user.creating_a_delivery:
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="permission locked")
     # Проверяем тип файла
     filename_lower = file.filename.lower()
     if not (filename_lower.endswith('.pdf') or filename_lower.endswith(('.xlsx', '.xls'))):
