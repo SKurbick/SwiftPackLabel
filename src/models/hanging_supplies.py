@@ -69,7 +69,7 @@ class HangingSupplies:
             query = """
             SELECT * FROM public.hanging_supplies
             ORDER BY created_at DESC
-            LIMIT 1000
+            LIMIT 2000
             """
             result = await self.db.fetch(query)
             return [dict(row) for row in result]
