@@ -201,6 +201,7 @@ class OrdersService:
         local_vendor_code = process_local_vendor_code(raw_article)
         photo = photos_info.get(nm_id, "Нет фото")
         subject_name = wild_data.get(local_vendor_code, "Нет наименования")
+        is_b2b = supply.get("options").get("isB2B")
 
         elapsed_time = self._calculate_elapsed_time(created_at)
         return {
@@ -212,7 +213,8 @@ class OrdersService:
             "price": int(supply.get("convertedPrice", 0) / 100),
             "account": account,
             "created_at": created_at,
-            "elapsed_time": elapsed_time
+            "elapsed_time": elapsed_time,
+            "is_b2b": is_b2b,
         }
 
     def _format_orders(
