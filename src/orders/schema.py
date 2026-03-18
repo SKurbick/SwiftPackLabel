@@ -31,6 +31,7 @@ class OrderDetail(BaseSchema):
     account: str
     created_at: str
     elapsed_time: str = "Н/Д"
+    is_b2b: bool
 
 
 class GroupedOrderInfo(BaseSchema):
