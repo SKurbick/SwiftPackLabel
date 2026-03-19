@@ -72,7 +72,7 @@ async def get_orders(
         ) from e
 
 
-@orders.post("/with-supply-name", response_model=SupplyAccountWildOut, status_code=status.HTTP_201_CREATED)
+@orders.post("/with-supply-name", response_model=list[SupplyAccountWildOut], status_code=status.HTTP_201_CREATED)
 async def add_fact_orders_and_supply_name(
         payload: OrdersWithSupplyNameIn = Body(...),
         db: AsyncGenerator = Depends(get_db_connection),
