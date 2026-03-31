@@ -235,39 +235,39 @@ class SuppliesService:
         # 3. Обрабатываем каждый аккаунт
         account_final_supplies = {}  # {account: supply_id}
         
-        # if self.db:
-        #     final_supplies_db = FinalSupplies(self.db)
+        if self.db:
+            final_supplies_db = FinalSupplies(self.db)
             
-        for account in unique_accounts:
-            current_name = current_supply_names.get(account, f"Финальная_поставка_{account}")
+            for account in unique_accounts:
+                current_name = current_supply_names.get(account, f"Финальная_поставка_{account}")
 
-                # # Ищем последнюю активную финальную поставку
-                # last_final_supply = await final_supplies_db.get_latest_final_supply(account)
-                #
-                # if last_final_supply:
-                #     logger.info(f"Найдена существующая финальная поставка {last_final_supply['supply_id']} для {account}")
-                #
-                #     # Проверяем статус в WB API
-                #     wb_status = await self.get_supply_detailed_info(
-                #         last_final_supply["supply_id"],
-                #         account
-                #     )
-                #
-                #     if wb_status and not wb_status.get("done", True):
-                #         # Поставка активна - используем её
-                #         account_final_supplies[account] = last_final_supply["supply_id"]
-                #         logger.info(f"Используем активную финальную поставку {last_final_supply['supply_id']} для {account}")
-                #     else:
-                #         # Поставка неактивна - обновляем статус и создаем новую
-                #         new_supply_id = await self._create_new_final_supply(account, current_name)
-                #         if new_supply_id:
-                #             account_final_supplies[account] = new_supply_id
-                # else:
-                #     # Нет существующих финальных поставок - создаем новую
-            logger.info(f"Создаем финальную поставку для {account}")
-            new_supply_id = await self._create_new_final_supply(account, current_name)
-            if new_supply_id:
-                account_final_supplies[account] = new_supply_id
+                # Ищем последнюю активную финальную поставку
+                last_final_supply = await final_supplies_db.get_latest_final_supply(account)
+
+                if last_final_supply:
+                    logger.info(f"Найдена существующая финальная поставка {last_final_supply['supply_id']} для {account}")
+
+                    # Проверяем статус в WB API
+                    wb_status = await self.get_supply_detailed_info(
+                        last_final_supply["supply_id"],
+                        account
+                    )
+
+                    if wb_status and not wb_status.get("done", True):
+                        # Поставка активна - используем её
+                        account_final_supplies[account] = last_final_supply["supply_id"]
+                        logger.info(f"Используем активную финальную поставку {last_final_supply['supply_id']} для {account}")
+                    else:
+                        # Поставка неактивна - обновляем статус и создаем новую
+                        new_supply_id = await self._create_new_final_supply(account, current_name)
+                        if new_supply_id:
+                            account_final_supplies[account] = new_supply_id
+                else:
+                    # Нет существующих финальных поставок - создаем новую
+                    logger.info(f"Создаем финальную поставку для {account}")
+                    new_supply_id = await self._create_new_final_supply(account, current_name)
+                    if new_supply_id:
+                        account_final_supplies[account] = new_supply_id
         
         # 4. Формируем результат для всех комбинаций
         new_supplies = {}
