@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     RABBITMQ_PORT: int = int(os.getenv("RABBITMQ_PORT", 5672))
     RABBITMQ_USER: str = os.getenv("RABBITMQ_USER", "guest")
     RABBITMQ_PASSWORD: str = os.getenv("RABBITMQ_PASSWORD", "")
-    RABBIT_VHOST: str = os.getenv("RABBIT_VHOST", "/")
+    RABBITMQ_VHOST: str = os.getenv("RABBIT_VHOST", "/")
 
 @lru_cache()
 def get_settings() -> Settings:

@@ -11,11 +11,11 @@ class ExchangeName(str, Enum):
 
 
 class QueueName(str, Enum):
-    DELIVERED_ORDERS = "ORDERS.DELIVERED.FBS.FIRST"
+    DELIVERED_ORDERS = "orders.delivered.fbs.first.non-aggregated"
 
 
 class RoutingKey(str, Enum):
-    DELIVERED_ORDERS = "ORDERS.DELIVERED.FBS.FIRST"
+    DELIVERED_ORDERS = "orders.delivered.fbs.first.non-aggregated"
 
 
 @dataclass
@@ -45,9 +45,11 @@ QUEUE_CONFIGS: dict[QueueName, QueueConfig] = {
 class BrokerManager:
     __instance = None
 
-    def __init__(self, host: str, port: int, user: str, password: str, vhost: str) -> None:
-        self.__url: str = f"amqp://{user}:{password}@{host}:{port}/{vhost}"
-        self.__broker: RabbitBroker = RabbitBroker(url=self.__url)
+    def __init__(self, host: str, port: int, user: str, password: str, vhost: str):
+        if getattr(self, "_initialized", False):
+            return
+        self._url: str = f"amqp://{user}:{password}@{host}:{port}/{vhost}"
+        self._broker = RabbitBroker(url=self._url)
         self.exchanges: dict[ExchangeName, RabbitExchange] = {
             exchange: RabbitExchange(name=config.name, type=config.type, durable=config.durable)
             for exchange, config in EXCHANGE_CONFIGS.items()
@@ -56,10 +58,16 @@ class BrokerManager:
             queue: RabbitQueue(name=config.name, routing_key=config.routing_key, durable=config.durable)
             for queue, config in QUEUE_CONFIGS.items()
         }
+        self._initialized = True
 
-    @property
-    def broker(self) -> RabbitBroker:
-        return self.__broker
+    @classmethod
+    def get_manager(cls, host: str, port: int, user: str, password: str, vhost: str):
+        if cls.__instance is None:
+            cls.__instance = cls(host, port, user, password, vhost)
+        return cls(host, port, user, password, vhost)
+
+    def get_broker(self):
+        return self._broker
 
     def _get_exchange(self, name: ExchangeName) -> RabbitExchange:
         return self.exchanges[name]
@@ -70,28 +78,17 @@ class BrokerManager:
     def subscriber(self, queue: QueueName, exchange: ExchangeName, *args: Any, **kwargs: Any) -> Callable:
         rabbit_queue = self._get_queue(queue)
         rabbit_exchange = self._get_exchange(exchange)
-        return self.__broker.subscriber(queue=rabbit_queue, exchange=rabbit_exchange, *args, **kwargs)
+        return self._broker.subscriber(queue=rabbit_queue, exchange=rabbit_exchange, *args, **kwargs)
 
     def publish(self, message: Any, routing_key: str, exchange: ExchangeName, *args: Any, **kwargs: Any) -> Coroutine:
         rabbit_exchange = self._get_exchange(exchange)
-        return  self.__broker.publish(message=message, routing_key=routing_key, exchange=rabbit_exchange, *args, **kwargs)
+        return self._broker.publish(message=message, routing_key=routing_key, exchange=rabbit_exchange, *args, **kwargs)
 
-    def __new__(cls, *args, **kwargs):
-        if not cls.__instance:
-            cls.__instance = super(BrokerManager, cls).__new__(cls, *args, **kwargs)
-            cls.__instance.__init__(
-                host=get_settings().RABBITMQ_HOST,
-                port=get_settings().RABBITMQ_PORT,
-                user=get_settings().RABBITMQ_USER,
-                password=get_settings().RABBITMQ_PASSWORD,
-                vhost=get_settings().RABBITMQ_VHOST
-            )
-        return cls.__instance
 
-    @staticmethod
-    def get_broker_connection():
-        if not BrokerManager.__instance:
-            BrokerManager.__new__(BrokerManager)
-        return BrokerManager.__instance
-
-broker = BrokerManager.get_broker_connection()
+broker_manager = BrokerManager.get_manager(
+    host=get_settings().RABBITMQ_HOST,
+    port=get_settings().RABBITMQ_PORT,
+    user=get_settings().RABBITMQ_USER,
+    password=get_settings().RABBITMQ_PASSWORD,
+    vhost=get_settings().RABBITMQ_VHOST
+)

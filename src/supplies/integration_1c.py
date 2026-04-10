@@ -14,6 +14,8 @@ from src.settings import settings
 from src.models.onec_delivery_log import OneCDeliveryLog
 from src.orders.order_status_service import OrderStatusService
 from src.models.assembly_task_status import AssemblyTaskStatus
+from src.broker import broker_manager, RoutingKey, ExchangeName
+
 
 class OneCIntegration:
     """
@@ -308,6 +310,14 @@ class OneCIntegration:
                 )
             
             formatted_data = self.build_final_structure(result_structure)
+
+            logger.info("Отправка данных в шину для обработки")
+            await broker_manager.publish(
+                message=formatted_data,
+                routing_key=RoutingKey.DELIVERED_ORDERS.value,
+                exchange=ExchangeName.ORDERS.value,
+            )
+
             response = await self.send_to_1c(formatted_data)
 
             # Логируем в БД лог отправки
