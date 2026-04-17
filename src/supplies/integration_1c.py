@@ -312,11 +312,14 @@ class OneCIntegration:
             formatted_data = self.build_final_structure(result_structure)
 
             logger.info("Отправка данных в шину для обработки")
-            await broker_manager.publish(
-                message=formatted_data,
-                routing_key=RoutingKey.DELIVERED_ORDERS.value,
-                exchange=ExchangeName.ORDERS.value,
-            )
+            try:
+                await broker_manager.publish(
+                    message=formatted_data,
+                    routing_key=RoutingKey.DELIVERED_ORDERS.value,
+                    exchange=ExchangeName.ORDERS.value,
+                )
+            except Exception as error:
+                print(f"Ошибка при отправке данных в шину для обработки: {str(error)}")
 
             response = await self.send_to_1c(formatted_data)
 
