@@ -28,4 +28,5 @@ dependencies = [
     "celery>=5.3.4",
     "flower>=2.0.1",
     "PyMuPDF>=1.23.0",
+    "faststream[cli,rabbit]>=0.6.7",
 ]

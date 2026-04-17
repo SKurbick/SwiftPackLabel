@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # Настройки отправки данных об отгрузке висячих поставок
     SHIPPED_GOODS_API_URL: str = os.getenv("SHIPPED_GOODS_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/add_shipped_goods")
 
+    #RABBIT
+    RABBITMQ_HOST: str = os.getenv("RABBITMQ_HOST", "localhost")
+    RABBITMQ_PORT: int = int(os.getenv("RABBITMQ_PORT", 5672))
+    RABBITMQ_USER: str = os.getenv("RABBITMQ_USER", "guest")
+    RABBITMQ_PASSWORD: str = os.getenv("RABBITMQ_PASSWORD", "")
+    RABBITMQ_VHOST: str = os.getenv("RABBIT_VHOST", "/")
+
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
