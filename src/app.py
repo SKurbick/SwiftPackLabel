@@ -64,9 +64,3 @@ async def shutdown() -> None:
 @app.get('/', status_code=status.HTTP_200_OK)
 async def check_alive() -> dict:
     return {'status': 'alive'}
-
-@app.post('/')
-async def test_sending_message(
-        data: dict = Body(...),
-):
-    await broker_manager.publish(message=data, routing_key=RoutingKey.DELIVERED_ORDERS.value, exchange=ExchangeName.ORDERS.value)
