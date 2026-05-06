@@ -1190,12 +1190,13 @@ class SuppliesService:
                             'account': account
                         })
 
-            marked_count, skipped_empty = await self._auto_mark_done_supplies_as_fictitious(active_supplies_only_false)
-            if marked_count > 0 or skipped_empty > 0:
-                logger.info(
-                    f"Автопометка: {marked_count} фиктивных, "
-                    f"{skipped_empty} пропущено (пустые)"
-                )
+#===============АВТОМАТИЧЕСКИЙ ПЕРЕВОД ПОСТАВОК В ФИКТИВНУЮ ДОСТАВКУ! БЕЗ ПЕРЕПИСЫВАНИЯ ВЛОЖЕННОЙ ЛОГИКИ МЕТОДА НЕ ВКЛЮЧАТЬ!===========
+            # marked_count, skipped_empty = await self._auto_mark_done_supplies_as_fictitious(active_supplies_only_false)
+            # if marked_count > 0 or skipped_empty > 0:
+            #     logger.info(
+            #         f"Автопометка: {marked_count} фиктивных, "
+            #         f"{skipped_empty} пропущено (пустые)"
+            #     )
 
         # Финальная фильтрация
         filtered_result = await self.filter_supplies_by_hanging(result, hanging_only)
