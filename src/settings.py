@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     
     # Настройки глобального кэша
     CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 1800))  # 30 минут по умолчанию
+    CACHE_WARMUP_ON_STARTUP: bool = os.getenv("CACHE_WARMUP_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
+    CACHE_BACKGROUND_REFRESH_ENABLED: bool = os.getenv("CACHE_BACKGROUND_REFRESH_ENABLED", "true").lower() in ("1", "true", "yes", "on")
     
     # Настройки Celery
     CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1")
@@ -75,6 +77,18 @@ class Settings(BaseSettings):
     RABBITMQ_USER: str = os.getenv("RABBITMQ_USER", "guest")
     RABBITMQ_PASSWORD: str = os.getenv("RABBITMQ_PASSWORD", "")
     RABBITMQ_VHOST: str = os.getenv("RABBIT_VHOST", "/")
+    RABBITMQ_ENABLED: bool = os.getenv("RABBITMQ_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+
+    DIAGNOSTICS_ENABLED: bool = os.getenv("DIAGNOSTICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    DIAGNOSTICS_LOG_INTERVAL_SEC: int = int(os.getenv("DIAGNOSTICS_LOG_INTERVAL_SEC", 60))
+    DIAGNOSTICS_DB_ACQUIRE_SLOW_MS: int = int(os.getenv("DIAGNOSTICS_DB_ACQUIRE_SLOW_MS", 1000))
+    DIAGNOSTICS_DB_HOLD_LONG_MS: int = int(os.getenv("DIAGNOSTICS_DB_HOLD_LONG_MS", 30000))
+    DIAGNOSTICS_DB_QUERY_SLOW_MS: int = int(os.getenv("DIAGNOSTICS_DB_QUERY_SLOW_MS", 1000))
+    DIAGNOSTICS_REQUEST_SLOW_MS: int = int(os.getenv("DIAGNOSTICS_REQUEST_SLOW_MS", 5000))
+    DIAGNOSTICS_EVENT_LOOP_LAG_WARN_MS: int = int(os.getenv("DIAGNOSTICS_EVENT_LOOP_LAG_WARN_MS", 500))
+    DIAGNOSTICS_EVENT_LOOP_LAG_CRITICAL_MS: int = int(os.getenv("DIAGNOSTICS_EVENT_LOOP_LAG_CRITICAL_MS", 3000))
+    DIAGNOSTICS_NO_EXTERNAL_CHECKS: bool = os.getenv("DIAGNOSTICS_NO_EXTERNAL_CHECKS", "false").lower() in ("1", "true", "yes", "on")
+    INTERNAL_DIAGNOSTICS_TOKEN: str = os.getenv("INTERNAL_DIAGNOSTICS_TOKEN", "")
 
 @lru_cache()
 def get_settings() -> Settings:

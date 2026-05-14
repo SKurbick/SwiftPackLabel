@@ -1,8 +1,10 @@
 import bcrypt
+import time
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 from typing import Dict, Optional, List, Any
 from src.db import db
+from src.diagnostics import diagnostics, get_request_id, mask_username
 from src.settings import settings
 
 SECRET_KEY = settings.SECRET_KEY
@@ -37,12 +39,30 @@ class AuthService:
 
     async def authenticate_user(self, username: str, password: str) -> Optional[Dict]:
         """Authenticate user by username and password"""
+        request_id = get_request_id()
+        diagnostics.record_event("AUTH_DB_FETCH_START", request_id=request_id, username_masked=mask_username(username))
+        db_started = time.monotonic()
         user = await db.fetchrow("SELECT * FROM users WHERE username = $1", username)
+        diagnostics.record_event(
+            "AUTH_DB_FETCH_END",
+            request_id=request_id,
+            duration_ms=round((time.monotonic() - db_started) * 1000, 3),
+            found=bool(user),
+        )
 
         if not user:
             return None
 
-        if not self._verify_password(password, user["hashed_password"]):
+        diagnostics.record_event("AUTH_BCRYPT_START", request_id=request_id)
+        bcrypt_started = time.monotonic()
+        password_ok = self._verify_password(password, user["hashed_password"])
+        diagnostics.record_event(
+            "AUTH_BCRYPT_END",
+            request_id=request_id,
+            duration_ms=round((time.monotonic() - bcrypt_started) * 1000, 3),
+            result=password_ok,
+        )
+        if not password_ok:
             return None
 
         return {

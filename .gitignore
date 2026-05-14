@@ -5,3 +5,5 @@ src/logging/*.log
 src/.env
 src/tokens.json
 tokens.json
+DOC_ANALYTICS
+docker-compose.local.yml

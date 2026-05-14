@@ -5,6 +5,7 @@ import aiohttp
 import requests
 from requests import Response, Session
 from typing import Any, Dict, Optional
+from src.diagnostics import diagnostics, get_refresh_id, sanitize_url
 from src.logger import app_logger as logger
 
 
@@ -145,16 +146,49 @@ class AsyncHttpClient:
             Текст ответа, если запрос успешен, иначе None.
         """
         for attempt in range(self.retries):
+            attempt_started = time.monotonic()
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.request(method, url, timeout=self.timeout, **kwargs) as response:
                         content_type = response.headers.get("Content-Type", "")
                         response.raise_for_status()
+                        diagnostics.increment_wb_counter("requests_total")
+                        diagnostics.increment_wb_counter("success")
                         if content_type.startswith("image/"):
                             return await response.read()
                         return await response.text()
             except (aiohttp.ClientError, aiohttp.ClientConnectionError) as e:
-                logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {url} - {e}")
+                duration_ms = round((time.monotonic() - attempt_started) * 1000, 3)
+                status_code = getattr(e, "status", None)
+                diagnostics.increment_wb_counter("requests_total")
+                diagnostics.increment_wb_counter("errors")
+                diagnostics.increment_wb_counter("retries")
+                if status_code == 404:
+                    diagnostics.increment_wb_counter("not_found_404")
+                    diagnostics.record_event(
+                        "WB_REQUEST_404",
+                        level="warning",
+                        refresh_id=get_refresh_id(),
+                        method=method,
+                        url=sanitize_url(url),
+                        status_code=status_code,
+                        attempt=attempt + 1,
+                        retries=self.retries,
+                        duration_ms=duration_ms,
+                    )
+                diagnostics.record_event(
+                    "WB_REQUEST_RETRY",
+                    level="warning",
+                    refresh_id=get_refresh_id(),
+                    method=method,
+                    url=sanitize_url(url),
+                    status_code=status_code,
+                    attempt=attempt + 1,
+                    retries=self.retries,
+                    delay=self.delay,
+                    duration_ms=duration_ms,
+                )
+                logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {sanitize_url(url)} - {e}")
                 await asyncio.sleep(self.delay)
         return None
 

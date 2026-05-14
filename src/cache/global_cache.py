@@ -9,6 +9,13 @@ import redis.asyncio as redis
 from src.orders.schema import OrderDetail
 from src.settings import settings
 from src.logger import app_logger as logger
+from src.diagnostics import (
+    current_refresh_id,
+    current_refresh_source,
+    diagnostics,
+    new_refresh_id,
+    safe_error,
+)
 from src.supplies.schema import SupplyIdResponseSchema
 
 from src.supplies.supplies import SuppliesService
@@ -262,12 +269,24 @@ class GlobalCache:
         Прогрев кэша при запуске приложения.
         Автоматически выбирает оптимизированный или legacy метод.
         """
-        if self.use_optimized_cache:
-            logger.info("Используется ОПТИМИЗИРОВАННЫЙ метод прогрева кэша")
-            return await self.warm_up_cache_optimized()
-        else:
-            logger.info("Используется LEGACY метод прогрева кэша")
-            return await self.warm_up_cache_legacy()
+        refresh_id = new_refresh_id()
+        source = current_refresh_source.get() or "unknown"
+        refresh_token = current_refresh_id.set(refresh_id)
+        diagnostics.start_wb_refresh(refresh_id, source)
+        try:
+            if self.use_optimized_cache:
+                logger.info("Используется ОПТИМИЗИРОВАННЫЙ метод прогрева кэша")
+                result = await self.warm_up_cache_optimized()
+            else:
+                logger.info("Используется LEGACY метод прогрева кэша")
+                result = await self.warm_up_cache_legacy()
+            diagnostics.finish_wb_refresh(refresh_id, "success")
+            return result
+        except Exception as e:
+            diagnostics.finish_wb_refresh(refresh_id, "error", safe_error(e))
+            raise
+        finally:
+            current_refresh_id.reset(refresh_token)
 
     async def warm_up_cache_legacy(self) -> None:
         """
@@ -743,7 +762,11 @@ class GlobalCache:
                     logger.info(f"Очищено {cleaned_keys} истекших ключей перед обновлением")
                 
                 # Обновляем кэш
-                await self.warm_up_cache()
+                source_token = current_refresh_source.set("background")
+                try:
+                    await self.warm_up_cache()
+                finally:
+                    current_refresh_source.reset(source_token)
                 
                 # Логируем состояние после обновления
                 cache_info_after = await self.get_cache_info()
@@ -810,7 +833,11 @@ class GlobalCache:
         """Принудительное обновление кэша."""
         logger.info("Принудительное обновление кэша...")
         try:
-            await self.warm_up_cache()
+            source_token = current_refresh_source.set("manual")
+            try:
+                await self.warm_up_cache()
+            finally:
+                current_refresh_source.reset(source_token)
             logger.info("Принудительное обновление кэша завершено успешно")
             return True
         except Exception as e:
