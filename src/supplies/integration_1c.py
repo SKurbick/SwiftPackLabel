@@ -321,7 +321,21 @@ class OneCIntegration:
             except Exception as error:
                 print(f"Ошибка при отправке данных в шину для обработки: {str(error)}")
 
-            response = await self.send_to_1c(formatted_data)
+            # response = await self.send_to_1c(formatted_data)
+
+            response = {
+                "code": 200
+            }
+
+            logger.info(f"1C заглушен. Отправка данных в очередь orders.onec.mocked")
+            try:
+                await broker_manager.publish(
+                    message=formatted_data,
+                    routing_key=RoutingKey.MOCKED_ONEC_ORDERS.value,
+                    exchange=ExchangeName.ORDERS.value,
+                )
+            except Exception as error:
+                print(f"Ошибка при отправке данных в очередь orders.onec.mocked: {str(error)}")
 
             # Логируем в БД лог отправки
             if self.db:
