@@ -21,6 +21,7 @@ from src.wildberries_api.supplies import Supplies
 from src.service.qr_direct_processor import QRDirectProcessor
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
+from src.orders.constants_to_block import BLOCKED_WILDS
 
 
 class OrdersService:
@@ -271,6 +272,14 @@ class OrdersService:
         article_processed = process_local_vendor_code(article)
         return [order for order in orders if process_local_vendor_code(order["article"]) == article_processed]
 
+    def filter_blocked_wilds(self, orders: list) -> list:
+        """Исключает заказы по по вилдам из constants_to_block"""
+        filtered = [order for order in orders
+                    if process_local_vendor_code(order["article"]) not in BLOCKED_WILDS]
+        if excluded_count := len(orders) - len(filtered):
+            logger.info(f"Исключено {excluded_count} заказов по заблокированным вилдам")
+        return filtered
+
     def sort_orders(self, orders: list) -> list:
         """
         Сортирует заказы по времени создания (по убыванию)
@@ -287,6 +296,7 @@ class OrdersService:
             formatted_orders.extend(orders_list)
         filtered = self.filter_orders_by_time(formatted_orders, time_delta)
         filtered = self.filter_orders_by_article(filtered, article)
+        filtered = self.filter_blocked_wilds(filtered)
         return self.sort_orders(filtered)
 
     async def group_orders_by_wild(self, order_list):
@@ -347,6 +357,10 @@ class OrdersService:
         filtered_orders_by_sku = {}
         for wild_key, info in orders_data.items():
             if info.fact_orders == 0:
+                continue
+
+            if process_local_vendor_code(wild_key) in BLOCKED_WILDS:
+                logger.warning(f"этот вилд {wild_key} заблокирован для взятия в работу")
                 continue
 
             sorted_orders = sorted(info.orders, key=lambda x: x.created_at)
