@@ -11,6 +11,8 @@ from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, GroupedOrderInfoWithFact, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
 from src.cache import global_cached
 from src.models.supply_operations import SupplyOperationsDB
+from src.orders.constants_to_block import BLOCKED_WILDS
+from src.utils import process_local_vendor_code
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body, Path
 from starlette.responses import StreamingResponse
@@ -109,6 +111,19 @@ async def add_fact_orders_and_supply_name(
     
     logger.info(f"Обработка операции {base_operation_id} от {user.get('username', 'unknown')}")
     logger.info(f"Поставки будут помечены как висячие: {payload.is_hanging}")
+
+    blocked_in_payload = sorted(
+        wild_key for wild_key in payload.orders
+        if process_local_vendor_code(wild_key) in BLOCKED_WILDS
+    )
+    if blocked_in_payload:
+        logger.warning(
+            f"попытка взять в работу заблокированные вилды {blocked_in_payload} "
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"эти вилды недоступны {', '.join(blocked_in_payload)}",
+        )
 
     def _split_payload_by_b2b(
             source_payload: OrdersWithSupplyNameIn,
