@@ -13,6 +13,7 @@ from io import BytesIO
 from src.service.service_pdf import collect_images_sticker_to_pdf
 from src.settings import settings
 from src.logger import app_logger as logger
+from src.orders.constants_to_block import BLOCKED_WILDS
 from src.supplies.integration_1c import OneCIntegration
 from src.utils import get_wb_tokens, process_local_vendor_code
 from src.wildberries_api.supplies import Supplies
@@ -664,6 +665,34 @@ class SuppliesService:
                                 createdAt=data["createdAt"])
                     for data in orders["orders"]]}
 
+    @staticmethod
+    def _exclude_blocked_wilds_supplies(supplies_data: List) -> List:
+        """Исключает поставки, заказы которых относятся к заблокированным вилдам"""
+
+        def _order_wild(order) -> str:
+            if isinstance(order, dict):
+                raw = order.get('local_vendor_code') or order.get('article') or ''
+            else:
+                raw = getattr(order, 'local_vendor_code', '') or getattr(order, 'article', '') or ''
+            return process_local_vendor_code(raw)
+
+        filtered = []
+        excluded = []
+        for supply in supplies_data:
+            orders = supply.get('orders', []) if isinstance(supply, dict) else getattr(supply, 'orders', [])
+            if orders and all(_order_wild(order) in BLOCKED_WILDS for order in orders):
+                supply_id = supply.get('supply_id') if isinstance(supply, dict) else getattr(supply, 'supply_id', '?')
+                excluded.append(supply_id)
+                continue
+            filtered.append(supply)
+
+        if excluded:
+            logger.info(
+                f"Скрыто {len(excluded)} поставок, полностью состоящих из заблокированных вилдов "
+                f"(BLOCKED_WILDS): {excluded}"
+            )
+        return filtered
+
     async def filter_supplies_by_hanging(self, supplies_data: List, hanging_only: bool = False) -> List:
         """
         Фильтрует список поставок по признаку "висячая".
@@ -678,6 +707,7 @@ class SuppliesService:
         Returns:
             List: Отфильтрованный список поставок
         """
+        supplies_data = self._exclude_blocked_wilds_supplies(supplies_data)
         hanging_supplies_list = await HangingSupplies(self.db).get_hanging_supplies()
         hanging_supplies_map = {(hs['supply_id'], hs['account']): hs for hs in hanging_supplies_list}
 

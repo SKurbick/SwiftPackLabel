@@ -7,3 +7,5 @@ src/tokens.json
 tokens.json
 DOC_ANALYTICS
 docker-compose.local.yml
+.env
+text.txt
