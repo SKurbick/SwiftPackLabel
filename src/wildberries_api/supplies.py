@@ -21,7 +21,12 @@ class Supplies(Account):
             params = {"limit": 1000, "next": next_value}
             response = await self.async_client.get(self.url, params=params, headers=self.headers)
             data = parse_json(response)
-            supplies.extend(data.get("supplies", []))
+            datas_for_extend = []
+            for sup in data.get("supplies"):
+                sup_name: str = sup.get("name")
+                if not sup_name.startswith("supply for ["):
+                    datas_for_extend.append(sup)
+            supplies.extend(datas_for_extend)
             next_value = data.get("next")
             logger.info(f"Получены {len(supplies)} поставок and next {next_value}, account {self.account}")
             if not next_value:
