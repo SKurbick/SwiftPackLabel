@@ -24,7 +24,7 @@ class Supplies(Account):
             datas_for_extend = []
             for sup in data.get("supplies"):
                 sup_name: str = sup.get("name")
-                if not sup_name.startswith("supply for [") or not sup_name.startswith("ФИКТИВ_"):
+                if not sup_name.startswith("supply for ["):
                     datas_for_extend.append(sup)
             supplies.extend(datas_for_extend)
             next_value = data.get("next")
