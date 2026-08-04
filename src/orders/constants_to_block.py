@@ -1,3 +1,10 @@
+
+FBS2_SUPPLY_NAME_PREFIXES = (
+    "supply for [",
+    "КИЗ_ВЕКТОР",
+    "КИЗ_СТАРТ"
+)
+
 BLOCKED_WILDS = {
     "wild1981",
     "wild2093",
