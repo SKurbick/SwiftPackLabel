@@ -2,6 +2,7 @@ from src.response import parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
 from src.wildberries_api.orders import Orders
+from src.orders.constants_to_block import FBS2_SUPPLY_NAME_PREFIXES
 
 
 class Supplies(Account):
@@ -24,7 +25,7 @@ class Supplies(Account):
             datas_for_extend = []
             for sup in data.get("supplies"):
                 sup_name: str = sup.get("name")
-                if not sup_name.startswith("supply for ["):
+                if not sup_name.startswith(FBS2_SUPPLY_NAME_PREFIXES):
                     datas_for_extend.append(sup)
             supplies.extend(datas_for_extend)
             next_value = data.get("next")
