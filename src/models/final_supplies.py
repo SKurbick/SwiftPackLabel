@@ -19,7 +19,7 @@ class FinalSupplies:
     def __init__(self, db):
         self.db = db
 
-    async def get_latest_final_supply(self, account: str) -> Optional[Dict[str, Any]]:
+    async def get_latest_final_supply(self, account: str, warehouse_id: int) -> Optional[Dict[str, Any]]:
         """
         Получает последнюю финальную поставку для аккаунта.
         
@@ -31,27 +31,28 @@ class FinalSupplies:
         """
         try:
             query = """
-            SELECT supply_id, account, supply_name, created_at
+            SELECT supply_id, account, supply_name, warehouse_id, created_at
             FROM public.final_supplies 
-            WHERE account = $1
+            WHERE account = $1 AND warehouse_id = $2
             ORDER BY created_at DESC
             LIMIT 1
             """
-            result = await self.db.fetchrow(query, account)
+            result = await self.db.fetchrow(query, account, warehouse_id)
             
             if result:
                 supply_data = dict(result)
-                logger.info(f"Найдена финальная поставка {supply_data['supply_id']} для аккаунта {account}")
+                logger.info(f"Найдена финальная поставка {supply_data['supply_id']} для аккаунта {account}, склад {warehouse_id}")
                 return supply_data
             else:
-                logger.info(f"Нет финальных поставок для аккаунта {account}")
+                logger.info(f"Нет финальных поставок для аккаунта {account}, склад {warehouse_id}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Ошибка получения финальной поставки для {account}: {str(e)}")
+            logger.error(f"Ошибка получения финальной поставки для {account}, склад {warehouse_id}: {str(e)}")
             return None
 
-    async def save_final_supply(self, supply_id: str, account: str, supply_name: str) -> bool:
+    async def save_final_supply(self, supply_id: str, account: str, supply_name: str,
+                                warehouse_id: Optional[int] = None) -> bool:
         """
         Сохраняет информацию о финальной поставке.
         
@@ -59,20 +60,22 @@ class FinalSupplies:
             supply_id: ID поставки
             account: Аккаунт WB  
             supply_name: Название поставки
+            warehouse_id: ID склада WB, к которому привязана поставка
             
         Returns:
             bool: True если успешно сохранено
         """
         try:
             query = """
-            INSERT INTO public.final_supplies (supply_id, account, supply_name)
-            VALUES ($1, $2, $3)
+            INSERT INTO public.final_supplies (supply_id, account, supply_name, warehouse_id)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (supply_id, account) 
             DO UPDATE SET 
-                supply_name = $3
+                supply_name = $3,
+                warehouse_id = COALESCE($4, final_supplies.warehouse_id)
             RETURNING id
             """
-            result = await self.db.fetchrow(query, supply_id, account, supply_name)
+            result = await self.db.fetchrow(query, supply_id, account, supply_name, warehouse_id)
             success = result is not None
             
             if success:
