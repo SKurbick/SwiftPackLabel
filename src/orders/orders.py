@@ -19,6 +19,9 @@ from src.response import AsyncHttpClient
 from src.settings import settings
 from src.wildberries_api.supplies import Supplies
 from src.service.qr_direct_processor import QRDirectProcessor
+
+# Максимум заказов в одном запросе статусов к WB (ограничение их API)
+WB_ORDERS_STATUS_BATCH_SIZE = 1000
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
 from src.orders.constants_to_block import BLOCKED_WILDS
@@ -425,6 +428,48 @@ class OrdersService:
         return self._process_supply_creation_results(valid_accounts, results)
 
     @staticmethod
+    async def _validate_orders_for_supplies(orders_by_supply: Dict[tuple, List[int]],
+                                            tokens: Dict[str, str]) -> Set[int]:
+        """
+        Проверяет статусы батчем пачками и возвращает те, что можно добавить в поставку."""
+        orders_by_account: Dict[str, List[int]] = defaultdict(list)
+        for (account, _), order_ids in orders_by_supply.items():
+            orders_by_account[account].extend(order_ids)
+
+        allowed: Set[int] = set()
+
+        for account, order_ids in orders_by_account.items():
+            orders_api = Orders(account, tokens.get(account))
+            try:
+                statuses: Dict[int, Dict[str, Any]] = {}
+                for start in range(0, len(order_ids), WB_ORDERS_STATUS_BATCH_SIZE):
+                    batch = order_ids[start:start + WB_ORDERS_STATUS_BATCH_SIZE]
+                    statuses.update(await orders_api.can_add_to_supply_batch(batch))
+
+                blocked = {
+                    order_id: info.get("supplier_status", "unknown")
+                    for order_id, info in statuses.items()
+                    if not info.get("can_add")
+                }
+                allowed.update(order_id for order_id, info in statuses.items() if info.get("can_add"))
+
+                logger.info(
+                    f"Кабинет {account}: к добавлению пригодны {len(order_ids) - len(blocked)} "
+                    f"из {len(order_ids)} заказов "
+                    f"(запросов на проверку: {(len(order_ids) - 1) // WB_ORDERS_STATUS_BATCH_SIZE + 1})"
+                )
+                if blocked:
+                    logger.warning(f"Кабинет {account}: не будут добавлены {blocked}")
+
+            except Exception as e:
+                logger.error(
+                    f"Кабинет {account}: не удалось проверить статусы {len(order_ids)} заказов ({e}). "
+                    f"Заказы этого кабинета в поставку не добавляются"
+                )
+
+        return allowed
+
+    @staticmethod
     async def _add_orders_to_supplies(filtered_orders: Dict[str, List[OrderDetail]],
                                       supply_by_account: Dict[str, str],
                                       orders_added_by_article: Dict[str, List[int]],
@@ -451,14 +496,18 @@ class OrdersService:
                 orders_by_supply[(account, supply_id)].append(order.id)
                 order_article_map[order.id] = article
 
+        tokens = get_wb_tokens()
+        allowed_orders = await OrdersService._validate_orders_for_supplies(orders_by_supply, tokens)
+
         add_order_tasks = []
         task_info = []
-        tokens = get_wb_tokens()
 
         for (account, supply_id), order_ids in orders_by_supply.items():
             supplies_service = Supplies(account, tokens.get(account))
             for order_id in order_ids:
-                task = supplies_service.add_order_to_supply(supply_id, order_id)
+                if order_id not in allowed_orders:
+                    continue
+                task = supplies_service.add_order_to_supply(supply_id, order_id, check_status=False)
                 add_order_tasks.append(task)
                 task_info.append((account, supply_id, order_id))
 

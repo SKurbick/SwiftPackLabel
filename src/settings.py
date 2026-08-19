@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     # Пауза после 429, когда сервер не прислал Retry-After: лимиты WB живут в
     # минутном окне, повтор через секунду упрётся в тот же 429 и сожжёт попытку
     HTTP_RATE_LIMIT_BACKOFF_BASE_SEC: float = float(os.getenv("HTTP_RATE_LIMIT_BACKOFF_BASE_SEC", 10.0))
+    HTTP_RATE_LIMIT_MAX_ATTEMPTS: int = int(os.getenv("HTTP_RATE_LIMIT_MAX_ATTEMPTS", 6))
+    HTTP_THROTTLE_MAX_WAIT_SEC: float = float(os.getenv("HTTP_THROTTLE_MAX_WAIT_SEC", 120.0))
     HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST: int = int(os.getenv("HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST", 8))
     HTTP_CONNECTION_POOL_SIZE: int = int(os.getenv("HTTP_CONNECTION_POOL_SIZE", 100))
 

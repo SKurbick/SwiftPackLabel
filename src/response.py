@@ -128,31 +128,48 @@ class _LoopLocal(Generic[T]):
 class HostThrottle:
     """Ограничитель нагрузки на одного получателя запросов."""
 
-    __slots__ = ("key", "_semaphore", "_resume_at")
+    __slots__ = ("key", "_semaphore", "_resume_at", "_max_wait")
 
-    def __init__(self, key: str, limit: int) -> None:
+    def __init__(self, key: str, limit: int, max_wait: Optional[float] = None) -> None:
         self.key = key
         self._semaphore = asyncio.Semaphore(max(1, limit))
         self._resume_at: float = 0.0
+        self._max_wait = max_wait or settings.HTTP_THROTTLE_MAX_WAIT_SEC
 
     def pause(self, seconds: float) -> None:
         """Останавливает все запросы этого получателя на `seconds` (паузы не суммируются)."""
         loop = asyncio.get_running_loop()
         self._resume_at = max(self._resume_at, loop.time() + seconds)
 
-    async def _wait_until_resumed(self) -> None:
-        loop = asyncio.get_running_loop()
-        while (remaining := self._resume_at - loop.time()) > 0:
-            await asyncio.sleep(remaining)
-
     async def __aenter__(self) -> "HostThrottle":
-        await self._semaphore.acquire()
-        try:
-            await self._wait_until_resumed()
-        except BaseException:
-            self._semaphore.release()
-            raise
-        return self
+        """Занимает слот, дождавшись общей паузы и не превысив потолок ожидания."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._max_wait
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise ExternalApiError(
+                    f"{self.key}: очередь к API не разошлась за {self._max_wait:.0f}с, запрос отменён"
+                )
+
+            cooldown = self._resume_at - loop.time()
+            if cooldown > 0:
+                await asyncio.sleep(min(cooldown + random.uniform(0, 1.5), remaining))
+                continue
+
+            try:
+                await asyncio.wait_for(self._semaphore.acquire(), remaining)
+            except asyncio.TimeoutError:
+                raise ExternalApiError(
+                    f"{self.key}: не дождались свободного слота за {self._max_wait:.0f}с, запрос отменён"
+                )
+
+            if self._resume_at - loop.time() > 0:
+                self._semaphore.release()
+                continue
+
+            return self
 
     async def __aexit__(self, *exc_info) -> None:
         self._semaphore.release()
@@ -205,14 +222,15 @@ class _Attempt:
     body: str | bytes | None = None
     finished: bool = False  # ответ получен окончательно (успех или неповторяемая ошибка)
     retry_after: float = 0.0
+    rate_limited: bool = False  # отказ по лимиту (429), а не сбой — бюджет попыток отдельный
 
     @classmethod
     def done(cls, body: str | bytes | None) -> "_Attempt":
         return cls(body=body, finished=True)
 
     @classmethod
-    def retry(cls, retry_after: float) -> "_Attempt":
-        return cls(finished=False, retry_after=retry_after)
+    def retry(cls, retry_after: float, rate_limited: bool = False) -> "_Attempt":
+        return cls(finished=False, retry_after=retry_after, rate_limited=rate_limited)
 
 
 class AsyncHttpClient:
@@ -226,6 +244,7 @@ class AsyncHttpClient:
             backoff_max: Optional[float] = None,
             max_concurrent_requests: Optional[int] = None,
             throttle_scope: Optional[str] = None,
+            rate_limit_max_attempts: Optional[int] = None,
     ):
         """
         Args:
@@ -245,6 +264,7 @@ class AsyncHttpClient:
                 max_concurrent_requests or settings.HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST
         )
         self.throttle_scope = throttle_scope
+        self.rate_limit_max_attempts = max(1, rate_limit_max_attempts or settings.HTTP_RATE_LIMIT_MAX_ATTEMPTS)
 
     def _backoff_delay(self, attempt: int) -> float:
         """Экспоненциальная задержка с джиттером ±25%, чтобы попытки не синхронизировались."""
@@ -269,7 +289,8 @@ class AsyncHttpClient:
         return await response.text()
 
     async def _handle_response(self, response: aiohttp.ClientResponse, throttle: HostThrottle,
-                               method: str, url: str, attempt: int, duration_ms: float) -> _Attempt:
+                               method: str, url: str, attempt: int, rate_limit_attempt: int,
+                               duration_ms: float) -> _Attempt:
         diagnostics.increment_wb_counter("requests_total")
         status_code = response.status
 
@@ -297,7 +318,8 @@ class AsyncHttpClient:
             return _Attempt.done(None)
 
         if status_code == 429:
-            delay = self._retry_after_delay(response, attempt)
+            # Пауза растёт по числу упоров в лимит, а не по общему счётчику попыток
+            delay = self._retry_after_delay(response, rate_limit_attempt)
             throttle.pause(delay)
             diagnostics.increment_wb_counter("rate_limited")
             diagnostics.record_event(
@@ -307,16 +329,17 @@ class AsyncHttpClient:
                 method=method,
                 url=sanitize_url(url),
                 status_code=status_code,
-                attempt=attempt,
-                retries=self.max_attempts,
+                attempt=rate_limit_attempt,
+                retries=self.rate_limit_max_attempts,
                 delay=round(delay, 3),
                 duration_ms=duration_ms,
             )
             logger.warning(
                 f"429 [{throttle.key}]: пауза {delay:.1f}с для всех запросов этого кабинета "
-                f"(попытка {attempt}/{self.max_attempts}, {method} {sanitize_url(url)})"
+                f"(упор в лимит {rate_limit_attempt}/{self.rate_limit_max_attempts}, "
+                f"{method} {sanitize_url(url)})"
             )
-            return _Attempt.retry(delay)
+            return _Attempt.retry(delay, rate_limited=True)
 
         if status_code not in RETRYABLE_STATUSES:
             logger.error(
@@ -349,14 +372,16 @@ class AsyncHttpClient:
         )
 
     async def _attempt_request(self, throttle: HostThrottle, method: str, url: str,
-                               attempt: int, **kwargs: Any) -> _Attempt:
+                               attempt: int, rate_limit_attempt: int, **kwargs: Any) -> _Attempt:
         started = time.monotonic()
         try:
             async with throttle:
                 session = _sessions.get()
                 async with session.request(method, url, timeout=self.timeout, **kwargs) as response:
                     duration_ms = round((time.monotonic() - started) * 1000, 3)
-                    return await self._handle_response(response, throttle, method, url, attempt, duration_ms)
+                    return await self._handle_response(
+                        response, throttle, method, url, attempt, rate_limit_attempt, duration_ms
+                    )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             duration_ms = round((time.monotonic() - started) * 1000, 3)
@@ -374,15 +399,34 @@ class AsyncHttpClient:
         """Выполняет запрос с повторами."""
         throttle = _throttle_for(url, self.max_concurrent_requests, self.throttle_scope)
 
-        for attempt in range(1, self.max_attempts + 1):
-            result = await self._attempt_request(throttle, method, url, attempt, **kwargs)
+        attempt = 0
+        errors_left = self.max_attempts
+        rate_limits_left = self.rate_limit_max_attempts
+        rate_limit_hits = 0
+
+        while True:
+            attempt += 1
+            result = await self._attempt_request(
+                throttle, method, url, attempt, rate_limit_hits + 1, **kwargs
+            )
             if result.finished:
                 return result.body
-            if attempt < self.max_attempts:
-                await asyncio.sleep(result.retry_after)
 
-        logger.error(f"{method} {sanitize_url(url)}: исчерпаны все {self.max_attempts} попытки")
-        return None
+            if result.rate_limited:
+                rate_limit_hits += 1
+                rate_limits_left -= 1
+                exhausted, reason = rate_limits_left <= 0, (
+                    f"лимит WB не разошёлся за {self.rate_limit_max_attempts} попыток"
+                )
+            else:
+                errors_left -= 1
+                exhausted, reason = errors_left <= 0, f"исчерпаны все {self.max_attempts} попытки"
+
+            if exhausted:
+                logger.error(f"{method} {sanitize_url(url)}: {reason}")
+                return None
+
+            await asyncio.sleep(result.retry_after)
 
     async def request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None,
                       json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
