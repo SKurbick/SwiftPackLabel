@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from typing import Dict
@@ -230,6 +231,19 @@ async def add_fact_orders_and_supply_name(
                 )
 
             return result
+
+        except asyncio.CancelledError:
+            if not branch_payload.is_hanging:
+                await asyncio.shield(SupplyOperationsDB.save_operation_error(
+                    branch_operation_id,
+                    "Операция прервана: соединение разорвано или запрос отменён. "
+                    "Часть заказов могла быть уже добавлена в поставки — проверьте состав в WB."
+                ))
+            logger.error(
+                f"Операция {branch_operation_id} прервана до завершения "
+                f"(отмена запроса). Состояние в WB требует проверки"
+            )
+            raise
 
         except Exception as e:
             if not branch_payload.is_hanging:

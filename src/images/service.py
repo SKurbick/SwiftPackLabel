@@ -6,6 +6,7 @@ from PIL import Image
 import io
 from datetime import datetime
 
+from src.concurrency import run_blocking
 from src.logger import app_logger as logger
 
 
@@ -68,6 +69,9 @@ class ImageService:
         Returns:
             Optional[str]: Путь к сохраненному файлу или None в случае ошибки
         """
+        return await run_blocking(self._save_image, image_data)
+
+    def _save_image(self, image_data: bytes) -> Optional[str]:
         try:
             # Валидация изображения и определение формата
             file_extension = self._validate_and_get_format(image_data)
@@ -103,6 +107,9 @@ class ImageService:
         Returns:
             Optional[bytes]: Бинарные данные изображения или None если файл не найден
         """
+        return await run_blocking(self._get_image, filename)
+
+    def _get_image(self, filename: str) -> Optional[bytes]:
         try:
             file_path = self.base_path / filename
             
@@ -130,6 +137,9 @@ class ImageService:
         Returns:
             bool: True если файл успешно удален, False иначе
         """
+        return await run_blocking(self._delete_image, filename)
+
+    def _delete_image(self, filename: str) -> bool:
         try:
             file_path = self.base_path / filename
             
@@ -155,6 +165,9 @@ class ImageService:
         Returns:
             Optional[dict]: Информация об изображении или None если файл не найден
         """
+        return await run_blocking(self._get_image_info, filename)
+
+    def _get_image_info(self, filename: str) -> Optional[dict]:
         try:
             file_path = self.base_path / filename
             
@@ -192,6 +205,9 @@ class ImageService:
         Returns:
             list[str]: Список названий файлов изображений
         """
+        return await run_blocking(self._list_images)
+
+    def _list_images(self) -> list[str]:
         try:
             if not self.base_path.exists():
                 logger.warning(f"Директория не найдена: {self.base_path}")

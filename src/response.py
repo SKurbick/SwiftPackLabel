@@ -1,50 +1,63 @@
-import json
-import time
 import asyncio
+import json
+import random
+import time
+import weakref
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Generic, Optional, TypeVar
+from urllib.parse import urlsplit
+
 import aiohttp
 import requests
-from requests import Response, Session
-from typing import Any, Dict, Optional
+from requests import Session
+
 from src.diagnostics import diagnostics, get_refresh_id, sanitize_url
 from src.logger import app_logger as logger
+from src.settings import settings
+
+T = TypeVar("T")
+
+RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+ERROR_BODY_PREVIEW_LEN = 500
+
+
+class ExternalApiError(RuntimeError):
+    """Запрос к внешнему API не удался: все попытки исчерпаны или ответ неповторяем."""
+
+
+def ensure_response(response: str | bytes | None, description: str) -> str | bytes:
+    """Возвращает тело ответа или падает, если запрос не удался."""
+    if response is None:
+        raise ExternalApiError(f"{description}: запрос к внешнему API не удался")
+    return response
 
 
 class HttpClient:
+    """Синхронный HTTP-клиент (для кода вне event loop: скрипты, Celery)."""
 
-    def __init__(self, timeout: int = 120, retries: int = 1, delay: int = 0):
+    def __init__(self, timeout: int = 120, retries: int = 3, delay: int = 1):
         self.timeout = timeout
-        self.retries = retries
+        self.retries = max(1, retries)
         self.delay = delay
         self.session = Session()
 
     def _make_request(self, method: str, url: str, **kwargs) -> str | None:
-
-        for attempt in range(self.retries):
-            print("CLIENT ID:", id(self))
-            print("ATTEMPT:", attempt + 1)
-
+        for attempt in range(1, self.retries + 1):
             try:
-                response = self.session.request(
-                    method,
-                    url,
-                    timeout=self.timeout,
-                    **kwargs
-                )
+                response = self.session.request(method, url, timeout=self.timeout, **kwargs)
 
-                # if 404:
                 if response.status_code == 404:
-                    logger.warning(f"404 for {method} {url}. Stop retry.")
+                    logger.warning(f"404 for {method} {sanitize_url(url)}. Stop retry.")
                     return None
 
                 response.raise_for_status()
                 return response.text
 
             except requests.RequestException as e:
-                logger.warning(
-                    f"Attempt {attempt + 1}: error {method} {url} - {e}"
-                )
-
-                time.sleep(self.delay)
+                logger.warning(f"Попытка {attempt}/{self.retries}: ошибка {method} {sanitize_url(url)} - {e}")
+                if attempt < self.retries:
+                    time.sleep(self.delay)
 
         return None
 
@@ -66,135 +79,314 @@ class HttpClient:
 
     def get(self, url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> \
             Optional[str]:
-        """Выполняет GET-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            params: Параметры запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Содержимое ответа, если запрос успешен, иначе None.
-        """
+        """Выполняет GET-запрос по указанному URL."""
         return self.request("GET", url, params=params, headers=headers)
 
     def post(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
              headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Выполняет POST-запрос по-указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            data: Данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Содержимое ответа, если запрос успешен, иначе None.
-        """
+        """Выполняет POST-запрос по указанному URL."""
         return self.request("POST", url, json=json, data=data, headers=headers)
 
     def put(self, url: str, json: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None):
-        """Выполняет PUT-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Содержимое ответа, если запрос успешен, иначе None.
-        """
+        """Выполняет PUT-запрос по указанному URL."""
         return self.request("PUT", url, json=json, headers=headers)
 
     def delete(self, url: str, headers: Optional[Dict[str, str]] = None):
-        """Выполняет DELETE-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Содержимое ответа, если запрос успешен, иначе None.
-        """
+        """Выполняет DELETE-запрос по указанному URL."""
         return self.request("DELETE", url, headers=headers)
 
     def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
               headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Выполняет PATCH-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            data: Данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Содержимое ответа, если запрос успешен, иначе None.
-        """
+        """Выполняет PATCH-запрос по указанному URL."""
         return self.request("PATCH", url, json=json, data=data, headers=headers)
 
 
+class _LoopLocal(Generic[T]):
+    """Хранилище объектов, привязанных к конкретному event loop."""
+
+    def __init__(self, factory: Callable[[], T]) -> None:
+        self._factory = factory
+        self._items: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, T]" = weakref.WeakKeyDictionary()
+
+    def get(self) -> T:
+        loop = asyncio.get_running_loop()
+        item = self._items.get(loop)
+        if item is None:
+            item = self._factory()
+            self._items[loop] = item
+        return item
+
+    def pop_current(self) -> Optional[T]:
+        """Извлекает объект текущего цикла (нужно для корректного закрытия)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return self._items.pop(loop, None)
+
+
+class HostThrottle:
+    """Ограничитель нагрузки на одного получателя запросов."""
+
+    __slots__ = ("key", "_semaphore", "_resume_at")
+
+    def __init__(self, key: str, limit: int) -> None:
+        self.key = key
+        self._semaphore = asyncio.Semaphore(max(1, limit))
+        self._resume_at: float = 0.0
+
+    def pause(self, seconds: float) -> None:
+        """Останавливает все запросы этого получателя на `seconds` (паузы не суммируются)."""
+        loop = asyncio.get_running_loop()
+        self._resume_at = max(self._resume_at, loop.time() + seconds)
+
+    async def _wait_until_resumed(self) -> None:
+        loop = asyncio.get_running_loop()
+        while (remaining := self._resume_at - loop.time()) > 0:
+            await asyncio.sleep(remaining)
+
+    async def __aenter__(self) -> "HostThrottle":
+        await self._semaphore.acquire()
+        try:
+            await self._wait_until_resumed()
+        except BaseException:
+            self._semaphore.release()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self._semaphore.release()
+
+
+def _new_session() -> aiohttp.ClientSession:
+    """Создаёт сессию с общим пулом соединений.
+
+    Раньше сессия создавалась на каждый запрос, то есть каждый вызов WB API
+    заново поднимал TCP-соединение и делал TLS-handshake.
+    """
+    connector = aiohttp.TCPConnector(
+        limit=settings.HTTP_CONNECTION_POOL_SIZE,
+        # Ограничение по хосту не задаём: параллелизм считает HostThrottle отдельно
+        # по каждому кабинету, а общий потолок держит `limit`.
+        limit_per_host=0,
+        ttl_dns_cache=300,
+    )
+    return aiohttp.ClientSession(connector=connector)
+
+
+_sessions: _LoopLocal[aiohttp.ClientSession] = _LoopLocal(_new_session)
+_throttles: _LoopLocal[Dict[str, HostThrottle]] = _LoopLocal(dict)
+
+
+def _throttle_for(url: str, limit: int, scope: Optional[str] = None) -> HostThrottle:
+    """Возвращает ограничитель для пары «хост + scope», создавая его при необходимости."""
+    host = urlsplit(url).netloc or url
+    key = f"{host}|{scope}" if scope else host
+    registry = _throttles.get()
+    throttle = registry.get(key)
+    if throttle is None:
+        throttle = HostThrottle(key, limit)
+        registry[key] = throttle
+    return throttle
+
+
+async def close_http_sessions() -> None:
+    """Закрывает HTTP-сессию текущего event loop (вызывается при остановке приложения)."""
+    session = _sessions.pop_current()
+    if session is not None and not session.closed:
+        await session.close()
+    _throttles.pop_current()
+
+
+@dataclass(slots=True)
+class _Attempt:
+    """Результат одной попытки запроса."""
+
+    body: str | bytes | None = None
+    finished: bool = False  # ответ получен окончательно (успех или неповторяемая ошибка)
+    retry_after: float = 0.0
+
+    @classmethod
+    def done(cls, body: str | bytes | None) -> "_Attempt":
+        return cls(body=body, finished=True)
+
+    @classmethod
+    def retry(cls, retry_after: float) -> "_Attempt":
+        return cls(finished=False, retry_after=retry_after)
+
+
 class AsyncHttpClient:
+    """Асинхронный HTTP-клиент к внешним API (WB, 1C)."""
 
-    def __init__(self, timeout: int = 120, retries: int = 8, delay: int = 61):
-        """Инициализирует AsyncHttpClient.
-        Args:
-            timeout: Таймаут для каждого запроса в секундах.
-            retries: Количество попыток перед тем, как считать запрос неудачным.
+    def __init__(
+            self,
+            timeout: Optional[float] = None,
+            max_attempts: Optional[int] = None,
+            backoff_base: Optional[float] = None,
+            backoff_max: Optional[float] = None,
+            max_concurrent_requests: Optional[int] = None,
+            throttle_scope: Optional[str] = None,
+    ):
         """
-        self.timeout: int = timeout
-        self.retries: int = retries
-        self.delay: int = delay
+        Args:
+            timeout: Общий таймаут запроса в секундах.
+            max_attempts: Максимальное число попыток, включая первую.
+            backoff_base: Базовая задержка экспоненциального отката в секундах.
+            backoff_max: Верхняя граница задержки между попытками.
+            max_concurrent_requests: Лимит одновременных запросов к одному получателю.
+            throttle_scope: Владелец лимита (кабинет WB). Запросы разных кабинетов
+                не мешают друг другу и переживают 429 независимо.
+        """
+        self.timeout = aiohttp.ClientTimeout(total=timeout or settings.HTTP_TIMEOUT_SEC)
+        self.max_attempts = max(1, max_attempts or settings.HTTP_MAX_ATTEMPTS)
+        self.backoff_base = backoff_base or settings.HTTP_RETRY_BACKOFF_BASE_SEC
+        self.backoff_max = backoff_max or settings.HTTP_RETRY_BACKOFF_MAX_SEC
+        self.max_concurrent_requests = (
+                max_concurrent_requests or settings.HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST
+        )
+        self.throttle_scope = throttle_scope
 
-    async def _make_request(self, method: str, url: str, **kwargs: object) -> Optional[str]:
-        """Выполняет асинхронный HTTP-запрос с повторными попытками.
-        Args:
-            method: HTTP-метод (например, "GET", "POST").
-            url: URL-адрес для запроса.
-            **kwargs: Дополнительные аргументы для передачи в `aiohttp.ClientSession.request`.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
-        for attempt in range(self.retries):
-            attempt_started = time.monotonic()
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.request(method, url, timeout=self.timeout, **kwargs) as response:
-                        content_type = response.headers.get("Content-Type", "")
-                        response.raise_for_status()
-                        diagnostics.increment_wb_counter("requests_total")
-                        diagnostics.increment_wb_counter("success")
-                        if content_type.startswith("image/"):
-                            return await response.read()
-                        return await response.text()
-            except (aiohttp.ClientError, aiohttp.ClientConnectionError) as e:
-                duration_ms = round((time.monotonic() - attempt_started) * 1000, 3)
-                status_code = getattr(e, "status", None)
-                diagnostics.increment_wb_counter("requests_total")
-                diagnostics.increment_wb_counter("errors")
-                diagnostics.increment_wb_counter("retries")
-                if status_code == 404:
-                    diagnostics.increment_wb_counter("not_found_404")
-                    diagnostics.record_event(
-                        "WB_REQUEST_404",
-                        level="warning",
-                        refresh_id=get_refresh_id(),
-                        method=method,
-                        url=sanitize_url(url),
-                        status_code=status_code,
-                        attempt=attempt + 1,
-                        retries=self.retries,
-                        duration_ms=duration_ms,
-                    )
-                diagnostics.record_event(
-                    "WB_REQUEST_RETRY",
-                    level="warning",
-                    refresh_id=get_refresh_id(),
-                    method=method,
-                    url=sanitize_url(url),
-                    status_code=status_code,
-                    attempt=attempt + 1,
-                    retries=self.retries,
-                    delay=self.delay,
-                    duration_ms=duration_ms,
-                )
-                logger.warning(f"Попытка {attempt + 1}: Ошибка во время {method} {sanitize_url(url)} - {e}")
-                await asyncio.sleep(self.delay)
+    def _backoff_delay(self, attempt: int) -> float:
+        """Экспоненциальная задержка с джиттером ±25%, чтобы попытки не синхронизировались."""
+        delay = min(self.backoff_max, self.backoff_base * 2 ** (attempt - 1))
+        return delay * random.uniform(0.75, 1.25)
+
+    def _retry_after_delay(self, response: aiohttp.ClientResponse, attempt: int) -> float:
+        """Берёт паузу из заголовка Retry-After, иначе откатывается к backoff."""
+        header = response.headers.get("Retry-After", "")
+        try:
+            requested = float(header)
+        except ValueError:
+            delay = settings.HTTP_RATE_LIMIT_BACKOFF_BASE_SEC * 2 ** (attempt - 1)
+            return min(delay * random.uniform(0.75, 1.25), settings.HTTP_RETRY_AFTER_MAX_SEC)
+        return min(max(requested, 1.0), settings.HTTP_RETRY_AFTER_MAX_SEC)
+
+    @staticmethod
+    async def _read_body(response: aiohttp.ClientResponse) -> str | bytes:
+        """Бинарные ответы (стикеры, штрихкоды) возвращаются как есть, остальные — текстом."""
+        if response.headers.get("Content-Type", "").startswith("image/"):
+            return await response.read()
+        return await response.text()
+
+    async def _handle_response(self, response: aiohttp.ClientResponse, throttle: HostThrottle,
+                               method: str, url: str, attempt: int, duration_ms: float) -> _Attempt:
+        diagnostics.increment_wb_counter("requests_total")
+        status_code = response.status
+
+        if status_code < 400:
+            diagnostics.increment_wb_counter("success")
+            return _Attempt.done(await self._read_body(response))
+
+        diagnostics.increment_wb_counter("errors")
+        body_preview = (await response.text())[:ERROR_BODY_PREVIEW_LEN]
+
+        if status_code == 404:
+            diagnostics.increment_wb_counter("not_found_404")
+            diagnostics.record_event(
+                "WB_REQUEST_404",
+                level="warning",
+                refresh_id=get_refresh_id(),
+                method=method,
+                url=sanitize_url(url),
+                status_code=status_code,
+                attempt=attempt,
+                retries=self.max_attempts,
+                duration_ms=duration_ms,
+            )
+            logger.warning(f"404 при {method} {sanitize_url(url)} — повтор не выполняется")
+            return _Attempt.done(None)
+
+        if status_code == 429:
+            delay = self._retry_after_delay(response, attempt)
+            throttle.pause(delay)
+            diagnostics.increment_wb_counter("rate_limited")
+            diagnostics.record_event(
+                "WB_REQUEST_RATE_LIMITED",
+                level="warning",
+                refresh_id=get_refresh_id(),
+                method=method,
+                url=sanitize_url(url),
+                status_code=status_code,
+                attempt=attempt,
+                retries=self.max_attempts,
+                delay=round(delay, 3),
+                duration_ms=duration_ms,
+            )
+            logger.warning(
+                f"429 [{throttle.key}]: пауза {delay:.1f}с для всех запросов этого кабинета "
+                f"(попытка {attempt}/{self.max_attempts}, {method} {sanitize_url(url)})"
+            )
+            return _Attempt.retry(delay)
+
+        if status_code not in RETRYABLE_STATUSES:
+            logger.error(
+                f"{status_code} при {method} {sanitize_url(url)} — повтор не поможет. Ответ: {body_preview}"
+            )
+            return _Attempt.done(None)
+
+        delay = self._backoff_delay(attempt)
+        self._record_retry(method, url, attempt, delay, duration_ms, status_code)
+        logger.warning(
+            f"Попытка {attempt}/{self.max_attempts}: {status_code} при {method} {sanitize_url(url)}. "
+            f"Ответ: {body_preview}"
+        )
+        return _Attempt.retry(delay)
+
+    def _record_retry(self, method: str, url: str, attempt: int, delay: float,
+                      duration_ms: float, status_code: Optional[int]) -> None:
+        diagnostics.increment_wb_counter("retries")
+        diagnostics.record_event(
+            "WB_REQUEST_RETRY",
+            level="warning",
+            refresh_id=get_refresh_id(),
+            method=method,
+            url=sanitize_url(url),
+            status_code=status_code,
+            attempt=attempt,
+            retries=self.max_attempts,
+            delay=round(delay, 3),
+            duration_ms=duration_ms,
+        )
+
+    async def _attempt_request(self, throttle: HostThrottle, method: str, url: str,
+                               attempt: int, **kwargs: Any) -> _Attempt:
+        started = time.monotonic()
+        try:
+            async with throttle:
+                session = _sessions.get()
+                async with session.request(method, url, timeout=self.timeout, **kwargs) as response:
+                    duration_ms = round((time.monotonic() - started) * 1000, 3)
+                    return await self._handle_response(response, throttle, method, url, attempt, duration_ms)
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            duration_ms = round((time.monotonic() - started) * 1000, 3)
+            diagnostics.increment_wb_counter("requests_total")
+            diagnostics.increment_wb_counter("errors")
+            delay = self._backoff_delay(attempt)
+            self._record_retry(method, url, attempt, delay, duration_ms, getattr(e, "status", None))
+            logger.warning(
+                f"Попытка {attempt}/{self.max_attempts}: ошибка {method} {sanitize_url(url)} - "
+                f"{type(e).__name__}: {e}"
+            )
+            return _Attempt.retry(delay)
+
+    async def _make_request(self, method: str, url: str, **kwargs: Any) -> str | bytes | None:
+        """Выполняет запрос с повторами."""
+        throttle = _throttle_for(url, self.max_concurrent_requests, self.throttle_scope)
+
+        for attempt in range(1, self.max_attempts + 1):
+            result = await self._attempt_request(throttle, method, url, attempt, **kwargs)
+            if result.finished:
+                return result.body
+            if attempt < self.max_attempts:
+                await asyncio.sleep(result.retry_after)
+
+        logger.error(f"{method} {sanitize_url(url)}: исчерпаны все {self.max_attempts} попытки")
         return None
 
     async def request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None,
                       json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
-                      headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+                      headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
         """Выполняет асинхронный HTTP-запрос с указанным методом, URL и параметрами.
         Args:
             method: HTTP-метод (например, "GET", "POST").
@@ -204,72 +396,36 @@ class AsyncHttpClient:
             data: Данные для отправки в теле запроса.
             headers: HTTP-заголовки для включения в запрос.
         Returns:
-            Текст ответа, если запрос успешен, иначе None.
+            Тело ответа, если запрос успешен, иначе None.
         """
         return await self._make_request(method, url, params=params, json=json, data=data, headers=headers)
 
-    async def get(self, url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) \
-            -> Optional[str]:
-        """Выполняет асинхронный GET-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            params: Параметры запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
+    async def get(self, url: str, params: Optional[Dict[str, Any]] = None,
+                  headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
+        """Выполняет асинхронный GET-запрос по указанному URL."""
         return await self.request("GET", url, params=params, headers=headers)
 
     async def post(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
-                   headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Выполняет асинхронный POST-запрос по-указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            data: Данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
+                   headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
+        """Выполняет асинхронный POST-запрос по указанному URL."""
         return await self.request("POST", url, json=json, data=data, headers=headers)
 
-    async def put(self, url: str, json: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> \
-            Optional[str]:
-        """Выполняет асинхронный PUT-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
+    async def put(self, url: str, json: Optional[Dict[str, Any]] = None,
+                  headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
+        """Выполняет асинхронный PUT-запрос по указанному URL."""
         return await self.request("PUT", url, json=json, headers=headers)
 
-    async def delete(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Выполняет асинхронный DELETE-запрос по указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
+    async def delete(self, url: str, headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
+        """Выполняет асинхронный DELETE-запрос по указанному URL."""
         return await self.request("DELETE", url, headers=headers)
 
     async def patch(self, url: str, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None,
-                    headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """Выполняет асинхронный PATCH-запрос по-указанному URL.
-        Args:
-            url: URL-адрес для запроса.
-            json: JSON-данные для отправки в теле запроса.
-            data: Данные для отправки в теле запроса.
-            headers: HTTP-заголовки для включения в запрос.
-        Returns:
-            Текст ответа, если запрос успешен, иначе None.
-        """
+                    headers: Optional[Dict[str, str]] = None) -> str | bytes | None:
+        """Выполняет асинхронный PATCH-запрос по указанному URL."""
         return await self.request("PATCH", url, json=json, data=data, headers=headers)
 
 
-def parse_json(response_text: str) -> dict | None:
+def parse_json(response_text: str | bytes | None) -> dict | None:
     """Преобразует строку ответа в JSON или выбрасывает исключение.
     Args:
         response_text: Строка ответа от сервера.

@@ -1,5 +1,5 @@
 import json
-from src.response import parse_json
+from src.response import ensure_response, parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
 
@@ -37,9 +37,9 @@ class Cards(Account):
                 json=payload,
                 headers=self.headers
             )
-            data = parse_json(response)
+            data = parse_json(ensure_response(response, f"Карточки по wild={wild} ({self.account})"))
 
-            batch = data.get("cards", [])
+            batch = data.get("cards") or []
             cards.extend(batch)
 
             total = data.get("cursor", {}).get("total", 0)
@@ -189,7 +189,9 @@ class Cards(Account):
                 json=batch,
                 headers=self.headers
             )
-            result = parse_json(response)
+            result = parse_json(ensure_response(
+                response, f"Обновление {len(batch)} карточек ({self.account})"
+            ))
             logger.info(f"{self.account}: Обновлено {len(batch)} карточек")
             results.append(result)
 

@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from .pdf_parser import PickingListParser, PDFParseError
 from .excel_parser import ExcelPickingListParser, ExcelParseError
+from src.concurrency import run_blocking
 from src.supplies.supplies import SuppliesService
 from src.logger import app_logger as logger
 from src.utils import process_local_vendor_code
@@ -184,10 +185,10 @@ class DocumentProcessingService:
             file_type = self._detect_file_type(filename)
             
             if file_type == 'pdf':
-                result = self.pdf_parser.parse_pdf_to_json(content, source_filename=filename)
+                result = await run_blocking(self.pdf_parser.parse_pdf_to_json, content, source_filename=filename)
                 file_type_name = "PDF"
             else:  # excel
-                result = self.excel_parser.parse_excel_to_json(content, source_filename=filename)
+                result = await run_blocking(self.excel_parser.parse_excel_to_json, content, source_filename=filename)
                 file_type_name = "Excel"
 
             if not result['orders']:

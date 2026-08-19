@@ -79,7 +79,7 @@ async def upload_stickers_to_orders(
     result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids, allow_partial)
     selection_sheet_content = await create_table_pdf(result_stickers)
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
-    zip_buffer = create_zip_archive({
+    zip_buffer = await create_zip_archive({
         "stickers.pdf": pdf_sticker.getvalue(),
         "selection_sheet.pdf": selection_sheet_content.getvalue()
     })

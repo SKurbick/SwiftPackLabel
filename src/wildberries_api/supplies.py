@@ -1,4 +1,4 @@
-from src.response import parse_json
+from src.response import ensure_response, parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
 from src.wildberries_api.orders import Orders
@@ -16,37 +16,53 @@ class Supplies(Account):
         return {self.account: [sup for sup in supplies if not sup.get('done')]}
 
     async def get_supplies(self):
+        """Постранично забирает поставки откидываю для фбс2."""
         supplies = []
         next_value = 0
+        seen_cursors = set()
         while True:
             params = {"limit": 1000, "next": next_value}
             response = await self.async_client.get(self.url, params=params, headers=self.headers)
-            data = parse_json(response)
-            datas_for_extend = []
-            for sup in data.get("supplies"):
-                sup_name: str = sup.get("name")
+            data = parse_json(ensure_response(response, f"Список поставок кабинета {self.account}"))
+
+            for sup in data.get("supplies") or []:
+                sup_name: str = sup.get("name") or ""
                 if not sup_name.startswith(FBS2_SUPPLY_NAME_PREFIXES):
-                    datas_for_extend.append(sup)
-            supplies.extend(datas_for_extend)
+                    supplies.append(sup)
+
             next_value = data.get("next")
             logger.info(f"Получены {len(supplies)} поставок and next {next_value}, account {self.account}")
             if not next_value:
                 break
+            if next_value in seen_cursors:
+                logger.error(
+                    f"WB повторил курсор {next_value} для кабинета {self.account}, "
+                    f"останавливаем пагинацию на {len(supplies)} поставках"
+                )
+                break
+            seen_cursors.add(next_value)
 
         return supplies
 
     async def get_supply_order_ids(self, supply_id: str) -> list[int]:
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/order-ids"
         response = await self.async_client.get(url, headers=self.headers)
-
-        if response is None:
-            logger.warning(f"Не удалось получить order-ids для поставки {supply_id}, account {self.account}")
-            return []
-
-        response_json = parse_json(response)
+        response_json = parse_json(ensure_response(response, f"Состав поставки {supply_id} ({self.account})"))
         order_ids = response_json.get('orderIds', response_json.get('orders', []))
         logger.info(f"Получены {len(order_ids)} order-ids для поставки {supply_id}, account {self.account}")
         return order_ids
+
+    def _log_resolved_orders(self, supply_id: str, resolved: int, expected: int, source: str) -> None:
+        """Сообщает, сколько заказов поставки удалось раскрыть в детали."""
+        message = (f"Получены детали для {resolved}/{expected} заказов поставки {supply_id} "
+                   f"{source}, account {self.account}")
+        if resolved < expected:
+            logger.warning(
+                f"{message}. неполный: {expected - resolved} заказов не раскрыты "
+                f"(нет ни в бд ни в wb api) — в интерфейсе поставка покажет {resolved}"
+            )
+        else:
+            logger.info(message)
 
     async def get_supply_orders(self, supply_id: str, db=None):
         """
@@ -78,7 +94,7 @@ class Supplies(Account):
             if not missing_ids:
                 # Все заказы найдены в БД
                 orders_list = list(orders_from_db.values())
-                logger.info(f"Получены детали для {len(orders_list)}/{len(order_ids)} заказов поставки {supply_id} из БД, account {self.account}")
+                self._log_resolved_orders(supply_id, len(orders_list), len(order_ids), "из БД")
                 return {self.account: {supply_id: {"orders": orders_list}}}
 
             # Есть недостающие - получаем их из WB API
@@ -114,7 +130,7 @@ class Supplies(Account):
                         }
 
             orders_list = list(orders_from_db.values())
-            logger.info(f"Получены детали для {len(orders_list)}/{len(order_ids)} заказов поставки {supply_id} (гибрид БД+API), account {self.account}")
+            self._log_resolved_orders(supply_id, len(orders_list), len(order_ids), "(гибрид БД+API)")
             return {self.account: {supply_id: {"orders": orders_list}}}
 
         # Fallback: старый метод через полный get_orders()
@@ -124,7 +140,7 @@ class Supplies(Account):
         order_ids_set = set(order_ids)
         filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
 
-        logger.info(f"Получены детали для {len(filtered_orders)}/{len(order_ids)} заказов поставки {supply_id}, account {self.account}")
+        self._log_resolved_orders(supply_id, len(filtered_orders), len(order_ids), "(только WB API)")
 
         return {self.account: {supply_id: {"orders": filtered_orders}}}
 
@@ -136,7 +152,7 @@ class Supplies(Account):
         """
         response = await self.async_client.post(self.url, json={"name": name}, headers=self.headers)
         logger.info(f"Создана поставка с именем '{name}' для аккаунта {self.account}. Ответ: {response}")
-        return parse_json(response)
+        return parse_json(ensure_response(response, f"Создание поставки '{name}' ({self.account})"))
 
     async def add_order_to_supply(self, supply_id: str, order_id: int, check_status: bool = True) -> dict:
         """
@@ -157,10 +173,9 @@ class Supplies(Account):
                 return {"error": error_msg, "success": False}
         
         # Добавляем заказ в поставку
-        self.async_client.retries = 90
-        self.async_client.delay = 61
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
         response = await self.async_client.patch(url, json={"orders": [order_id]}, headers=self.headers)
+        ensure_response(response, f"Добавление заказа {order_id} в поставку {supply_id} ({self.account})")
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return response
 
@@ -188,19 +203,33 @@ class Supplies(Account):
         :return: Ответ от WB API
         """
         response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
+        ensure_response(response, f"Перевод поставки {supply_id} в доставку ({self.account})")
         logger.info(
             f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response}")
         return response
 
     async def get_information_to_supply(self, supply_id):
+        """Возвращает карточку поставки.
+
+        Raises:
+            ExternalApiError: Если запрос не удался. Пустой ответ вызывающий код
+                трактует как «поставки нет в этом кабинете» — сбой сети под такой
+                вывод маскировать нельзя.
+        """
         response = await self.async_client.get(f"{self.url}/{supply_id}", headers=self.headers)
         logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
-        return parse_json(response)
+        return parse_json(ensure_response(response, f"Информация о поставке {supply_id} ({self.account})"))
 
-    async def get_sticker_by_supply_ids(self,supply_id):
+    async def get_sticker_by_supply_ids(self, supply_id):
+        """Возвращает штрихкод поставки в PNG.
+
+        Raises:
+            ExternalApiError: Если запрос не удался — иначе стикер молча пропадёт
+                из общего листа печати.
+        """
         response = await self.async_client.get(f"{self.url}/{supply_id}/barcode?type=png", headers=self.headers)
         logger.info(f"Получение информации о поставке {supply_id} : account {self.account}")
-        return parse_json(response)
+        return parse_json(ensure_response(response, f"Штрихкод поставки {supply_id} ({self.account})"))
 
     async def get_supply_orders_batch(self, supply_ids: list[str], db=None) -> dict:
         """

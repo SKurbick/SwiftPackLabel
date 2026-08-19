@@ -35,7 +35,7 @@ class OrdersService:
         """
         self.db = db
         self.article_db = ArticleDB(db) if db else None
-        self.async_client = AsyncHttpClient(timeout=30, retries=3, delay=5)
+        self.async_client = AsyncHttpClient(timeout=30, max_attempts=3)
 
     async def get_all_new_orders(self) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -470,7 +470,10 @@ class OrdersService:
             if isinstance(result, Exception):
                 logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
                              f"для аккаунта {account}: {result}")
-            elif result and 'error' in result:
+            elif result is None:
+                logger.error(f"Заказ {order_id} не добавлен в поставку {supply_id} "
+                             f"для аккаунта {account}: запрос к WB не удался")
+            elif isinstance(result, dict) and result.get('error'):
                 logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
                              f"для аккаунта {account}: {result['error']}")
             elif article := order_article_map.get(order_id):

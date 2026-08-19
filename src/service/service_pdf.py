@@ -1,17 +1,16 @@
 import asyncio
 import base64
 import os
-import uuid
-from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Any
-import tempfile
+
 import qrcode
 from PIL import Image
 from fpdf import FPDF
 from pydantic import BaseModel
-from src.logger import app_logger as logger
 
+from src.concurrency import run_blocking
+from src.logger import app_logger as logger
 from src.response import AsyncHttpClient
 from src.utils import get_information_to_data
 
@@ -33,14 +32,10 @@ class ImageService:
     """Сервис для работы с изображениями"""
 
     @staticmethod
-    def create_temp_dir(path=None):
-        """Создает временную директорию, если она не существует"""
-        if path is None:
-            # Определяем корень проекта и используем относительный путь от него
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            path = os.path.join(project_root, "src", "service", "temp")
-        os.makedirs(path, exist_ok=True)
-        return path
+    def _encode_image(image_bytes: bytes) -> str:
+        """Проверяет, что байты действительно изображение, и кодирует их в base64."""
+        Image.open(BytesIO(image_bytes)).verify()
+        return base64.b64encode(image_bytes).decode('utf-8')
 
     @staticmethod
     async def download_and_encode_image(url: str) -> str:
@@ -49,20 +44,19 @@ class ImageService:
         Если произошла ошибка, возвращает пустую строку.
         """
         try:
-            response = await AsyncHttpClient().get(url)
-            img = Image.open(BytesIO(response.content))
-            img.verify()
-            base64_str = base64.b64encode(response.content).decode('utf-8')
-            return base64_str
+            image_bytes = await AsyncHttpClient().get(url)
+            if not isinstance(image_bytes, bytes):
+                logger.info(f"Ответ по ссылке {url} не является изображением")
+                return ""
+            # Валидация и base64 — работа с CPU, уводим из event loop
+            return await run_blocking(ImageService._encode_image, image_bytes)
         except Exception as e:
             logger.info(f"Ошибка при скачивании/кодировании изображения {url}: {e}")
             return ""
 
     @staticmethod
-    def generate_qr_code(qr_data: str) -> str:
-        """Генерирует QR-код и возвращает путь к временному файлу"""
-        temp_dir = ImageService.create_temp_dir()
-
+    def generate_qr_code(qr_data: str) -> BytesIO:
+        """Генерирует QR-код и возвращает его как PNG в памяти"""
         qr = qrcode.QRCode(
             version=1,
             box_size=12,
@@ -71,11 +65,10 @@ class ImageService:
         qr.add_data(qr_data)
         qr.make(fit=True)
 
-        qr_img = qr.make_image(fill_color="black", back_color="white")
-        qr_filename = f"{temp_dir}/qr_code_{uuid.uuid4()}.png"
-        qr_img.save(qr_filename)
-
-        return qr_filename
+        buffer = BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
 
 
 class PDFService:
@@ -109,8 +102,8 @@ class PDFService:
                 qr_data_right = f"{key}/{len(orders)}"
 
                 image_service = ImageService()
-                qr_filename_left = image_service.generate_qr_code(qr_data_right)
-                qr_filename_right = image_service.generate_qr_code(qr_data_right)
+                qr_left = image_service.generate_qr_code(qr_data_right)
+                qr_right = image_service.generate_qr_code(qr_data_right)
 
                 subject_name = orders[0]["subject_name"]
                 if len(subject_name) > 20:
@@ -150,17 +143,15 @@ class PDFService:
                 pdf.set_font("DejaVu", size=12)
                 pdf.set_x((58 - pdf.get_string_width(f"{key}")) / 2)
                 pdf.cell(pdf.get_string_width(f"{key}"), 7, f"{key}", ln=True)
-                pdf.image(qr_filename_left, x=1, y=15, w=26, h=26)
+                pdf.image(qr_left, x=1, y=15, w=26, h=26)
                 pdf.set_font("DejaVu", size=10)
                 pdf.set_xy(25, 27)
                 pdf.cell(8, 5, str(len(orders)), align='C')
                 pdf.set_font("DejaVu", size=12)
                 pdf.set_xy(25, 32)
                 pdf.cell(8, 5, "▼", align='C')
-                pdf.image(qr_filename_right, x=32, y=15, w=26, h=26)
+                pdf.image(qr_right, x=32, y=15, w=26, h=26)
 
-            os.remove(qr_filename_left)
-            os.remove(qr_filename_right)
             self._process_sticker_images(pdf, orders)
 
         pdf_buffer.write(pdf.output(dest="S"))
@@ -177,14 +168,11 @@ class PDFService:
                     img_data = base64.b64decode(order["file"])
                     img = Image.open(BytesIO(img_data))
 
-                    temp_dir = ImageService.create_temp_dir()
+                    jpeg_buffer = BytesIO()
+                    img.save(jpeg_buffer, "JPEG")
+                    jpeg_buffer.seek(0)
 
-                    unique_filename = f"{temp_dir}/temp_image_{uuid.uuid4()}.jpg"
-                    img.save(unique_filename, "JPEG")
-
-                    pdf.image(unique_filename, x=0, y=0, w=58, h=40)
-
-                    os.remove(unique_filename)
+                    pdf.image(jpeg_buffer, x=0, y=0, w=58, h=40)
 
                 except Exception as e:
                     pdf.add_page()
@@ -192,9 +180,12 @@ class PDFService:
                     pdf.cell(58, 5, f"Image Load Error: {str(e)}", ln=True)
 
     async def create_table_pdf(self, data_list: Dict[str, List[Dict[str, Any]]]) -> BytesIO:
-        """Создает PDF с таблицей данных"""
+        """Создает PDF с таблицей данных."""
         await self._load_photos(data_list)
+        return await run_blocking(self._render_table_pdf, data_list)
 
+    def _render_table_pdf(self, data_list: Dict[str, List[Dict[str, Any]]]) -> BytesIO:
+        """Синхронная отрисовка таблицы. Вызывать только из пула потоков."""
         pdf = FPDF(orientation='L', unit='mm', format='A4')
         pdf.add_font('DejaVu', '', self.dejavu_regular_path)
         pdf.add_font('DejaVu', 'B', self.dejavu_bold_path)
@@ -233,19 +224,20 @@ class PDFService:
         return pdf_buffer
 
     async def _load_photos(self, data_list: Dict[str, List[Dict[str, Any]]]) -> None:
-        """Загружает фотографии для всех заказов"""
-        tasks = []
+        """Загружает фотографии для всех заказов."""
+        client = AsyncHttpClient()
+        orders_to_load = []
 
-        for _, value in data_list.items():
-            for order in value:
+        for orders in data_list.values():
+            for order in orders:
                 if 'НЕТ' in order["photo_link"]:
                     order["photo_img"] = order["photo_link"]
                 else:
-                    tasks.append((order, AsyncHttpClient().get(order["photo_link"])))
+                    orders_to_load.append(order)
 
-        results = await asyncio.gather(*(task[1] for task in tasks))
+        photos = await asyncio.gather(*(client.get(order["photo_link"]) for order in orders_to_load))
 
-        for (order, _), photo in zip(tasks, results):
+        for order, photo in zip(orders_to_load, photos):
             order["photo_img"] = photo
 
     def _print_table_header(self, pdf: FPDF, col_headers: List[str], col_widths: List[int]) -> None:
@@ -308,17 +300,16 @@ class PDFService:
 
         try:
             img = Image.open(BytesIO(b64_string))
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".webp") as temp_file:
-                temp_filename = temp_file.name
-                img.save(temp_filename, "WEBP")
+            webp_buffer = BytesIO()
+            img.save(webp_buffer, "WEBP")
+            webp_buffer.seek(0)
 
             img_width = cell_width - 4
             img_height = cell_height - 4
             img_x = cell_x + 2
             img_y = cell_y + 2
 
-            pdf_obj.image(temp_filename, x=img_x, y=img_y, w=img_width, h=img_height)
-            os.remove(temp_filename)
+            pdf_obj.image(webp_buffer, x=img_x, y=img_y, w=img_width, h=img_height)
 
         except Exception as e:
             pdf_obj.set_font("DejaVu", "B", size=6)
@@ -362,9 +353,9 @@ class DataProcessor:
 
 
 async def collect_images_sticker_to_pdf(stickers: Dict[str, List[Dict[str, Any]]]) -> BytesIO:
-    """Создает PDF со стикерами"""
+    """Создает PDF со стикерами (сборка выполняется в пуле потоков)"""
     pdf_service = PDFService()
-    return pdf_service.create_sticker_pdf(stickers)
+    return await run_blocking(pdf_service.create_sticker_pdf, stickers)
 
 
 async def download_and_encode_image(url: str) -> str:

@@ -6,6 +6,7 @@ from typing import Any, Optional, Dict, List
 from datetime import datetime, timedelta
 import redis.asyncio as redis
 
+from src.concurrency import run_blocking
 from src.orders.schema import OrderDetail
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -112,7 +113,7 @@ class GlobalCache:
             cached_data = await self.redis_client.get(key)
             if cached_data:
                 # Десериализация данных
-                data = pickle.loads(cached_data)
+                data = await run_blocking(pickle.loads, cached_data)
                 logger.debug(f"Кэш HIT для ключа: {key}")
                 return data
             else:
@@ -144,7 +145,7 @@ class GlobalCache:
             await self.redis_client.delete(key)
             
             # Сериализация данных
-            serialized_data = pickle.dumps(value)
+            serialized_data = await run_blocking(pickle.dumps, value)
             
             # Установка TTL
             cache_ttl = ttl or settings.CACHE_TTL

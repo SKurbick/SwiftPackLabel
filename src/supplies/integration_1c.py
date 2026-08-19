@@ -25,7 +25,11 @@ class OneCIntegration:
 
     def __init__(self, db=None):
         """Инициализация класса интеграции с 1C."""
-        self.async_client = AsyncHttpClient(timeout=240,retries=30,delay=61)
+        self.async_client = AsyncHttpClient(
+            timeout=settings.ONEC_TIMEOUT_SEC,
+            max_attempts=settings.ONEC_MAX_ATTEMPTS,
+            backoff_base=settings.ONEC_RETRY_BACKOFF_BASE_SEC,
+        )
         self.db = db
 
     @staticmethod
@@ -275,6 +279,10 @@ class OneCIntegration:
                 "POST", settings.ONEC_HOST, json=request_body,
                 headers=headers, auth=auth
             )
+
+            if response_text is None:
+                logger.error("1C не ответил: запрос не удался после всех попыток")
+                return {"status_code": 502, "message": "1C не ответил на запрос", "success": False}
 
             try:
                 result = json.loads(response_text) if isinstance(response_text, str) else response_text

@@ -10,6 +10,7 @@ from PIL import Image
 
 from io import BytesIO
 
+from src.concurrency import run_blocking
 from src.service.service_pdf import collect_images_sticker_to_pdf
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -26,7 +27,7 @@ from src.models.final_supplies import FinalSupplies
 from src.models.delivered_supplies import DeliveredSupplies
 from src.models.assembly_task_status import AssemblyTaskStatus
 from src.models.qr_scan_db import QRScanDB
-from src.response import AsyncHttpClient, parse_json
+from src.response import AsyncHttpClient, ExternalApiError, parse_json
 from fastapi import HTTPException
 
 from src.orders.order_status_service import OrderStatusService
@@ -43,7 +44,7 @@ class SuppliesService:
 
     def __init__(self, db: AsyncGenerator = None):
         self.db = db
-        self.async_client = AsyncHttpClient(timeout=120, retries=3, delay=5)
+        self.async_client = AsyncHttpClient(timeout=120, max_attempts=3)
 
     async def get_supply_detailed_info(self, supply_id: str, account: str) -> Optional[Dict[str, Any]]:
         """
@@ -1294,7 +1295,16 @@ class SuppliesService:
             ).get_supply_orders(supply.supply_id, db=self.db)
             for supply in supply_ids.supplies
         ]
-        result: Dict[str, Dict] = self.group_result(await asyncio.gather(*tasks))
+        try:
+            result: Dict[str, Dict] = self.group_result(await asyncio.gather(*tasks))
+        except ExternalApiError as error:
+            # Без этой ветки сбой WB выглядел как расхождение состава поставки:
+            # состав приезжал пустым и сверка ругалась на «различия»
+            logger.error(f"Сверка заказов прервана: {error}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Не удалось получить состав поставок из WB: {error}. Повторите попытку."
+            )
         self._enrich_orders_with_created_at(supply_ids, result)
 
         for supply in supply_ids.supplies:
@@ -1306,6 +1316,7 @@ class SuppliesService:
                 # Для частичной отгрузки: проверяем, что заказы из запроса существуют в поставке
                 missing_orders = supply_orders - check_orders
                 if missing_orders:
+                    self._log_orders_mismatch(supply, supply_orders, check_orders)
                     raise HTTPException(status_code=409,
                                         detail=f'Заказы {missing_orders} не найдены в поставке {supply.supply_id} '
                                                f'в кабинете {supply.account}')
@@ -1313,9 +1324,22 @@ class SuppliesService:
                 # Для полной печати: проверяем точное соответствие (текущая логика)
                 diff: Set[int] = supply_orders.symmetric_difference(check_orders)
                 if diff:
+                    self._log_orders_mismatch(supply, supply_orders, check_orders)
                     raise HTTPException(status_code=409,
                                         detail=f'Есть различия между поставками {diff} в кабинете {supply.account}'
                                                f' Номер поставки : {supply.supply_id}')
+
+    @staticmethod
+    def _log_orders_mismatch(supply, requested: Set[int], actual: Set[int]) -> None:
+        """Пишет в лог причину расхождения составов перед ответом 409."""
+        only_requested = sorted(requested - actual)
+        only_actual = sorted(actual - requested)
+        logger.warning(
+            f"Расхождение состава поставки {supply.supply_id} ({supply.account}): "
+            f"в запросе {len(requested)} заказов, в составе WB {len(actual)}. "
+            f"Только в запросе ({len(only_requested)}): {only_requested[:20]}. "
+            f"Только в составе ({len(only_actual)}): {only_actual[:20]}"
+        )
 
     @staticmethod
     def _enrich_orders_with_created_at(supply_ids: SupplyIdBodySchema, wb_result: Dict[str, Dict]) -> None:
@@ -1474,7 +1498,17 @@ class SuppliesService:
         wb_tokens = get_wb_tokens()
         tasks = [Supplies(supply.account, wb_tokens.get(supply.account, "")).deliver_supply(supply.supply_id)
                  for supply in supply_ids]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        failed = [
+            (supply.supply_id, supply.account, result)
+            for supply, result in zip(supply_ids, results)
+            if isinstance(result, Exception)
+        ]
+        for supply_id, account, error in failed:
+            logger.error(f"Не удалось перевести поставку {supply_id} ({account}) в доставку: {error}")
+        if failed:
+            logger.error(f"Не переведены в доставку {len(failed)} из {len(supply_ids)} поставок")
 
     def _create_fictitious_delivery_response(self, success: bool, message: str, supply_id: str, account: str,
                                              delivery_response=None, marked_as_fictitious: bool = False,
@@ -1569,14 +1603,16 @@ class SuppliesService:
     def _is_delivery_successful(self, delivery_response: Any) -> bool:
         """
         Проверяет успешность ответа от WB API.
-        
+
         Args:
             delivery_response: Ответ от WB API
-            
+
         Returns:
             bool: True если доставка успешна
         """
-        if hasattr(delivery_response, 'status_code') and delivery_response.status_code >= 400:
+        if delivery_response is None:
+            return False
+        if isinstance(delivery_response, dict) and (delivery_response.get("errors") or delivery_response.get("error")):
             return False
         return True
 
@@ -1846,17 +1882,21 @@ class SuppliesService:
         response_text = await self.async_client.post(
             settings.SHIPMENT_API_URL, json=shipment_data)
 
-        if response_text:
-            try:
-                response_data = parse_json(response_text)
-                logger.info(f"Данные успешно отправлены в API: {response_data}")
-                return True
-            except ValueError as e:
-                logger.error(f"Ошибка парсинга ответа API: {e}")
-                logger.error(f"Сырой ответ: {response_text}")
-                return False
-        else:
-            logger.error("Не получен ответ от API")
+        if response_text is None:
+            logger.error("Не получен ответ от API отгрузок: запрос не удался после всех попыток")
+            return False
+
+        if response_text == "":
+            logger.info("Данные успешно отправлены в API (пустой ответ)")
+            return True
+
+        try:
+            response_data = parse_json(response_text)
+            logger.info(f"Данные успешно отправлены в API: {response_data}")
+            return True
+        except ValueError as e:
+            logger.error(f"Ошибка парсинга ответа API: {e}")
+            logger.error(f"Сырой ответ: {response_text}")
             return False
 
     def validate_unique_vendor_code(self, supplies: List[SupplyId]) -> str:
@@ -3782,7 +3822,13 @@ class SuppliesService:
 
                 for order in orders_to_move:
                     order_id = order["order_id"]
-                    await supplies_api.add_order_to_supply(supply_id, order_id)
+                    move_result = await supplies_api.add_order_to_supply(supply_id, order_id)
+                    if isinstance(move_result, dict) and move_result.get("error"):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Не удалось переместить заказ {order_id} в поставку {supply_id} "
+                                   f"({account}): {move_result['error']}"
+                        )
                     logger.debug(f"Заказ {order_id} перемещен в поставку {supply_id}")
 
             # 7. Переводим новые поставки в статус доставки
@@ -3925,6 +3971,12 @@ class SuppliesService:
             for order in orders:
                 order_id = order["order_id"]
                 transfer_response = await supplies_api.add_order_to_supply(new_supply_id, order_id)
+                if isinstance(transfer_response, dict) and transfer_response.get("error"):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Не удалось переместить заказ {order_id} в поставку {new_supply_id} "
+                               f"({account}): {transfer_response['error']}"
+                    )
 
                 logger.debug(f"Заказ {order_id} перемещен в поставку {new_supply_id}")
 
@@ -4400,13 +4452,8 @@ class SuppliesService:
             if not png_images:
                 raise ValueError("No valid stickers found for any of the provided supplies")
 
-            # Combine PNG images vertically
-            combined_image = self._combine_png_images_vertically(png_images)
-
-            # Convert combined image back to BytesIO
-            output_buffer = BytesIO()
-            combined_image.save(output_buffer, format='PNG')
-            output_buffer.seek(0)
+            # Склейка изображений — CPU-bound, выполняем в пуле потоков
+            output_buffer = await run_blocking(self._combine_png_images_vertically, png_images)
 
             logger.info(f"Successfully combined {len(png_images)} stickers for supplies: {successful_supplies}")
             return output_buffer
@@ -4416,39 +4463,44 @@ class SuppliesService:
         except Exception as e:
             raise Exception(f"Multiple stickers error: {str(e)}")
 
-    def _combine_png_images_vertically(self, png_data_list: List[bytes]) -> Image.Image:
+    @staticmethod
+    def _combine_png_images_vertically(png_data_list: List[bytes]) -> BytesIO:
         """
-        Combine multiple PNG images vertically into a single image.
+        Склеивает PNG-изображения по вертикали в один буфер.
 
         Args:
-            png_data_list: List of PNG image data as bytes
+            png_data_list: Список PNG-изображений в виде байтов
 
         Returns:
-            PIL.Image: Combined image
+            BytesIO: Буфер с итоговым PNG
         """
         try:
-            # Open all images
             images = [Image.open(BytesIO(png_data)) for png_data in png_data_list]
 
-            # Calculate total height and max width
             total_height = sum(img.height for img in images)
             max_width = max(img.width for img in images)
 
-            # Create new image with combined dimensions
             combined_image = Image.new('RGB', (max_width, total_height), 'white')
 
-            # Paste images one by one
             y_offset = 0
             for img in images:
-                # Center the image horizontally if it's narrower than max_width
+                # Центрируем изображение по горизонтали, если оно уже максимальной ширины
                 x_offset = (max_width - img.width) // 2
                 combined_image.paste(img, (x_offset, y_offset))
                 y_offset += img.height
 
-            return combined_image
+            output_buffer = BytesIO()
+            combined_image.save(output_buffer, format='PNG')
+            output_buffer.seek(0)
+
+            for img in images:
+                img.close()
+            combined_image.close()
+
+            return output_buffer
 
         except Exception as e:
-            logger.error(f"Error combining PNG images: {e}")
+            logger.error(f"Ошибка склейки PNG-изображений: {e}")
             raise Exception(f"Image combination error: {str(e)}")
 
     async def shipment_fictitious_supplies_with_quantity(self, supplies: Dict[str, str],
