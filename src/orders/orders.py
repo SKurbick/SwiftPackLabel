@@ -539,34 +539,37 @@ class OrdersService:
         task_info = []
 
         for (account, supply_id), order_ids in orders_by_supply.items():
+            batch = [order_id for order_id in order_ids if order_id in allowed_orders]
+            if not batch:
+                continue
+
             supplies_service = Supplies(account, tokens.get(account))
-            for order_id in order_ids:
-                if order_id not in allowed_orders:
-                    continue
-                task = supplies_service.add_order_to_supply(supply_id, order_id, check_status=False)
-                add_order_tasks.append(task)
-                task_info.append((account, supply_id, order_id))
+            add_order_tasks.append(supplies_service.add_orders_to_supply(supply_id, batch))
+            task_info.append((account, supply_id, batch))
 
         if not add_order_tasks:
             return
 
         results = await asyncio.gather(*add_order_tasks, return_exceptions=True)
-        for (account, supply_id, order_id), result in zip(task_info, results):
+        for (account, supply_id, batch), result in zip(task_info, results):
             if isinstance(result, Exception):
-                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
+                logger.error(f"Ошибка при добавлении {len(batch)} заказов в поставку {supply_id} "
                              f"для аккаунта {account}: {result}")
-            elif result is None:
-                logger.error(f"Заказ {order_id} не добавлен в поставку {supply_id} "
-                             f"для аккаунта {account}: запрос к WB не удался")
-            elif isinstance(result, dict) and result.get('error'):
-                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
-                             f"для аккаунта {account}: {result['error']}")
-            elif article := order_article_map.get(order_id):
-                orders_added_by_article[article].append(order_id)
-                order_supply_mapping[order_id] = {
-                    'supply_id': supply_id,
-                    'account': account
-                }
+                continue
+
+            for order_id in batch:
+                if order_id not in result:
+                    continue
+                if article := order_article_map.get(order_id):
+                    orders_added_by_article[article].append(order_id)
+                    order_supply_mapping[order_id] = {
+                        'supply_id': supply_id,
+                        'account': account
+                    }
+
+            if missing := [order_id for order_id in batch if order_id not in result]:
+                logger.error(f"Не добавлены в поставку {supply_id} для аккаунта {account}: "
+                             f"{len(missing)} из {len(batch)} заказов {missing[:20]}")
 
     @staticmethod
     def _prepare_result(orders_added_by_article: Dict[str, List[int]] = None,
@@ -613,12 +616,17 @@ class OrdersService:
         )
 
     async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]],
-                                     supply_by_order: Dict[int, str], operator: str = 'unknown') -> None:
+                                     order_supply_mapping: Dict[int, Dict[str, str]],
+                                     operator: str = 'unknown') -> None:
         """
         Сохраняет информацию о висячих поставках в БД.
+
+        Записываются только заказы, которые WB принял в поставку: заказ, не
+        доехавший до WB, в составе висячей поставки числиться не должен.
+
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_order: Словарь с маппингом заказа на ID его поставки
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
             operator: Имя пользователя (оператора), создавшего висячую поставку
         """
 
@@ -626,7 +634,7 @@ class OrdersService:
         for orders in filtered_orders.values():
             for order in orders:
                 account = order.account
-                supply_id = supply_by_order.get(order.id)
+                supply_id = order_supply_mapping.get(order.id, {}).get('supply_id')
                 if supply_id is None:
                     continue
 
@@ -646,15 +654,15 @@ class OrdersService:
     @staticmethod
     def _group_orders_by_product_and_account(
             filtered_orders: Dict[str, List[OrderDetail]],
-            supply_by_order: Dict[int, str]
+            order_supply_mapping: Dict[int, Dict[str, str]]
     ) -> tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, str]]]:
         """
         Группирует заказы по артикулам и аккаунтам для подсчета количества.
-        
+
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_order: Словарь с маппингом заказа на ID его поставки
-            
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
+
         Returns:
             tuple: (product_quantities, product_supply_ids)
                 - product_quantities: {wild_code: {account: quantity}}
@@ -667,7 +675,7 @@ class OrdersService:
             for order in orders:
                 wild_code = order.article
                 account = order.account
-                supply_id = supply_by_order.get(order.id)
+                supply_id = order_supply_mapping.get(order.id, {}).get('supply_id')
 
                 if supply_id:
                     product_quantities[wild_code][account] += 1
@@ -788,7 +796,7 @@ class OrdersService:
     async def _reserve_products_for_hanging_supplies(
             self,
             filtered_orders: Dict[str, List[OrderDetail]],
-            supply_by_order: Dict[int, str],
+            order_supply_mapping: Dict[int, Dict[str, str]],
             operator: str = 'unknown',
             is_hanging: bool = False
     ) -> Dict[str, Any]:
@@ -799,7 +807,7 @@ class OrdersService:
 
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_order: Словарь с маппингом заказа на ID его поставки
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
             operator: Имя пользователя (оператора), создавшего технический круг
             is_hanging: Флаг висячего круга (True - висячий, False - обычный технический)
 
@@ -811,7 +819,7 @@ class OrdersService:
             logger.info(f"Начало процесса создания резерва товаров для {circle_type} круга. Оператор: {operator}")
 
             product_quantities, product_supply_ids = self._group_orders_by_product_and_account(
-                filtered_orders, supply_by_order
+                filtered_orders, order_supply_mapping
             )
 
             reserve_date, expires_at = self._generate_reservation_dates()
@@ -860,18 +868,28 @@ class OrdersService:
         await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_order, orders_added_by_article,
                                            order_supply_mapping)
 
+        requested_count = sum(len(orders) for orders in filtered_orders_by_sku.values())
+        added_count = len(order_supply_mapping)
+        if added_count < requested_count:
+            logger.error(
+                f"Круг '{input_data.name_supply}': в поставки добавлено {added_count} "
+                f"из {requested_count} отобранных заказов, потеряно {requested_count - added_count}"
+            )
+        else:
+            logger.info(f"Круг '{input_data.name_supply}': в поставки добавлены все {added_count} заказов")
+
         # Обрабатываем QR-коды для успешно добавленных заказов
         if orders_added_by_article:
             await self._process_qr_codes_for_orders(orders_added_by_article, order_supply_mapping)
 
         # Если поставки висячие, сохраняем информацию в БД
         if input_data.is_hanging and self.db:
-            await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_order, operator)
+            await self._save_hanging_supplies(filtered_orders_by_sku, order_supply_mapping, operator)
 
         # Резервируем товары для ВСЕХ технических кругов (независимо от флага is_hanging)
         if self.db:
             reservation_result = await self._reserve_products_for_hanging_supplies(
-                filtered_orders_by_sku, supply_by_order, operator, input_data.is_hanging
+                filtered_orders_by_sku, order_supply_mapping, operator, input_data.is_hanging
             )
             logger.info(f"Результат резервации товаров: {reservation_result}")
 

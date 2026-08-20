@@ -1,8 +1,13 @@
-from src.response import ensure_response, parse_json
+import asyncio
+from typing import List, Set
+
+from src.response import ExternalApiError, ensure_response, parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
 from src.wildberries_api.orders import Orders
 from src.orders.constants_to_block import FBS2_SUPPLY_NAME_PREFIXES
+
+WB_SUPPLY_ORDERS_BATCH_SIZE = 100
 
 
 class Supplies(Account):
@@ -178,6 +183,64 @@ class Supplies(Account):
         ensure_response(response, f"Добавление заказа {order_id} в поставку {supply_id} ({self.account})")
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return response
+
+    async def add_orders_to_supply(self, supply_id: str, order_ids: List[int]) -> Set[int]:
+        """Добавляет сборочные задания в поставку батчамии."""
+        if not order_ids:
+            return set()
+
+        batches = [order_ids[i:i + WB_SUPPLY_ORDERS_BATCH_SIZE]
+                   for i in range(0, len(order_ids), WB_SUPPLY_ORDERS_BATCH_SIZE)]
+        logger.info(
+            f"Добавление {len(order_ids)} заданий в поставку {supply_id} "
+            f"для аккаунта {self.account}: запросов {len(batches)}"
+        )
+
+        results = await asyncio.gather(*(self._add_orders_batch(supply_id, batch) for batch in batches))
+
+        added: Set[int] = set()
+        for result in results:
+            added.update(result)
+
+        if len(added) < len(order_ids):
+            logger.error(
+                f"Поставка {supply_id} ({self.account}): принято {len(added)} из {len(order_ids)} заданий"
+            )
+        return added
+
+    async def _add_orders_batch(self, supply_id: str, order_ids: List[int]) -> Set[int]:
+        """
+        Отправляет один пакет заданий.
+        """
+        url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
+        try:
+            response = await self.async_client.patch(url, json={"orders": order_ids}, headers=self.headers)
+            ensure_response(
+                response,
+                f"Добавление {len(order_ids)} заданий в поставку {supply_id} ({self.account})"
+            )
+        except ExternalApiError as e:
+            if len(order_ids) == 1:
+                logger.error(
+                    f"Задание {order_ids[0]} не добавлено в поставку {supply_id} ({self.account}): {e}"
+                )
+                return set()
+
+            half = len(order_ids) // 2
+            logger.warning(
+                f"Пакет из {len(order_ids)} заданий не принят поставкой {supply_id} "
+                f"({self.account}): {e}. Делим пополам и пробуем снова"
+            )
+            retried = await asyncio.gather(
+                self._add_orders_batch(supply_id, order_ids[:half]),
+                self._add_orders_batch(supply_id, order_ids[half:]),
+            )
+            return set().union(*retried)
+
+        logger.info(
+            f"Добавлено {len(order_ids)} заданий в поставку {supply_id} для аккаунта {self.account}"
+        )
+        return set(order_ids)
 
     async def delete_supply(self, supply_id: str) -> dict:
         """

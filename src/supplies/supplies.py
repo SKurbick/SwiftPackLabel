@@ -2460,132 +2460,80 @@ class SuppliesService:
         return await self._process_create_supplies_results(results, task_metadata, user)
 
     async def _move_orders_to_supplies(self, selected_orders_for_move: List[dict],
-                                       supply_by_order: Dict[int, str], wb_tokens: dict,
-                                       check_status: bool = False) -> Tuple[List[int], List[dict]]:
+                                       supply_by_order: Dict[int, str],
+                                       wb_tokens: dict) -> Tuple[List[int], List[dict]]:
         """
-        Перемещает отобранные заказы в новые поставки параллельно.
+        Перемещает отобранные заказы в новые поставки.
 
         Args:
             selected_orders_for_move: Отобранные заказы для перемещения
             supply_by_order: Новые поставки по id заказа
             wb_tokens: Токены WB для аккаунтов
-            check_status: Проверять ли статус заказов перед добавлением (default False, т.к. делаем пре-валидацию)
 
         Returns:
             Tuple[List[int], List[dict]]: (ID успешно перемещенных заказов, список неудачных попыток с деталями)
         """
-        # Подготовка задач для параллельного перемещения
-        tasks = []
-        task_metadata = []
+        orders_by_target: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+        moved_order_ids: List[int] = []
+        failed_orders: List[dict] = []
 
         for order in selected_orders_for_move:
-            wild_code = order['wild_code']
-            account = order['account']
-            order_id = order['id']
-
             # Находим новую поставку этого заказа: у одного кабинета их может
             # быть несколько — по одной на склад
-            new_supply_id = supply_by_order.get(order_id)
+            new_supply_id = supply_by_order.get(order['id'])
             if not new_supply_id:
-                logger.warning(f"Не найдена новая поставка для заказа {order_id} ({wild_code}, {account})")
+                logger.warning(
+                    f"Не найдена новая поставка для заказа {order['id']} "
+                    f"({order['wild_code']}, {order['account']})"
+                )
                 continue
 
-            # Создаем задачу для добавления заказа в поставку
-            supplies_api = Supplies(account, wb_tokens[account])
-            task = supplies_api.add_order_to_supply(new_supply_id, order_id, check_status=check_status)
-            tasks.append(task)
-            task_metadata.append({
-                'order_id': order_id,
-                'account': account,
-                'wild_code': wild_code,
-                'original_supply_id': order['original_supply_id'],
-                'new_supply_id': new_supply_id
-            })
+            orders_by_target[(order['account'], new_supply_id)].append(order)
 
-        # Параллельное выполнение всех запросов
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if not orders_by_target:
+            logger.warning("Нет заказов с назначенной поставкой — перемещать нечего")
+            return moved_order_ids, failed_orders
 
-        # Обработка результатов
-        moved_order_ids = []
-        failed_orders = []
+        targets = list(orders_by_target)
+        results = await asyncio.gather(
+            *(Supplies(account, wb_tokens[account]).add_orders_to_supply(
+                supply_id, [order['id'] for order in orders_by_target[(account, supply_id)]]
+            ) for account, supply_id in targets),
+            return_exceptions=True,
+        )
 
-        for metadata, result in zip(task_metadata, results):
-            order_id = metadata['order_id']
-            original_supply_id = metadata['original_supply_id']
-            new_supply_id = metadata['new_supply_id']
-            account = metadata['account']
-            wild_code = metadata['wild_code']
+        for (account, new_supply_id), result in zip(targets, results):
+            failed_by_exception = isinstance(result, Exception)
 
-            # Проверка на исключение
-            if isinstance(result, Exception):
+            if failed_by_exception:
+                accepted: Set[int] = set()
                 error_msg = f"Исключение при перемещении: {str(result)}"
-                logger.error(f"Заказ {order_id} ({account}): {error_msg}")
+                logger.error(f"Поставка {new_supply_id} ({account}): {error_msg}")
+            else:
+                accepted = result
+                error_msg = "WB не принял сборочное задание в поставку"
+
+            for order in orders_by_target[(account, new_supply_id)]:
+                order_id = order['id']
+
+                if order_id in accepted:
+                    moved_order_ids.append(order_id)
+                    logger.info(
+                        f"Заказ {order_id} ({account}, {order['wild_code']}) перемещен "
+                        f"из {order['original_supply_id']} в {new_supply_id}"
+                    )
+                    continue
+
+                logger.error(f"Заказ {order_id} ({account}) не перемещен: {error_msg}")
                 failed_orders.append({
                     'order_id': order_id,
                     'account': account,
-                    'wild_code': wild_code,
-                    'original_supply_id': original_supply_id,
+                    'wild_code': order['wild_code'],
+                    'original_supply_id': order['original_supply_id'],
                     'new_supply_id': new_supply_id,
                     'error': error_msg,
-                    'reason': 'exception'
+                    'reason': 'exception' if failed_by_exception else 'wb_api_error'
                 })
-                continue
-
-            # Проверка на ошибку в ответе WB API
-            if isinstance(result, dict) and result.get('error'):
-                error_msg = result.get('error', 'Неизвестная ошибка')
-                logger.error(f"Ошибка WB API при перемещении заказа {order_id} ({account}): {error_msg}")
-                failed_orders.append({
-                    'order_id': order_id,
-                    'account': account,
-                    'wild_code': wild_code,
-                    'original_supply_id': original_supply_id,
-                    'new_supply_id': new_supply_id,
-                    'error': error_msg,
-                    'reason': 'wb_api_error'
-                })
-                continue
-
-            # Проверка на неуспешный ответ
-            if isinstance(result, dict) and result.get('success') == False:
-                error_msg = result.get('errorText', 'Операция не выполнена')
-                logger.error(f"Неудачное перемещение заказа {order_id} ({account}): {error_msg}")
-                failed_orders.append({
-                    'order_id': order_id,
-                    'account': account,
-                    'wild_code': wild_code,
-                    'original_supply_id': original_supply_id,
-                    'new_supply_id': new_supply_id,
-                    'error': error_msg,
-                    'reason': 'unsuccessful_response'
-                })
-                continue
-
-            # Проверка на успешный ответ: пустая строка (код 204) означает успех
-            if isinstance(result, str) and result == "":
-                # Успешное перемещение (WB API вернул 204 с пустым телом)
-                moved_order_ids.append(order_id)
-                logger.info(f"Заказ {order_id} ({account}, {wild_code}) успешно перемещен из {original_supply_id} в {new_supply_id}")
-                continue
-
-            # Если result - это dict с успешным статусом, тоже считаем успехом
-            if isinstance(result, dict) and not result.get('error') and result.get('success') != False:
-                moved_order_ids.append(order_id)
-                logger.info(f"Заказ {order_id} ({account}, {wild_code}) перемещен из {original_supply_id} в {new_supply_id}")
-                continue
-
-            # Любой другой случай - ошибка
-            error_msg = f"Неожиданный ответ API: {type(result).__name__} = {result}"
-            logger.error(f"Некорректный ответ для заказа {order_id} ({account}): {error_msg}")
-            failed_orders.append({
-                'order_id': order_id,
-                'account': account,
-                'wild_code': wild_code,
-                'original_supply_id': original_supply_id,
-                'new_supply_id': new_supply_id,
-                'error': error_msg,
-                'reason': 'invalid_response_type'
-            })
 
         logger.info(f"Результат перемещения: успешно {len(moved_order_ids)}, неудачно {len(failed_orders)}")
         return moved_order_ids, failed_orders
@@ -2952,9 +2900,9 @@ class SuppliesService:
         wb_tokens = get_wb_tokens()
 
         if valid_orders:
-            # check_status=False, т.к. мы уже сделали пре-валидацию
+            # Статусы уже проверены пре-валидацией выше
             moved_order_ids, failed_movement_orders = await self._move_orders_to_supplies(
-                valid_orders, supply_by_order, wb_tokens, check_status=False
+                valid_orders, supply_by_order, wb_tokens
             )
         else:
             logger.warning("Нет валидных заказов для перемещения после проверки статусов")
