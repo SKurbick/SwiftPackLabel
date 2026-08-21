@@ -64,17 +64,7 @@ async def resolve_order_warehouses(orders_by_account: Dict[str, Iterable[int]], 
         if not missing:
             continue
 
-        try:
-            new_orders = await Orders(account, tokens.get(account)).get_new_orders()
-        except Exception as e:
-            logger.error(f"Кабинет {account}: не удалось получить склады {len(missing)} заказов ({e})")
-            continue
-
-        found = {
-            order["id"]: order["warehouseId"]
-            for order in new_orders
-            if order.get("id") in missing and order.get("warehouseId") is not None
-        }
+        found = await _warehouses_from_api(account, tokens.get(account), missing)
         warehouses.update(found)
 
         still_missing = missing - set(found)
@@ -86,6 +76,41 @@ async def resolve_order_warehouses(orders_by_account: Dict[str, Iterable[int]], 
 
     _log_distribution(wanted, warehouses)
     return warehouses
+
+
+async def _warehouses_from_api(account: str, token: Optional[str], missing: Set[int]) -> Dict[int, int]:
+    """Спрашивает склады у WB: сперва среди новых заказов, затем среди всех."""
+    found: Dict[int, int] = {}
+    orders_api = Orders(account, token)
+    sources = (("новых", orders_api.get_new_orders), ("всех", orders_api.get_orders))
+
+    for description, fetch_orders in sources:
+        remaining = missing - set(found)
+        if not remaining:
+            break
+
+        try:
+            orders = await fetch_orders()
+        except Exception as e:
+            logger.error(
+                f"Кабинет {account}: не удалось получить склады {len(remaining)} заказов "
+                f"из {description} заказов ({e})"
+            )
+            continue
+
+        batch = {
+            order["id"]: order["warehouseId"]
+            for order in orders
+            if order.get("id") in remaining and order.get("warehouseId") is not None
+        }
+        if batch:
+            logger.info(
+                f"Кабинет {account}: склад определён среди {description} заказов "
+                f"для {len(batch)} из {len(remaining)} заказов"
+            )
+        found.update(batch)
+
+    return found
 
 
 async def _warehouses_from_db(db, order_ids: Set[int]) -> Dict[int, int]:

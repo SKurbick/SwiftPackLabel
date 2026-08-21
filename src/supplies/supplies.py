@@ -2482,10 +2482,20 @@ class SuppliesService:
             # быть несколько — по одной на склад
             new_supply_id = supply_by_order.get(order['id'])
             if not new_supply_id:
-                logger.warning(
-                    f"Не найдена новая поставка для заказа {order['id']} "
-                    f"({order['wild_code']}, {order['account']})"
+                error_msg = "Не нашлось поставки для перемещения (не определён склад заказа)"
+                logger.error(
+                    f"Заказ {order['id']} ({order['account']}, {order['wild_code']}) "
+                    f"не перемещен: {error_msg}"
                 )
+                failed_orders.append({
+                    'order_id': order['id'],
+                    'account': order['account'],
+                    'wild_code': order['wild_code'],
+                    'original_supply_id': order.get('original_supply_id'),
+                    'new_supply_id': None,
+                    'error': error_msg,
+                    'reason': 'no_target_supply'
+                })
                 continue
 
             orders_by_target[(order['account'], new_supply_id)].append(order)
@@ -3424,20 +3434,21 @@ class SuppliesService:
 
         # В финальном режиме, если отгрузка успешна, добавляем заблокированные заказы
         if move_to_final and shipment_success:
-            blocked_order_ids = []
-            # Добавляем ID из invalid_status_orders
+            blocked_order_ids = []         
             for order in invalid_status_orders:
-                order_id = order.get('order_id', order.get('id'))
-                if order_id:
-                    blocked_order_ids.append(order_id)
-            # Добавляем ID из failed_movement_orders
-            for order in failed_movement_orders:
                 order_id = order.get('order_id', order.get('id'))
                 if order_id:
                     blocked_order_ids.append(order_id)
 
             final_removed_order_ids.extend(blocked_order_ids)
             logger.info(f"Добавлено {len(blocked_order_ids)} заблокированных заказов в removed_order_ids (финальный режим, успешная отгрузка)")
+
+        if failed_movement_orders:
+            logger.warning(
+                f"{len(failed_movement_orders)} заказов не перемещены и не отгружены — "
+                f"остаются в сессии для повторной попытки: "
+                f"{[o.get('order_id', o.get('id')) for o in failed_movement_orders][:20]}"
+            )
 
         return {
             "success": True,
