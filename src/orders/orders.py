@@ -15,7 +15,7 @@ from src.models.article import ArticleDB
 from src.models.stock import StockDB
 from src.models.hanging_supplies import HangingSupplies
 from src.models.qr_scan_db import QRScanDB
-from src.response import AsyncHttpClient
+from src.response import AsyncHttpClient, parse_json
 from src.settings import settings
 from src.wildberries_api.supplies import Supplies
 from src.service.qr_direct_processor import QRDirectProcessor
@@ -310,6 +310,37 @@ class OrdersService:
         filtered = self.filter_blocked_wilds(filtered)
         return self.sort_orders(filtered)
 
+    async def _fetch_actual_stocks(self, wilds: List[str]) -> Dict[str, int]:
+        """
+        Забирает остатки с учётом резервов из 1c_routing.
+        """
+        if not wilds:
+            return {}
+
+        try:
+            response = await self.async_client.get(settings.BALANCES_API_URL)
+            balances = parse_json(response)
+        except Exception as e:
+            logger.error(f"Не удалось получить остатки из 1c_routing ({e}), останемся на данных БД")
+            return {}
+
+        if not isinstance(balances, list):
+            logger.error(f"Неожиданный формат остатков из 1c_routing: {type(balances).__name__}")
+            return {}
+
+        wanted = set(wilds)
+        actual = {
+            row["product_id"]: int(row["available_quantity"])
+            for row in balances
+            if isinstance(row, dict)
+            and row.get("warehouse_id") == settings.BALANCES_WAREHOUSE_ID
+            and row.get("product_id") in wanted
+            and row.get("available_quantity") is not None
+        }
+
+        logger.info(f"Остатки из 1c_routing получены для {len(actual)} из {len(wanted)} артикулов")
+        return actual
+
     async def group_orders_by_wild(self, order_list):
         """
         Группирует заказы по артикулу wild с добавлением информации из get_information_to_data
@@ -330,10 +361,12 @@ class OrdersService:
             order_dict["wild_name"] = wild_data.get(order.article, "")
             temp_grouped_orders[order.article].append(order_dict)
 
-        all_stocks_current = await stock_db.get_current_by_wilds(list(temp_grouped_orders.keys()))
-        all_stocks_no_current = await stock_db.get_stocks_by_wilds(list(temp_grouped_orders.keys()))
+        wilds = list(temp_grouped_orders.keys())
+        all_stocks_current = await stock_db.get_current_by_wilds(wilds)
+        all_stocks_no_current = await stock_db.get_stocks_by_wilds(wilds)
 
         all_stocks_no_current.update(all_stocks_current)
+        all_stocks_no_current.update(await self._fetch_actual_stocks(wilds))
 
         for wild, orders in temp_grouped_orders.items():
             api_name = next((item.get('subject_name', 'Нет наименования из API')

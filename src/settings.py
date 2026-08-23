@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Настройки API отгрузки
     SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/update")
     
+    BALANCES_API_URL: str = os.getenv("BALANCES_API_URL")
+    BALANCES_WAREHOUSE_ID: int = int(os.getenv("BALANCES_WAREHOUSE_ID", 1))
+
     # Настройки резервации товаров для висячих поставок
     PRODUCT_RESERVATION_API_URL: str = os.getenv("PRODUCT_RESERVATION_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/create_reserve")
     PRODUCT_RESERVATION_WAREHOUSE_ID: int = int(os.getenv("PRODUCT_RESERVATION_WAREHOUSE_ID", 1))
