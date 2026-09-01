@@ -46,6 +46,7 @@ from src.supplies.schema import (
     SupplyIdWithShippedBodySchema
 )
 
+from src.sticker_log import log_stickers_issued
 
 class SuppliesService:
 
@@ -655,14 +656,34 @@ class SuppliesService:
         return finished_orders
 
     @staticmethod
-    async def get_stickers(supplies_ids: SupplyIdBodySchema):
+    async def get_stickers(supplies_ids: SupplyIdBodySchema, operator: str = None):
         tasks = []
         for supply in supplies_ids.supplies:
             tasks.append(
                 Orders(supply.account, settings.tokens[supply.account]).get_stickers_to_orders(supply.supply_id,
                                                                                                [v.order_id for v in
                                                                                                 supply.orders]))
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+
+        try:
+            for supply, res in zip(supplies_ids.supplies, results):
+                received = set()
+                if isinstance(res, dict):
+                    received = set(
+                        (res.get(supply.account) or {}).get(supply.supply_id, {})
+                        .get("_received_order_ids") or []
+                    )
+                log_stickers_issued(
+                    orders=[(o.order_id, getattr(o, "local_vendor_code", None), o.order_id in received)
+                            for o in supply.orders],
+                    supply_id=supply.supply_id,
+                    account=supply.account,
+                    operator=operator,
+                )
+        except Exception as e:
+            logger.warning(f"не удалось записать инфу по выдаче стикеро в файл: {e}")
+
+        return results
 
     @staticmethod
     def union_results_stickers(supply_orders: SupplyIdBodySchema, stickers: Dict[str, Dict]):
@@ -1429,7 +1450,8 @@ class SuppliesService:
 
         return SupplyDeleteResponse(deleted=deleted_ids)
 
-    async def filter_and_fetch_stickers_by_wild(self, wild_filter: WildFilterRequest) -> Dict[
+    async def filter_and_fetch_stickers_by_wild(self, wild_filter: WildFilterRequest,
+                                                operator: str = None) -> Dict[
         str, List[Dict[str, Any]]]:
         """
         Фильтрует заказы по указанному wild и получает для них стикеры.
@@ -1474,7 +1496,8 @@ class SuppliesService:
 
         supply_ids_body = SupplyIdBodySchema(supplies=supplies_list)
 
-        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids_body))
+        stickers: Dict[str, Dict] = self.group_result(
+            await self.get_stickers(supply_ids_body, operator=operator))
         self.union_results_stickers(supply_ids_body, stickers)
 
         result = await self.group_orders_to_wild(supply_ids_body)
