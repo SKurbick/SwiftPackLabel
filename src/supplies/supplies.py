@@ -1414,10 +1414,11 @@ class SuppliesService:
         if enriched_count > 0:
             logger.info(f"Обогащено {enriched_count} заказов данными createdAt")
 
-    async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False) -> Dict[str, List[Dict[str, Any]]]:
+    async def filter_and_fetch_stickers(self, supply_ids: SupplyIdBodySchema, allow_partial: bool = False,
+                                        operator: str = None) -> Dict[str, List[Dict[str, Any]]]:
         logger.info('Инициализация получение документов (Стикеры и Лист подбора)')
         await self.check_current_orders(supply_ids, allow_partial)
-        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids))
+        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids, operator=operator))
         self.union_results_stickers(supply_ids, stickers)
         return await self.group_orders_to_wild(supply_ids)
 
@@ -3870,7 +3871,8 @@ class SuppliesService:
                 )
 
             supply_ids_schema = SupplyIdBodySchema(supplies=supplies_list)
-            stickers_raw = await self.get_stickers(supply_ids_schema)
+            stickers_raw = await self.get_stickers(
+                supply_ids_schema, operator=operator or user.get('username'))
             stickers_grouped = self.group_result(stickers_raw)
 
             # 3. Извлекаем _received_order_ids
@@ -4665,7 +4667,8 @@ class SuppliesService:
         # 5.5. Генерируем стикеры для выбранных заказов
         logger.info(f"Запрос стикеров для {len(selected_orders)} выбранных заказов")
         supply_ids_schema = self._convert_selected_orders_to_supply_schema(selected_orders, supplies)
-        stickers_raw = await self.get_stickers(supply_ids_schema)
+        stickers_raw = await self.get_stickers(
+            supply_ids_schema, operator=operator or user.get('username'))
         stickers_grouped = self.group_result(stickers_raw)
 
         # 5.6. Извлекаем список order_ids которые РЕАЛЬНО получили стикеры от WB API
