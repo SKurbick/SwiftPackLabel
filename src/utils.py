@@ -1,18 +1,10 @@
 import re
 from datetime import datetime
-from pathlib import Path
 from fastapi import HTTPException
 from src.excel_data.service import ExcelDataService
-import json
 from src.logger import app_logger as logger
-from typing import Callable
+from src.settings import get_wb_tokens  # noqa: F401  (реэкспорт: исторический адрес функции)
 from functools import wraps
-
-
-def get_wb_tokens() -> dict:
-    tokens_path = Path(__file__).parent / "tokens.json"
-    with tokens_path.open("r", encoding="utf-8") as file:
-        return json.load(file)
 
 
 def process_local_vendor_code(s):

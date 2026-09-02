@@ -46,7 +46,7 @@ async def download_archives(
             detail="Архивы не найдены"
         )
 
-    return create_archive_response(archives_list)
+    return await create_archive_response(archives_list)
     
     
 @archive.delete(

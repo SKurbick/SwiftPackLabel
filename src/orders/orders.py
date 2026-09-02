@@ -15,10 +15,21 @@ from src.models.article import ArticleDB
 from src.models.stock import StockDB
 from src.models.hanging_supplies import HangingSupplies
 from src.models.qr_scan_db import QRScanDB
-from src.response import AsyncHttpClient
+from src.response import AsyncHttpClient, parse_json
 from src.settings import settings
 from src.wildberries_api.supplies import Supplies
 from src.service.qr_direct_processor import QRDirectProcessor
+from src.service.warehouses import (
+    group_by_account_and_warehouse,
+    load_warehouse_names,
+    needs_warehouse_marker,
+    resolve_order_warehouses,
+    supply_name_with_warehouse,
+)
+
+# Максимум заказов в одном запросе статусов к WB (ограничение их API)
+WB_ORDERS_STATUS_BATCH_SIZE = 1000
+
 from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAccountWildOut, GroupedOrderInfoWithFact, \
     OrderDetail, WildInfo, SupplyInfo
 from src.orders.constants_to_block import BLOCKED_WILDS
@@ -35,7 +46,7 @@ class OrdersService:
         """
         self.db = db
         self.article_db = ArticleDB(db) if db else None
-        self.async_client = AsyncHttpClient(timeout=30, retries=3, delay=5)
+        self.async_client = AsyncHttpClient(timeout=30, max_attempts=3)
 
     async def get_all_new_orders(self) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -299,6 +310,37 @@ class OrdersService:
         filtered = self.filter_blocked_wilds(filtered)
         return self.sort_orders(filtered)
 
+    async def _fetch_actual_stocks(self, wilds: List[str]) -> Dict[str, int]:
+        """
+        Забирает остатки с учётом резервов из 1c_routing.
+        """
+        if not wilds:
+            return {}
+
+        try:
+            response = await self.async_client.get(settings.BALANCES_API_URL)
+            balances = parse_json(response)
+        except Exception as e:
+            logger.error(f"Не удалось получить остатки из 1c_routing ({e}), останемся на данных БД")
+            return {}
+
+        if not isinstance(balances, list):
+            logger.error(f"Неожиданный формат остатков из 1c_routing: {type(balances).__name__}")
+            return {}
+
+        wanted = set(wilds)
+        actual = {
+            row["product_id"]: int(row["available_quantity"])
+            for row in balances
+            if isinstance(row, dict)
+            and row.get("warehouse_id") == settings.BALANCES_WAREHOUSE_ID
+            and row.get("product_id") in wanted
+            and row.get("available_quantity") is not None
+        }
+
+        logger.info(f"Остатки из 1c_routing получены для {len(actual)} из {len(wanted)} артикулов")
+        return actual
+
     async def group_orders_by_wild(self, order_list):
         """
         Группирует заказы по артикулу wild с добавлением информации из get_information_to_data
@@ -319,10 +361,12 @@ class OrdersService:
             order_dict["wild_name"] = wild_data.get(order.article, "")
             temp_grouped_orders[order.article].append(order_dict)
 
-        all_stocks_current = await stock_db.get_current_by_wilds(list(temp_grouped_orders.keys()))
-        all_stocks_no_current = await stock_db.get_stocks_by_wilds(list(temp_grouped_orders.keys()))
+        wilds = list(temp_grouped_orders.keys())
+        all_stocks_current = await stock_db.get_current_by_wilds(wilds)
+        all_stocks_no_current = await stock_db.get_stocks_by_wilds(wilds)
 
         all_stocks_no_current.update(all_stocks_current)
+        all_stocks_no_current.update(await self._fetch_actual_stocks(wilds))
 
         for wild, orders in temp_grouped_orders.items():
             api_name = next((item.get('subject_name', 'Нет наименования из API')
@@ -369,71 +413,142 @@ class OrdersService:
 
         return filtered_orders_by_sku
 
-    @staticmethod
-    def _collect_unique_accounts(filtered_orders: Dict[str, List[OrderDetail]]) -> Set[str]:
+    async def _fetch_order_warehouses(self, filtered_orders: Dict[str, List[OrderDetail]]) -> Dict[int, int]:
         """
-        Собирает все уникальные аккаунты из отфильтрованных заказов.
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
+
         Returns:
-            Set[str]: Множество уникальных аккаунтов
+            Dict[int, int]: {id заказа: id склада}
         """
-        unique_accounts = set()
+        order_ids_by_account: Dict[str, Set[int]] = defaultdict(set)
         for orders in filtered_orders.values():
             for order in orders:
-                unique_accounts.add(order.account)
-        return unique_accounts
+                order_ids_by_account[order.account].add(order.id)
+
+        return await resolve_order_warehouses(order_ids_by_account, self.db)
+
+    async def _create_supplies_by_warehouse(self, filtered_orders: Dict[str, List[OrderDetail]],
+                                            order_warehouses: Dict[int, int],
+                                            supply_name: str) -> Dict[int, str]:
+        """
+        Создаёт по поставке на каждую пару «кабинет + склад».
+
+        Args:
+            filtered_orders: Отфильтрованные заказы по SKU
+            order_warehouses: Склад по каждому заказу
+            supply_name: Наименование поставки
+
+        Returns:
+            Dict[int, str]: {id заказа: id поставки, в которую его класть}
+        """
+        order_ids_by_account: Dict[str, List[int]] = defaultdict(list)
+        for orders in filtered_orders.values():
+            for order in orders:
+                order_ids_by_account[order.account].append(order.id)
+
+        groups = group_by_account_and_warehouse(order_ids_by_account, order_warehouses)
+        if not groups:
+            logger.warning("Не удалось определить склад ни у одного заказа — поставки не создаются")
+            return {}
+
+        marker_needed = needs_warehouse_marker(groups)
+        warehouse_names = await load_warehouse_names(self.db, {account for account, _ in groups})
+
+        tokens = get_wb_tokens()
+        group_keys = list(groups)
+        names_by_group = {
+            (account, warehouse_id): (
+                supply_name_with_warehouse(supply_name, warehouse_id, warehouse_names)
+                if marker_needed.get(account) else supply_name
+            )
+            for account, warehouse_id in group_keys
+        }
+
+        results = await asyncio.gather(
+            *(Supplies(account, tokens.get(account)).create_supply(names_by_group[(account, warehouse_id)])
+              for account, warehouse_id in group_keys),
+            return_exceptions=True,
+        )
+
+        supply_by_order: Dict[int, str] = {}
+        for (account, warehouse_id), result in zip(group_keys, results):
+            order_ids = groups[(account, warehouse_id)]
+
+            if isinstance(result, Exception):
+                logger.error(
+                    f"Кабинет {account}, склад {warehouse_id}: исключение при создании поставки "
+                    f"({result}), {len(order_ids)} заказов не будут добавлены"
+                )
+                continue
+            if not isinstance(result, dict) or 'id' not in result:
+                logger.error(
+                    f"Кабинет {account}, склад {warehouse_id}: поставка не создана ({result}), "
+                    f"{len(order_ids)} заказов не будут добавлены"
+                )
+                continue
+
+            supply_id = result['id']
+            supply_by_order.update({order_id: supply_id for order_id in order_ids})
+            logger.info(
+                f"Создана поставка {supply_id} '{names_by_group[(account, warehouse_id)]}' "
+                f"для кабинета {account}, склад {warehouse_id} ({len(order_ids)} заказов)"
+            )
+
+        return supply_by_order
 
     @staticmethod
-    def _process_supply_creation_results(accounts: List[str], results: List[Any]) -> Dict[str, str]:
+    async def _validate_orders_for_supplies(orders_by_supply: Dict[tuple, List[int]],
+                                            tokens: Dict[str, str]) -> Set[int]:
         """
-        Обрабатывает результаты создания поставок.
-        Args:
-            accounts: Список аккаунтов, для которых создавались поставки
-            results: Список результатов выполнения задач
-        Returns:
-            Dict[str, str]: Словарь с маппингом аккаунта на ID поставки
-        """
-        supply_by_account = {}
-        for account, result in zip(accounts, results):
-            if isinstance(result, Exception):
-                logger.error(f"Исключение при создании поставки для аккаунта {account}: {str(result)}")
-            elif 'id' in result:
-                supply_by_account[account] = result['id']
-                logger.info(f"Создана поставка {result['id']} для аккаунта {account}")
-            else:
-                logger.error(f"Ошибка создания поставки для аккаунта {account}: {result}")
-        return supply_by_account
+        Проверяет статусы батчем пачками и возвращает те, что можно добавить в поставку."""
+        orders_by_account: Dict[str, List[int]] = defaultdict(list)
+        for (account, _), order_ids in orders_by_supply.items():
+            orders_by_account[account].extend(order_ids)
 
-    async def _create_supplies_for_accounts(self, accounts: Set[str], supply_name: str) -> Dict[str, str]:
-        """
-        Создает поставки для каждого уникального аккаунта параллельно.
-        Args:
-            accounts: Множество уникальных аккаунтов
-            supply_name: Название поставки
-        Returns:
-            Dict[str, str]: Словарь с маппингом аккаунта на ID поставки
-        """
-        account_tasks = []
-        valid_accounts = []
+        allowed: Set[int] = set()
 
-        for account in accounts:
-            valid_accounts.append(account)
-            account_tasks.append(Supplies(account, get_wb_tokens()[account]).create_supply(supply_name))
+        for account, order_ids in orders_by_account.items():
+            orders_api = Orders(account, tokens.get(account))
+            try:
+                statuses: Dict[int, Dict[str, Any]] = {}
+                for start in range(0, len(order_ids), WB_ORDERS_STATUS_BATCH_SIZE):
+                    batch = order_ids[start:start + WB_ORDERS_STATUS_BATCH_SIZE]
+                    statuses.update(await orders_api.can_add_to_supply_batch(batch))
 
-        results = await asyncio.gather(*account_tasks, return_exceptions=True)
-        return self._process_supply_creation_results(valid_accounts, results)
+                blocked = {
+                    order_id: info.get("supplier_status", "unknown")
+                    for order_id, info in statuses.items()
+                    if not info.get("can_add")
+                }
+                allowed.update(order_id for order_id, info in statuses.items() if info.get("can_add"))
+
+                logger.info(
+                    f"Кабинет {account}: к добавлению пригодны {len(order_ids) - len(blocked)} "
+                    f"из {len(order_ids)} заказов "
+                    f"(запросов на проверку: {(len(order_ids) - 1) // WB_ORDERS_STATUS_BATCH_SIZE + 1})"
+                )
+                if blocked:
+                    logger.warning(f"Кабинет {account}: не будут добавлены {blocked}")
+
+            except Exception as e:
+                logger.error(
+                    f"Кабинет {account}: не удалось проверить статусы {len(order_ids)} заказов ({e}). "
+                    f"Заказы этого кабинета в поставку не добавляются"
+                )
+
+        return allowed
 
     @staticmethod
     async def _add_orders_to_supplies(filtered_orders: Dict[str, List[OrderDetail]],
-                                      supply_by_account: Dict[str, str],
+                                      supply_by_order: Dict[int, str],
                                       orders_added_by_article: Dict[str, List[int]],
                                       order_supply_mapping: Dict[int, Dict[str, str]]) -> None:
         """
         Добавляет отфильтрованные заказы в созданные поставки и отслеживает информацию о добавленных заказах.
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            supply_by_order: Словарь с маппингом заказа на ID его поставки
             orders_added_by_article: Словарь для отслеживания успешно добавленных заказов по артикулу
             order_supply_mapping: Словарь для отслеживания, к какой поставке и аккаунту относится заказ
         """
@@ -442,43 +557,52 @@ class OrdersService:
 
         for article, orders in filtered_orders.items():
             for order in orders:
-                account = order.account
-                if account not in supply_by_account:
-                    logger.warning(f"Пропуск заказа {order.id}: не создана поставка для аккаунта {account}")
+                supply_id = supply_by_order.get(order.id)
+                if supply_id is None:
+                    logger.warning(f"Пропуск заказа {order.id}: для него не создана поставка")
                     continue
 
-                supply_id = supply_by_account[account]
-                orders_by_supply[(account, supply_id)].append(order.id)
+                orders_by_supply[(order.account, supply_id)].append(order.id)
                 order_article_map[order.id] = article
+
+        tokens = get_wb_tokens()
+        allowed_orders = await OrdersService._validate_orders_for_supplies(orders_by_supply, tokens)
 
         add_order_tasks = []
         task_info = []
-        tokens = get_wb_tokens()
 
         for (account, supply_id), order_ids in orders_by_supply.items():
+            batch = [order_id for order_id in order_ids if order_id in allowed_orders]
+            if not batch:
+                continue
+
             supplies_service = Supplies(account, tokens.get(account))
-            for order_id in order_ids:
-                task = supplies_service.add_order_to_supply(supply_id, order_id)
-                add_order_tasks.append(task)
-                task_info.append((account, supply_id, order_id))
+            add_order_tasks.append(supplies_service.add_orders_to_supply(supply_id, batch))
+            task_info.append((account, supply_id, batch))
 
         if not add_order_tasks:
             return
 
         results = await asyncio.gather(*add_order_tasks, return_exceptions=True)
-        for (account, supply_id, order_id), result in zip(task_info, results):
+        for (account, supply_id, batch), result in zip(task_info, results):
             if isinstance(result, Exception):
-                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
+                logger.error(f"Ошибка при добавлении {len(batch)} заказов в поставку {supply_id} "
                              f"для аккаунта {account}: {result}")
-            elif result and 'error' in result:
-                logger.error(f"Ошибка при добавлении заказа {order_id} в поставку {supply_id} "
-                             f"для аккаунта {account}: {result['error']}")
-            elif article := order_article_map.get(order_id):
-                orders_added_by_article[article].append(order_id)
-                order_supply_mapping[order_id] = {
-                    'supply_id': supply_id,
-                    'account': account
-                }
+                continue
+
+            for order_id in batch:
+                if order_id not in result:
+                    continue
+                if article := order_article_map.get(order_id):
+                    orders_added_by_article[article].append(order_id)
+                    order_supply_mapping[order_id] = {
+                        'supply_id': supply_id,
+                        'account': account
+                    }
+
+            if missing := [order_id for order_id in batch if order_id not in result]:
+                logger.error(f"Не добавлены в поставку {supply_id} для аккаунта {account}: "
+                             f"{len(missing)} из {len(batch)} заказов {missing[:20]}")
 
     @staticmethod
     def _prepare_result(orders_added_by_article: Dict[str, List[int]] = None,
@@ -525,12 +649,17 @@ class OrdersService:
         )
 
     async def _save_hanging_supplies(self, filtered_orders: Dict[str, List[OrderDetail]],
-                                     supply_by_account: Dict[str, str], operator: str = 'unknown') -> None:
+                                     order_supply_mapping: Dict[int, Dict[str, str]],
+                                     operator: str = 'unknown') -> None:
         """
         Сохраняет информацию о висячих поставках в БД.
+
+        Записываются только заказы, которые WB принял в поставку: заказ, не
+        доехавший до WB, в составе висячей поставки числиться не должен.
+
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
             operator: Имя пользователя (оператора), создавшего висячую поставку
         """
 
@@ -538,10 +667,10 @@ class OrdersService:
         for orders in filtered_orders.values():
             for order in orders:
                 account = order.account
-                if account not in supply_by_account:
+                supply_id = order_supply_mapping.get(order.id, {}).get('supply_id')
+                if supply_id is None:
                     continue
 
-                supply_id = supply_by_account[account]
                 if (supply_id, account) not in orders_by_supply:
                     orders_by_supply[(supply_id, account)] = []
 
@@ -558,15 +687,15 @@ class OrdersService:
     @staticmethod
     def _group_orders_by_product_and_account(
             filtered_orders: Dict[str, List[OrderDetail]],
-            supply_by_account: Dict[str, str]
+            order_supply_mapping: Dict[int, Dict[str, str]]
     ) -> tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, str]]]:
         """
         Группирует заказы по артикулам и аккаунтам для подсчета количества.
-        
+
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_account: Словарь с маппингом аккаунта на ID поставки
-            
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
+
         Returns:
             tuple: (product_quantities, product_supply_ids)
                 - product_quantities: {wild_code: {account: quantity}}
@@ -579,7 +708,7 @@ class OrdersService:
             for order in orders:
                 wild_code = order.article
                 account = order.account
-                supply_id = supply_by_account.get(account)
+                supply_id = order_supply_mapping.get(order.id, {}).get('supply_id')
 
                 if supply_id:
                     product_quantities[wild_code][account] += 1
@@ -700,7 +829,7 @@ class OrdersService:
     async def _reserve_products_for_hanging_supplies(
             self,
             filtered_orders: Dict[str, List[OrderDetail]],
-            supply_by_account: Dict[str, str],
+            order_supply_mapping: Dict[int, Dict[str, str]],
             operator: str = 'unknown',
             is_hanging: bool = False
     ) -> Dict[str, Any]:
@@ -711,7 +840,7 @@ class OrdersService:
 
         Args:
             filtered_orders: Отфильтрованные заказы по SKU
-            supply_by_account: Словарь с маппингом аккаунта на ID поставки
+            order_supply_mapping: Маппинг фактически добавленного заказа на его поставку
             operator: Имя пользователя (оператора), создавшего технический круг
             is_hanging: Флаг висячего круга (True - висячий, False - обычный технический)
 
@@ -723,7 +852,7 @@ class OrdersService:
             logger.info(f"Начало процесса создания резерва товаров для {circle_type} круга. Оператор: {operator}")
 
             product_quantities, product_supply_ids = self._group_orders_by_product_and_account(
-                filtered_orders, supply_by_account
+                filtered_orders, order_supply_mapping
             )
 
             reserve_date, expires_at = self._generate_reservation_dates()
@@ -765,10 +894,22 @@ class OrdersService:
         orders_added_by_article = defaultdict(list)
         order_supply_mapping = {}
         filtered_orders_by_sku = self._filter_orders_by_fact_count(input_data.orders)
-        unique_accounts = self._collect_unique_accounts(filtered_orders_by_sku)
-        supply_by_account = await self._create_supplies_for_accounts(unique_accounts, input_data.name_supply)
-        await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_account, orders_added_by_article,
+        order_warehouses = await self._fetch_order_warehouses(filtered_orders_by_sku)
+        supply_by_order = await self._create_supplies_by_warehouse(
+            filtered_orders_by_sku, order_warehouses, input_data.name_supply
+        )
+        await self._add_orders_to_supplies(filtered_orders_by_sku, supply_by_order, orders_added_by_article,
                                            order_supply_mapping)
+
+        requested_count = sum(len(orders) for orders in filtered_orders_by_sku.values())
+        added_count = len(order_supply_mapping)
+        if added_count < requested_count:
+            logger.error(
+                f"Круг '{input_data.name_supply}': в поставки добавлено {added_count} "
+                f"из {requested_count} отобранных заказов, потеряно {requested_count - added_count}"
+            )
+        else:
+            logger.info(f"Круг '{input_data.name_supply}': в поставки добавлены все {added_count} заказов")
 
         # Обрабатываем QR-коды для успешно добавленных заказов
         if orders_added_by_article:
@@ -776,12 +917,12 @@ class OrdersService:
 
         # Если поставки висячие, сохраняем информацию в БД
         if input_data.is_hanging and self.db:
-            await self._save_hanging_supplies(filtered_orders_by_sku, supply_by_account, operator)
+            await self._save_hanging_supplies(filtered_orders_by_sku, order_supply_mapping, operator)
 
         # Резервируем товары для ВСЕХ технических кругов (независимо от флага is_hanging)
         if self.db:
             reservation_result = await self._reserve_products_for_hanging_supplies(
-                filtered_orders_by_sku, supply_by_account, operator, input_data.is_hanging
+                filtered_orders_by_sku, order_supply_mapping, operator, input_data.is_hanging
             )
             logger.info(f"Результат резервации товаров: {reservation_result}")
 

@@ -76,10 +76,11 @@ async def upload_stickers_to_orders(
             - selection_sheet.pdf: PDF с листом подбора
     """
     supplies_service = SuppliesService(db)
-    result_stickers = await supplies_service.filter_and_fetch_stickers(supply_ids, allow_partial)
+    result_stickers = await supplies_service.filter_and_fetch_stickers(
+        supply_ids, allow_partial, operator=user.get('username'))
     selection_sheet_content = await create_table_pdf(result_stickers)
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
-    zip_buffer = create_zip_archive({
+    zip_buffer = await create_zip_archive({
         "stickers.pdf": pdf_sticker.getvalue(),
         "selection_sheet.pdf": selection_sheet_content.getvalue()
     })
@@ -112,7 +113,8 @@ async def generate_stickers_by_wild(
         StreamingResponse: PDF-файл со стикерами для печати
     """
     supplies_service = SuppliesService(db)
-    result_stickers = await supplies_service.filter_and_fetch_stickers_by_wild(wild_filter)
+    result_stickers = await supplies_service.filter_and_fetch_stickers_by_wild(
+        wild_filter, operator=user.get('username'))
     pdf_sticker = await collect_images_sticker_to_pdf(result_stickers)
 
     return StreamingResponse(

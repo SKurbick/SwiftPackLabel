@@ -2,7 +2,7 @@ import asyncio
 import json
 from src.logger import app_logger as logger
 from src.users.account import Account
-from src.response import parse_json
+from src.response import ensure_response, parse_json
 
 
 
@@ -27,8 +27,6 @@ class Orders(Account):
         :param order_id: ID сборочного задания
         :return: True если можно добавить, False если нельзя
         """
-        self.async_client.retries = 90
-        self.async_client.delay = 61
         try:
             # Получаем статус заказа
             orders_response = await self.get_orders_statuses([order_id])
@@ -74,9 +72,6 @@ class Orders(Account):
                 f"can_add_to_supply_batch() поддерживает максимум 1000 заказов за запрос. "
                 f"Получено: {len(order_ids)}. Используйте батчинг."
             )
-
-        self.async_client.retries = 90
-        self.async_client.delay = 61
 
         try:
             # Получаем статусы всех заказов одним запросом (WB API поддерживает до 1000 заказов)
@@ -184,34 +179,35 @@ class Orders(Account):
 
         return result
 
-    async def get_new_orders(self):
-        """Gets new orders from WB API."""
+    async def _collect_paginated_orders(self, url: str, description: str) -> list:
+        """Постранично забирает заказы по указанному URL."""
         orders = []
         next_value = 0
+        seen_cursors = set()
         while True:
             params = {"limit": 1000, "next": next_value}
-            response = await self.async_client.get(f"{self.url}/new", params=params, headers=self.headers)
-            data = parse_json(response)
-            orders.extend(data.get("orders", []))
+            response = await self.async_client.get(url, params=params, headers=self.headers)
+            data = parse_json(ensure_response(response, f"{description} ({self.account})"))
+            orders.extend(data.get("orders") or [])
+
             next_value = data.get("next")
-            logger.info(f"Got {len(orders)} new orders and next {next_value}, account {self.account}")
+            logger.info(f"Got {len(orders)} {description} and next {next_value}, account {self.account}")
             if not next_value:
                 break
+            if next_value in seen_cursors:
+                logger.error(
+                    f"WB повторил курсор {next_value} для кабинета {self.account}, "
+                    f"останавливаем пагинацию на {len(orders)} заказах"
+                )
+                break
+            seen_cursors.add(next_value)
 
         return orders
+
+    async def get_new_orders(self):
+        """Gets new orders from WB API."""
+        return await self._collect_paginated_orders(f"{self.url}/new", "new orders")
 
     async def get_orders(self):
         """Gets all orders from WB API."""
-        orders = []
-        next_value = 0
-        while True:
-            params = {"limit": 1000, "next": next_value}
-            response = await self.async_client.get(f"{self.url}", params=params, headers=self.headers)
-            data = parse_json(response)
-            orders.extend(data.get("orders", []))
-            next_value = data.get("next")
-            logger.info(f"Got {len(orders)} orders and next {next_value}, account {self.account}")
-            if not next_value:
-                break
-
-        return orders
+        return await self._collect_paginated_orders(self.url, "orders")

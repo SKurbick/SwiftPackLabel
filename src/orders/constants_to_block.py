@@ -38,5 +38,7 @@ BLOCKED_WILDS = {
     "wild1895",
     "wild1896",
     "wild1892",
-    "wild1886"
+    "wild1886",
+    "wild1889",
+    "wild1891"
 }

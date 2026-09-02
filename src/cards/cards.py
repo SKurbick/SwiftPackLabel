@@ -22,7 +22,7 @@ class CardsService:
             db: Соединение с базой данных (опционально)
         """
         self.db = db
-        self.async_client = AsyncHttpClient(timeout=30, retries=2, delay=1)
+        self.async_client = AsyncHttpClient(timeout=30, max_attempts=3)
 
     async def get_vendor_codes_by_wild(self, wild: str) -> List[str]:
         """

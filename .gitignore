@@ -9,3 +9,5 @@ DOC_ANALYTICS
 docker-compose.local.yml
 .env
 text.txt
+/fix_bugs
+src/logging/stickers/

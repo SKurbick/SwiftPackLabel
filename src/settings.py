@@ -1,11 +1,19 @@
+import json
 import os
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from src.utils import get_wb_tokens
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def get_wb_tokens() -> dict:
+    """Читает токены кабинетов"""
+    tokens_path = Path(__file__).parent / "tokens.json"
+    with tokens_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 class Settings(BaseSettings):
@@ -62,6 +70,9 @@ class Settings(BaseSettings):
     # Настройки API отгрузки
     SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/update")
     
+    BALANCES_API_URL: str = os.getenv("BALANCES_API_URL")
+    BALANCES_WAREHOUSE_ID: int = int(os.getenv("BALANCES_WAREHOUSE_ID", 1))
+
     # Настройки резервации товаров для висячих поставок
     PRODUCT_RESERVATION_API_URL: str = os.getenv("PRODUCT_RESERVATION_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/create_reserve")
     PRODUCT_RESERVATION_WAREHOUSE_ID: int = int(os.getenv("PRODUCT_RESERVATION_WAREHOUSE_ID", 1))
@@ -78,6 +89,27 @@ class Settings(BaseSettings):
     RABBITMQ_PASSWORD: str = os.getenv("RABBITMQ_PASSWORD", "")
     RABBITMQ_VHOST: str = os.getenv("RABBIT_VHOST", "/")
     RABBITMQ_ENABLED: bool = os.getenv("RABBITMQ_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+
+    HTTP_TIMEOUT_SEC: float = float(os.getenv("HTTP_TIMEOUT_SEC", 120))
+    HTTP_MAX_ATTEMPTS: int = int(os.getenv("HTTP_MAX_ATTEMPTS", 4))
+    HTTP_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv("HTTP_RETRY_BACKOFF_BASE_SEC", 1.0))
+    HTTP_RETRY_BACKOFF_MAX_SEC: float = float(os.getenv("HTTP_RETRY_BACKOFF_MAX_SEC", 30.0))
+    HTTP_RETRY_AFTER_MAX_SEC: float = float(os.getenv("HTTP_RETRY_AFTER_MAX_SEC", 60.0))
+    # Пауза после 429, когда сервер не прислал Retry-After: лимиты WB живут в
+    # минутном окне, повтор через секунду упрётся в тот же 429 и сожжёт попытку
+    HTTP_RATE_LIMIT_BACKOFF_BASE_SEC: float = float(os.getenv("HTTP_RATE_LIMIT_BACKOFF_BASE_SEC", 10.0))
+    HTTP_RATE_LIMIT_MAX_ATTEMPTS: int = int(os.getenv("HTTP_RATE_LIMIT_MAX_ATTEMPTS", 6))
+    HTTP_THROTTLE_MAX_WAIT_SEC: float = float(os.getenv("HTTP_THROTTLE_MAX_WAIT_SEC", 120.0))
+    HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST: int = int(os.getenv("HTTP_MAX_CONCURRENT_REQUESTS_PER_HOST", 8))
+    HTTP_CONNECTION_POOL_SIZE: int = int(os.getenv("HTTP_CONNECTION_POOL_SIZE", 100))
+
+    # 1с
+    ONEC_TIMEOUT_SEC: float = float(os.getenv("ONEC_TIMEOUT_SEC", 240))
+    ONEC_MAX_ATTEMPTS: int = int(os.getenv("ONEC_MAX_ATTEMPTS", 5))
+    ONEC_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv("ONEC_RETRY_BACKOFF_BASE_SEC", 5.0))
+
+    # Пул потоков воркеркс
+    BLOCKING_POOL_MAX_WORKERS: int = int(os.getenv("BLOCKING_POOL_MAX_WORKERS", 8))
 
     DIAGNOSTICS_ENABLED: bool = os.getenv("DIAGNOSTICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
     DIAGNOSTICS_LOG_INTERVAL_SEC: int = int(os.getenv("DIAGNOSTICS_LOG_INTERVAL_SEC", 60))

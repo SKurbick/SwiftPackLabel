@@ -11,6 +11,8 @@ from src.diagnostics import current_refresh_source, diagnostics_summary_logger, 
 from src.internal.diagnostics_router import internal_diagnostics
 from src.middleware import DuplicateRequestMiddleware, RequestIdMiddleware
 from src.broker import broker_manager, RoutingKey, ExchangeName
+from src.concurrency import shutdown_blocking_pool
+from src.response import close_http_sessions
 from src.logger import app_logger as logger
 
 
@@ -92,6 +94,8 @@ async def shutdown() -> None:
     await global_cache.disconnect()
     if settings.RABBITMQ_ENABLED:
         await broker_manager.get_broker().stop()
+    await close_http_sessions()
+    shutdown_blocking_pool()
 
 
 @app.get('/', status_code=status.HTTP_200_OK)

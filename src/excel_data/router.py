@@ -8,6 +8,7 @@ from src.excel_data.schema import (
     WildModelRecord, WildModelCreate, WildModelUpdate
 )
 from src.excel_data.service import ExcelDataService
+from src.concurrency import run_blocking
 from src.logger import app_logger as logger
 
 excel_data = APIRouter(prefix='/excel-data', tags=['Excel Data'])
@@ -39,7 +40,7 @@ async def upload_excel_file(
         )
     file_content = await file.read()
     excel_service = ExcelDataService()
-    excel_service.upload_excel(file_content)
+    await run_blocking(excel_service.upload_excel, file_content)
     
     logger.info(f"Пользователь {user.get('username')} загрузил новый Excel-файл")
     return MessageResponse(message="Файл успешно загружен и данные обновлены")
@@ -58,7 +59,7 @@ async def download_excel_file(
         StreamingResponse: Excel-файл с данными
     """
     excel_service = ExcelDataService()
-    excel_buffer = excel_service.download_excel()
+    excel_buffer = await run_blocking(excel_service.download_excel)
     
     logger.info(f"Пользователь {user.get('username')} скачал текущий Excel-файл")
     return StreamingResponse(
@@ -80,7 +81,7 @@ async def get_all_records(
         WildModelListResponse: Список всех записей с индексами
     """
     excel_service = ExcelDataService()
-    return excel_service.get_all_records()
+    return await run_blocking(excel_service.get_all_records)
 
 
 @excel_data.put("/records/{index}", response_model=WildModelRecord)
@@ -101,7 +102,7 @@ async def update_record(
         WildModelRecord: Обновленная запись
     """
     excel_service = ExcelDataService()
-    return excel_service.update_record(index, record)
+    return await run_blocking(excel_service.update_record, index, record)
 
 
 @excel_data.post("/records", response_model=WildModelRecord, status_code=status.HTTP_201_CREATED)
@@ -120,7 +121,7 @@ async def create_record(
         WildModelRecord: Созданная запись с индексом
     """
     excel_service = ExcelDataService()
-    return excel_service.create_record(record)
+    return await run_blocking(excel_service.create_record, record)
 
 
 @excel_data.delete("/records/{index}", response_model=MessageResponse)
@@ -140,7 +141,7 @@ async def delete_record(
     """
     excel_service = ExcelDataService()
     
-    if not excel_service.delete_record(index):
+    if not await run_blocking(excel_service.delete_record, index):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Запись с индексом {index} не найдена"

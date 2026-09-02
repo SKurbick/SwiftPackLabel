@@ -8,6 +8,7 @@ services:
       - excel_data:/app/src/excel_data/data
       - archives_data:/app/src/archives/data
       - images_data:/app/src/images/uploads
+      - ./logging/stickers:/app/src/logging/stickers
     depends_on:
       - redis
       - celery_worker
@@ -101,3 +102,4 @@ volumes:
   images_data:
   redis_data:
   celerybeat_data:
+  stickers_logs:
