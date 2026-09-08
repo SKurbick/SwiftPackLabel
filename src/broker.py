@@ -13,6 +13,7 @@ class ExchangeName(str, Enum):
 class QueueName(str, Enum):
     DELIVERED_ORDERS = "orders.delivered.fbs.first.non-aggregated"
     MOCKED_ONEC_ORDERS = "orders.onec.mocked"
+    ONEC_DEAD_LETTER = "orders.onec.dlq"
 
 
 class RoutingKey(str, Enum):
@@ -32,6 +33,7 @@ class QueueConfig:
     name: str
     routing_key: str
     durable: bool = True
+    declare: bool = True
 
 
 EXCHANGE_CONFIGS: dict[ExchangeName, ExchangeConfig] = {
@@ -40,7 +42,16 @@ EXCHANGE_CONFIGS: dict[ExchangeName, ExchangeConfig] = {
 
 
 QUEUE_CONFIGS: dict[QueueName, QueueConfig] = {
-    QueueName.DELIVERED_ORDERS: QueueConfig(name=QueueName.DELIVERED_ORDERS.value, routing_key=RoutingKey.DELIVERED_ORDERS.value)
+    QueueName.DELIVERED_ORDERS: QueueConfig(name=QueueName.DELIVERED_ORDERS.value, routing_key=RoutingKey.DELIVERED_ORDERS.value),
+    QueueName.MOCKED_ONEC_ORDERS: QueueConfig(
+        name=QueueName.MOCKED_ONEC_ORDERS.value,
+        routing_key=RoutingKey.MOCKED_ONEC_ORDERS.value,
+        declare=False,
+    ),
+    QueueName.ONEC_DEAD_LETTER: QueueConfig(
+        name=QueueName.ONEC_DEAD_LETTER.value,
+        routing_key=QueueName.ONEC_DEAD_LETTER.value,
+    ),
 }
 
 
@@ -57,7 +68,12 @@ class BrokerManager:
             for exchange, config in EXCHANGE_CONFIGS.items()
         }
         self.queues: dict[QueueName, RabbitQueue] = {
-            queue: RabbitQueue(name=config.name, routing_key=config.routing_key, durable=config.durable)
+            queue: RabbitQueue(
+                name=config.name,
+                routing_key=config.routing_key,
+                durable=config.durable,
+                declare=config.declare,
+            )
             for queue, config in QUEUE_CONFIGS.items()
         }
         self._initialized = True
@@ -85,6 +101,14 @@ class BrokerManager:
     def publish(self, message: Any, routing_key: str, exchange: ExchangeName, *args: Any, **kwargs: Any) -> Coroutine:
         rabbit_exchange = self._get_exchange(exchange)
         return self._broker.publish(message=message, routing_key=routing_key, exchange=rabbit_exchange, *args, **kwargs)
+
+    async def declare(self, queue: QueueName) -> None:
+        """Объявляет очередь. Идемпотентно, нужно перед публикацией в неё."""
+        await self._broker.declare_queue(self._get_queue(queue))
+
+    async def publish_to_queue(self, message: Any, queue: QueueName, **kwargs: Any) -> None:
+        """Кладёт сообщение в очередь."""
+        await self._broker.publish(message=message, queue=self._get_queue(queue), **kwargs)
 
 
 broker_manager = BrokerManager.get_manager(

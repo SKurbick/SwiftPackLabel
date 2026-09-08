@@ -104,9 +104,11 @@ class Settings(BaseSettings):
     HTTP_CONNECTION_POOL_SIZE: int = int(os.getenv("HTTP_CONNECTION_POOL_SIZE", 100))
 
     # 1с
-    ONEC_TIMEOUT_SEC: float = float(os.getenv("ONEC_TIMEOUT_SEC", 240))
-    ONEC_MAX_ATTEMPTS: int = int(os.getenv("ONEC_MAX_ATTEMPTS", 5))
+    ONEC_TIMEOUT_SEC: float = float(os.getenv("ONEC_TIMEOUT_SEC", 60))
+    ONEC_MAX_ATTEMPTS: int = int(os.getenv("ONEC_MAX_ATTEMPTS", 3))
     ONEC_RETRY_BACKOFF_BASE_SEC: float = float(os.getenv("ONEC_RETRY_BACKOFF_BASE_SEC", 5.0))
+    ONEC_CONSUMER_ENABLED: bool = os.getenv("ONEC_CONSUMER_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+    ONEC_MAX_DELIVERY_ATTEMPTS: int = int(os.getenv("ONEC_MAX_DELIVERY_ATTEMPTS", 5))
 
     # Пул потоков воркеркс
     BLOCKING_POOL_MAX_WORKERS: int = int(os.getenv("BLOCKING_POOL_MAX_WORKERS", 8))

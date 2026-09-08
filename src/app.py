@@ -14,7 +14,7 @@ from src.broker import broker_manager, RoutingKey, ExchangeName
 from src.concurrency import shutdown_blocking_pool
 from src.response import close_http_sessions
 from src.logger import app_logger as logger
-
+from src.supplies import onec_delivery_consumer 
 
 def include_router(application: FastAPI) -> None:
     application.include_router(router)
@@ -78,6 +78,10 @@ async def startup() -> None:
     else:
         logger.info("Фоновое обновление кэша отключено через CACHE_BACKGROUND_REFRESH_ENABLED=false")
     if settings.RABBITMQ_ENABLED:
+        if settings.ONEC_CONSUMER_ENABLED:
+            logger.info("Фоновая доставка отгрузок в 1C включена")
+        else:
+            logger.info("Фоновая доставка отгрузок в 1C отключена")
         await broker_manager.get_broker().start()
     else:
         logger.info("RabbitMQ broker отключен через RABBITMQ_ENABLED=false")

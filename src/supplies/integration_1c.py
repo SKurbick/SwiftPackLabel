@@ -261,40 +261,63 @@ class OneCIntegration:
         Args:
             request_body: Тело запроса для отправки в 1C
         Returns:
-            Dict[str, Any]: Ответ от 1C или информация об ошибке
+            Dict[str, Any]: {"success": bool, "response": Any, "error": str | None}
         """
-
-        logger.info(f"Отправка данных в 1C: {len(str(request_body))} байт")
-
-        logger.info(f"Отправка данных в 1C: {request_body} байт")
+        if not settings.ONEC_HOST:
+            return self._delivery_error("Не задан адрес 1c")
 
         if not settings.ONEC_USER or not settings.ONEC_PASSWORD:
-            return {"status_code": 500, "message": "Отсутствуют учетные данные для 1C"}
+            return self._delivery_error("Отсутствуют учетные данные для 1C")
+
+        accounts_count = len(request_body.get("accounts", []))
+        logger.info(f"Отправка данных в 1C: кабинетов {accounts_count}")
 
         try:
-            auth = BasicAuth(settings.ONEC_USER, settings.ONEC_PASSWORD)
-            headers = {"Content-Type": "application/json", "Accept": "application/json"}
-
             response_text = await self.async_client._make_request(
-                "POST", settings.ONEC_HOST, json=request_body,
-                headers=headers, auth=auth
+                "POST",
+                settings.ONEC_HOST,
+                json=request_body,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                auth=BasicAuth(settings.ONEC_USER, settings.ONEC_PASSWORD),
             )
-
-            if response_text is None:
-                logger.error("1C не ответил: запрос не удался после всех попыток")
-                return {"status_code": 502, "message": "1C не ответил на запрос", "success": False}
-
-            try:
-                result = json.loads(response_text) if isinstance(response_text, str) else response_text
-                logger.info(f"Успешный ответ от 1C: {result}")
-                return result
-            except json.JSONDecodeError:
-                logger.error(f"Ошибка при чтении JSON ответа от 1C: {response_text}")
-                return {"status_code": 500,"message": "Ошибка при чтении JSON ответа","response": response_text}
-
         except Exception as e:
-            logger.error(f"Ошибка при отправке данных в 1C: {str(e)}")
-            return {"status_code": 500, "message": f"Ошибка при отправке данных в 1C: {str(e)}"}
+            return self._delivery_error(f"Ошибка при отправке данных в 1C: {e}")
+
+        if response_text is None:
+            return self._delivery_error("запрос не удался после макссимального кол-ва попыток")
+
+        logger.info(f"1C принял данные об отгрузке: кабинетов {accounts_count}")
+        return {"success": True, "response": self._parse_response(response_text), "error": None}
+
+    @staticmethod
+    def _delivery_error(message: str) -> Dict[str, Any]:
+        """Единый формат неуспешной отправки в 1с"""
+        logger.error(message)
+        return {"success": False, "response": None, "error": message}
+
+    @staticmethod
+    def _parse_response(response_text: Any) -> Any:
+        """Тело ответа для логов"""
+        if not isinstance(response_text, str):
+            return response_text
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return response_text
+
+    @staticmethod
+    async def _publish(routing_key: RoutingKey, message: Dict[str, Any]) -> bool:
+        """Публикует сообщение в кролика"""
+        try:
+            await broker_manager.publish(
+                message=message,
+                routing_key=routing_key.value,
+                exchange=ExchangeName.ORDERS.value,
+            )
+            return True
+        except Exception as error:
+            logger.error(f"Не удалось опубликовать сообщение в {routing_key.value}: {error}")
+            return False
 
     async def format_delivery_data(self, supply_ids: List[Any], order_wild_map: Dict[str, str]) -> Dict[
         str, List[Dict[str, Any]]]:
@@ -320,38 +343,16 @@ class OneCIntegration:
             formatted_data = self.build_final_structure(result_structure)
 
             logger.info("Отправка данных в шину для обработки")
-            try:
-                await broker_manager.publish(
-                    message=formatted_data,
-                    routing_key=RoutingKey.DELIVERED_ORDERS.value,
-                    exchange=ExchangeName.ORDERS.value,
-                )
-            except Exception as error:
-                print(f"Ошибка при отправке данных в шину для обработки: {str(error)}")
+            await self._publish(RoutingKey.DELIVERED_ORDERS, formatted_data)
+            if not await self._publish(RoutingKey.MOCKED_ONEC_ORDERS, formatted_data):
+                return {"code": 502, "message": "Данные не поставлены в очередь на отправку в 1C"}
 
-            # response = await self.send_to_1c(formatted_data)
-
-            response = {
-                "code": 200
-            }
-
-            logger.info(f"1C заглушен. Отправка данных в очередь orders.onec.mocked")
-            try:
-                await broker_manager.publish(
-                    message=formatted_data,
-                    routing_key=RoutingKey.MOCKED_ONEC_ORDERS.value,
-                    exchange=ExchangeName.ORDERS.value,
-                )
-            except Exception as error:
-                print(f"Ошибка при отправке данных в очередь orders.onec.mocked: {str(error)}")
+            response = {"code": 200}
 
             # Логируем в БД лог отправки
             if self.db:
                 delivery_log = OneCDeliveryLog(self.db)
                 await delivery_log.log_1c_integration(formatted_data, response)
-
-            # Логируем статус SENT_TO_1C для каждого заказа (если отправка успешна)
-            if self.db and isinstance(response, dict) and response.get("code") == 200:
                 await self._log_sent_to_1c_status(supply_ids, order_supply_map)
 
             return response
