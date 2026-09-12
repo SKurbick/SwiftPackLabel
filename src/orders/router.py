@@ -10,9 +10,11 @@ from src.orders.order_status_service import OrderStatusService
 from src.auth.dependencies import get_current_user
 from src.db import get_db_connection, AsyncGenerator
 from src.orders.schema import OrderDetail, GroupedOrderInfo, GroupedOrderInfoWithFact, OrdersWithSupplyNameIn, SupplyAccountWildOut, OrdersResponse
-from src.cache import global_cached
+from src.cache import global_cache, global_cached
+from src.cache.global_cache import LockBusyError
 from src.models.supply_operations import SupplyOperationsDB
 from src.orders.constants_to_block import BLOCKED_WILDS
+from src.settings import settings
 from src.utils import process_local_vendor_code
 
 from fastapi import APIRouter, Depends, status, Request, HTTPException, Query, Body, Path
@@ -202,6 +204,10 @@ async def add_fact_orders_and_supply_name(
                 user.get('username', 'unknown'),
             )
 
+            await global_cache.remove_orders_from_orders_cache(
+                order_id for supply in result.supply_ids for order_id in supply.order_ids
+            )
+
             status_service = OrderStatusService(db)
             logged_count = await status_service.process_and_log_orders_in_supplies(
                 result,
@@ -262,11 +268,16 @@ async def add_fact_orders_and_supply_name(
 
         results: list[SupplyAccountWildOut] = []
 
-        if b2b_payload is not None:
-            results.append(await _process_one_payload(b2b_payload, "b2b"))
+        async with global_cache.exclusive(
+            "circle_creation",
+            timeout=settings.CIRCLE_LOCK_TIMEOUT_SEC,
+            wait=settings.CIRCLE_LOCK_WAIT_SEC,
+        ):
+            if b2b_payload is not None:
+                results.append(await _process_one_payload(b2b_payload, "b2b"))
 
-        if fiz_payload is not None:
-            results.append(await _process_one_payload(fiz_payload, "fiz"))
+            if fiz_payload is not None:
+                results.append(await _process_one_payload(fiz_payload, "fiz"))
 
         if not results:
             raise HTTPException(
@@ -284,6 +295,12 @@ async def add_fact_orders_and_supply_name(
 
     except HTTPException:
         raise
+    except LockBusyError:
+        logger.warning(f"Операция {base_operation_id}: другой круг ещё формируется")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Сейчас формируется другой круг — повторите чуть позже",
+        )
     except Exception as e:
         logger.error(f"Ошибка в операции {base_operation_id}: {str(e)}")
         raise HTTPException(

@@ -2,9 +2,11 @@ import asyncio
 import json
 import pickle
 import time
-from typing import Any, Optional, Dict, List
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional, Dict, Iterable, List
 from datetime import datetime, timedelta
 import redis.asyncio as redis
+from redis.exceptions import LockError
 
 from src.concurrency import run_blocking
 from src.orders.schema import OrderDetail
@@ -27,6 +29,11 @@ from src.models.delivered_supplies import DeliveredSupplies
 
 from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
 
+ORDERS_CACHE_PATTERN = "cache:orders_all:*"
+
+
+class LockBusyError(Exception):
+    """Замок занят другой операцией дольше"""
 
 
 class GlobalCache:
@@ -181,7 +188,59 @@ class GlobalCache:
         except Exception as e:
             logger.error(f"Ошибка при удалении ключа {key} из кэша: {str(e)}")
             return False
-    
+
+    @asynccontextmanager
+    async def exclusive(self, name: str, timeout: int, wait: int) -> AsyncIterator[None]:
+        """Не даёт двум операциям одновременно выполнять один и тот же участок."""
+        if not self.is_connected or not self.redis_client:
+            logger.warning(f"Redis недоступен, «{name}» выполняется без лока")
+            yield
+            return
+
+        lock = self.redis_client.lock(f"lock:{name}", timeout=timeout, blocking_timeout=wait)
+        if not await lock.acquire():
+            raise LockBusyError(name)
+        try:
+            yield
+        finally:
+            try:
+                await lock.release()
+            except LockError:
+                logger.warning(f"лок «{name}» истёк раньше, чем закончилась операция")
+
+    async def remove_orders_from_orders_cache(self, order_ids: Iterable[int]) -> None:
+        """Убирает взятые в круг задания из закешированного списка «Создать поставку»"""
+        taken = set(order_ids)
+        if not taken or not self.is_connected or not self.redis_client:
+            return
+
+        try:
+            async for raw_key in self.redis_client.scan_iter(match=ORDERS_CACHE_PATTERN):
+                key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+                grouped = await self.get(key)
+                if not isinstance(grouped, dict):
+                    continue
+
+                pruned = {}
+                for wild, info in grouped.items():
+                    orders = [order for order in info.orders if order.id not in taken]
+                    if orders:
+                        pruned[wild] = info.model_copy(update={"orders": orders, "order_count": len(orders)})
+
+                removed = (sum(len(info.orders) for info in grouped.values())
+                           - sum(len(info.orders) for info in pruned.values()))
+                if not removed:
+                    continue
+
+                ttl = await self.redis_client.ttl(key)
+                if ttl == -2:  
+                    continue
+                await self.set(key, pruned, ttl if ttl > 0 else None)
+                logger.info(f"Из кеша {key} убрано взятых в круг заданий: {removed}")
+
+        except Exception as e:
+            logger.error(f"Не удалось убрать взятые в круг задания из кеша заказов: {e}")
+
     async def clear_all(self) -> bool:
         """
         Очистка всего кэша.

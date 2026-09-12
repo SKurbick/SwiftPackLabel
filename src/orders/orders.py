@@ -514,7 +514,7 @@ class OrdersService:
                 statuses: Dict[int, Dict[str, Any]] = {}
                 for start in range(0, len(order_ids), WB_ORDERS_STATUS_BATCH_SIZE):
                     batch = order_ids[start:start + WB_ORDERS_STATUS_BATCH_SIZE]
-                    statuses.update(await orders_api.can_add_to_supply_batch(batch))
+                    statuses.update(await orders_api.can_add_to_supply_batch(batch, allowed_statuses=("new",)))
 
                 blocked = {
                     order_id: info.get("supplier_status", "unknown")

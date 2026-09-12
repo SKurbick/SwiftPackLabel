@@ -52,7 +52,11 @@ class Orders(Account):
             logger.error(f"Ошибка проверки статуса заказа {order_id}: {e}")
             return False
 
-    async def can_add_to_supply_batch(self, order_ids: list[int]) -> dict[int, dict[str, any]]:
+    async def can_add_to_supply_batch(
+            self,
+            order_ids: list[int],
+            allowed_statuses: tuple[str, ...] = ("new", "confirm"),
+    ) -> dict[int, dict[str, any]]:
         """
         Проверяет можно ли добавить список заказов в поставку (batch проверка).
 
@@ -79,7 +83,6 @@ class Orders(Account):
             orders_data = orders_response.get("orders", [])
 
             result = {}
-            allowed_statuses = ["new", "confirm"]
 
             # Обрабатываем полученные статусы
             for order in orders_data:

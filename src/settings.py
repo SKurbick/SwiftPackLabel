@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 1800))  # 30 минут по умолчанию
     CACHE_WARMUP_ON_STARTUP: bool = os.getenv("CACHE_WARMUP_ON_STARTUP", "true").lower() in ("1", "true", "yes", "on")
     CACHE_BACKGROUND_REFRESH_ENABLED: bool = os.getenv("CACHE_BACKGROUND_REFRESH_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+
+    CIRCLE_LOCK_TIMEOUT_SEC: int = int(os.getenv("CIRCLE_LOCK_TIMEOUT_SEC", 600))
+    CIRCLE_LOCK_WAIT_SEC: int = int(os.getenv("CIRCLE_LOCK_WAIT_SEC", 30))
     
     # Настройки Celery
     CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1")
