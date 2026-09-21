@@ -46,6 +46,10 @@ from src.supplies.schema import (
     SupplyIdWithShippedBodySchema
 )
 
+from src.models.order_status_log import OrderStatus
+
+WB_CANCELED_STATUSES = ('canceled', 'canceled_by_client')
+
 
 class SuppliesService:
 
@@ -2844,11 +2848,16 @@ class SuppliesService:
             supplier_status = status_info.get("supplier_status", "unknown")
             wb_status = status_info.get("wb_status", "unknown")
 
-            if can_add:
+            canceled_by_wb = wb_status in WB_CANCELED_STATUSES and supplier_status != "complete"
+
+            if can_add and not canceled_by_wb:
                 valid_orders.append(order)
             else:
                 # Определяем конкретный статус блокировки
-                blocked_status = self._determine_blocked_status(supplier_status)
+                if canceled_by_wb:
+                    blocked_status = OrderStatus.BLOCKED_CANCELED
+                else:
+                    blocked_status = self._determine_blocked_status(supplier_status)
 
                 # Сохраняем ПОЛНЫЙ объект заказа + информацию о блокировке
                 # Это нужно для отправки в 1C/Shipment с оригинальным supply_id
@@ -2857,7 +2866,8 @@ class SuppliesService:
                     'blocked_status': blocked_status,  # Для логирования
                     'blocked_supplier_status': supplier_status,
                     'blocked_wb_status': wb_status,
-                    'blocked_reason': f"supplierStatus={supplier_status}, wbStatus={wb_status}"
+                    'blocked_reason': f"supplierStatus={supplier_status}, wbStatus={wb_status}",
+                    'canceled_by_wb': canceled_by_wb
                 })
 
         logger.info(

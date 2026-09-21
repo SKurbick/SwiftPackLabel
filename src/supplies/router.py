@@ -460,6 +460,10 @@ async def move_orders_between_supplies(
                         f"Залогировано {shipped_with_block_count} заблокированных заказов "
                         f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
                     )
+                    await status_service.log_canceled_shipped_as_delivered(
+                        invalid_status_orders,
+                        operator
+                    )
                 else:
                     logger.error(
                         f"❌ КРИТИЧНО: Отгрузка {len(invalid_status_orders)} заблокированных заказов НЕ удалась! "
@@ -602,6 +606,10 @@ async def move_orders_by_qr(
                 logger.info(
                     f"Залогировано {shipped_with_block_count} заблокированных заказов "
                     f"как SHIPPED_WITH_BLOCK (отгружены с оригинальным supply_id)"
+                )
+                await status_service.log_canceled_shipped_as_delivered(
+                    invalid_status_orders,
+                    operator
                 )
 
         # Обновление сессии
