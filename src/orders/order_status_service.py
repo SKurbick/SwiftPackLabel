@@ -644,7 +644,9 @@ class OrderStatusService:
 
                 # Определяем тип блокировки по supplier_status
                 supplier_status = normalized['supplier_status']
-                if supplier_status == 'complete':
+                if order.get('canceled_by_wb'):
+                    status = OrderStatus.BLOCKED_CANCELED
+                elif supplier_status == 'complete':
                     status = OrderStatus.BLOCKED_ALREADY_DELIVERED
                 elif supplier_status == 'cancel':
                     status = OrderStatus.BLOCKED_CANCELED
@@ -761,4 +763,48 @@ class OrderStatusService:
 
         except Exception as e:
             logger.error(f"Ошибка логирования SHIPPED_WITH_BLOCK: {str(e)}")
+            return 0
+
+    async def log_canceled_shipped_as_delivered(
+        self,
+        invalid_status_orders: List[Dict[str, Any]],
+        operator: Optional[str] = None
+    ) -> int:
+        """
+        delivered для отмененных сз , которые добавлены были в круг
+        проблема была в том что на момент добавления сз в круг было waiting
+        и стикеры были выданы на все но в момент сборки сз спокойно можнт отмениться
+        и соотвественно оно уже было отгружено и проводка в wb не пройдет и вб его 
+        не примет со статуом cancelled, но посколько сз - отгрузили необходимо дабы
+        был списан остаток и отпарвлено в 1с, ибо по факту сз было отгружено
+        """
+        prepared_data = []
+        for order in invalid_status_orders:
+            if not order.get('canceled_by_wb'):
+                continue
+
+            normalized = self._normalize_order_fields(order, "log_canceled_shipped_as_delivered")
+            if not normalized:
+                continue
+
+            prepared_data.append({
+                'order_id': normalized['order_id'],
+                'status': OrderStatus.DELIVERED.value,
+                'supply_id': normalized['supply_id'],
+                'account': normalized['account'],
+                'operator': operator
+            })
+
+        if not prepared_data:
+            return 0
+
+        try:
+            count = await self.status_log.insert_orders_batch(prepared_data)
+            logger.info(
+                f"отменённых: {count}  на wb заказов со статусом delivered "
+                f"(списаны с оригинальным supply_id): {[d['order_id'] for d in prepared_data][:20]}"
+            )
+            return count
+        except Exception as e:
+            logger.error(f"Ошибка логирования delivered для отменённых заказов: {str(e)}")
             return 0
