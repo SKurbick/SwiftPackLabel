@@ -471,6 +471,11 @@ async def move_orders_between_supplies(
                     )
 
         session_updated = None
+        if not request_data.operation_id and result.get("removed_order_ids"):
+            logger.warning(
+                f"operation_id не передан: {len(result['removed_order_ids'])} перемещённых заказов "
+                f"не удалены из сессии: {result['removed_order_ids'][:20]}"
+            )
         if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
             # НОВОЕ: В финальном режиме также удаляем из сессии заблокированные заказы
             # НО ТОЛЬКО если они реально были отгружены в 1C/Shipment!
@@ -614,6 +619,11 @@ async def move_orders_by_qr(
 
         # Обновление сессии
         session_updated = None
+        if not request_data.operation_id and result.get("removed_order_ids"):
+            logger.warning(
+                f"operation_id не передан: {len(result['removed_order_ids'])} перемещённых заказов "
+                f"не удалены из сессии: {result['removed_order_ids'][:20]}"
+            )
         if request_data.operation_id and result.get("success") and result.get("removed_order_ids"):
             removed_order_ids = result["removed_order_ids"].copy()
 
