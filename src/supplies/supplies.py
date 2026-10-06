@@ -596,8 +596,7 @@ class SuppliesService:
                     still_missing = missing_ids - found_ids
                     if still_missing:
                         logger.info(f'Fallback {account}: {len(still_missing)} не найдено в new_orders, пробуем get_orders')
-                        all_orders = await orders_api.get_orders()
-                        for order in all_orders:
+                        for order in (await orders_api.find_orders(still_missing)).values():
                             order_id = order.get('id')
                             if order_id in still_missing:
                                 found_orders[order_id] = {

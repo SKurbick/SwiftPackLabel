@@ -1,9 +1,14 @@
 import asyncio
 import json
+import time
+from typing import Dict, Iterable, Optional, Set
 from src.logger import app_logger as logger
 from src.users.account import Account
 from src.response import ensure_response, parse_json
 
+DAY_SEC = 24 * 60 * 60
+
+ORDERS_LOOKUP_DAYS = (2, 7, 30)
 
 
 class Orders(Account):
@@ -182,19 +187,27 @@ class Orders(Account):
 
         return result
 
-    async def _collect_paginated_orders(self, url: str, description: str) -> list:
+    async def _collect_paginated_orders(self, url: str, description: str,
+                                        extra_params: Optional[Dict[str, int]] = None,
+                                        stop_when_found: Optional[Set[int]] = None) -> list:
         """Постранично забирает заказы по указанному URL."""
         orders = []
         next_value = 0
         seen_cursors = set()
+        pending = set(stop_when_found) if stop_when_found else None
         while True:
-            params = {"limit": 1000, "next": next_value}
+            params = {"limit": 1000, "next": next_value, **(extra_params or {})}
             response = await self.async_client.get(url, params=params, headers=self.headers)
             data = parse_json(ensure_response(response, f"{description} ({self.account})"))
-            orders.extend(data.get("orders") or [])
+            page = data.get("orders") or []
+            orders.extend(page)
 
             next_value = data.get("next")
             logger.info(f"Got {len(orders)} {description} and next {next_value}, account {self.account}")
+            if pending is not None:
+                pending.difference_update(order.get("id") for order in page)
+                if not pending:
+                    break
             if not next_value:
                 break
             if next_value in seen_cursors:
@@ -214,3 +227,34 @@ class Orders(Account):
     async def get_orders(self):
         """Gets all orders from WB API."""
         return await self._collect_paginated_orders(self.url, "orders")
+
+    async def find_orders(self, order_ids: Iterable[int]) -> Dict[int, dict]:
+        """
+        Находит конкретные заказы в /api/v3/orders.
+        """
+        wanted = set(order_ids)
+        found: Dict[int, dict] = {}
+        if not wanted:
+            return found
+
+        now = int(time.time())
+        for days in ORDERS_LOOKUP_DAYS:
+            remaining = wanted - set(found)
+            if not remaining:
+                break
+            orders = await self._collect_paginated_orders(
+                self.url, f"orders за {days} сут.",
+                extra_params={"dateFrom": now - days * DAY_SEC},
+                stop_when_found=remaining,
+            )
+            for order in orders:
+                if order.get("id") in remaining:
+                    found.setdefault(order["id"], order)
+
+        if len(found) < len(wanted):
+            missing = sorted(wanted - set(found))
+            logger.warning(
+                f"Кабинет {self.account}: за {ORDERS_LOOKUP_DAYS[-1]} сут. в WB не найдено "
+                f"{len(missing)} из {len(wanted)} заказов: {missing[:20]}"
+            )
+        return found

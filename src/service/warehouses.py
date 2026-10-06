@@ -79,10 +79,14 @@ async def resolve_order_warehouses(orders_by_account: Dict[str, Iterable[int]], 
 
 
 async def _warehouses_from_api(account: str, token: Optional[str], missing: Set[int]) -> Dict[int, int]:
-    """Спрашивает склады у WB: сперва среди новых заказов, затем среди всех."""
+    """Спрашивает склады у WB: сперва среди новых заказов, затем ищет остальные по номерам."""
     found: Dict[int, int] = {}
     orders_api = Orders(account, token)
-    sources = (("новых", orders_api.get_new_orders), ("всех", orders_api.get_orders))
+
+    async def find_remaining(remaining: Set[int]) -> list:
+        return list((await orders_api.find_orders(remaining)).values())
+
+    sources = (("новых", lambda remaining: orders_api.get_new_orders()), ("всех", find_remaining))
 
     for description, fetch_orders in sources:
         remaining = missing - set(found)
@@ -90,7 +94,7 @@ async def _warehouses_from_api(account: str, token: Optional[str], missing: Set[
             break
 
         try:
-            orders = await fetch_orders()
+            orders = await fetch_orders(remaining)
         except Exception as e:
             logger.error(
                 f"Кабинет {account}: не удалось получить склады {len(remaining)} заказов "

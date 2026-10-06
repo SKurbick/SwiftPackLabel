@@ -122,8 +122,7 @@ class Supplies(Account):
 
             # Если всё ещё есть недостающие - полный запрос
             if missing_ids:
-                all_orders = await orders_api.get_orders()
-                for order in all_orders:
+                for order in (await orders_api.find_orders(missing_ids)).values():
                     oid = order.get('id')
                     if oid in missing_ids:
                         orders_from_db[oid] = {
@@ -140,10 +139,7 @@ class Supplies(Account):
 
         # Fallback: старый метод через полный get_orders()
         orders_api = Orders(self.account, self.token)
-        all_orders = await orders_api.get_orders()
-
-        order_ids_set = set(order_ids)
-        filtered_orders = [order for order in all_orders if order.get('id') in order_ids_set]
+        filtered_orders = list((await orders_api.find_orders(order_ids)).values())
 
         self._log_resolved_orders(supply_id, len(filtered_orders), len(order_ids), "(только WB API)")
 
@@ -361,8 +357,7 @@ class Supplies(Account):
 
                 # Если всё ещё есть недостающие
                 if missing_ids:
-                    all_orders = await orders_api.get_orders()
-                    for order in all_orders:
+                    for order in (await orders_api.find_orders(missing_ids)).values():
                         oid = order.get('id')
                         if oid in missing_ids:
                             orders_by_id[oid] = {
@@ -375,9 +370,8 @@ class Supplies(Account):
         else:
             # Fallback: старый метод
             orders_api = Orders(self.account, self.token)
-            all_orders = await orders_api.get_orders()
-            logger.info(f"Получено {len(all_orders)} заказов из API, account {self.account}")
-            orders_by_id = {order.get('id'): order for order in all_orders}
+            orders_by_id = await orders_api.find_orders(all_order_ids)
+            logger.info(f"Получено {len(orders_by_id)} заказов из API, account {self.account}")
 
         result = {self.account: {}}
         for supply_id in supply_ids:
