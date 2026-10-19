@@ -363,10 +363,21 @@ class SuppliesService:
     @staticmethod
     async def get_information_to_supplies() -> List[Dict]:
         logger.info("Получение данных по всем кабинетам о поставках")
+        accounts: List[str] = []
         tasks: List = []
         for account, token in get_wb_tokens().items():
+            accounts.append(account)
             tasks.append(Supplies(account, token).get_supplies_filter_done())
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        supplies: List[Dict] = []
+        for account, result in zip(accounts, results):
+            if isinstance(result, BaseException):
+                logger.error(f"Кабинет {account} пропущен, поставки вб не удалось получить: {result}")
+                supplies.append({account: []})
+            else:
+                supplies.append(result)
+        return supplies
 
     async def get_information_to_supply_details(self, basic_supplies_ids: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
