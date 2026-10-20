@@ -8,13 +8,14 @@ from aiohttp import BasicAuth
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.logger import app_logger as logger
-from src.__init__ import account_inn_map
 from src.response import AsyncHttpClient
-from src.settings import settings
+from src.settings import settings, get_account_inn
 from src.models.onec_delivery_log import OneCDeliveryLog
 from src.orders.order_status_service import OrderStatusService
 from src.models.assembly_task_status import AssemblyTaskStatus
 from src.broker import broker_manager, RoutingKey, ExchangeName
+
+account_inn_map = get_account_inn()
 
 
 class OneCIntegration:
@@ -228,7 +229,7 @@ class OneCIntegration:
         if "supply_wild_orders" not in data or not data["supply_wild_orders"]:
             return None
 
-        account_data = {"account": account, "inn": account_inn_map.get(account, ""), "data": []}
+        account_data = {"account": account, "inn": account_inn_map.get(account.upper(), ""), "data": []}
 
         for supply_id, supply_data in data["supply_wild_orders"].items():
             if "wilds" not in supply_data or not supply_data["wilds"]:

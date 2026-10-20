@@ -16,6 +16,13 @@ def get_wb_tokens() -> dict:
         return json.load(file)
 
 
+def get_account_inn() -> dict:
+    """инн кабинетов"""
+    inn_path = Path(__file__).parent / "account_inn.json"
+    with inn_path.open("r", encoding="utf-8") as file:
+        return {account.upper(): inn for account, inn in json.load(file).items()}
+
+
 class Settings(BaseSettings):
     debug: bool = True
     tokens: dict = get_wb_tokens()
