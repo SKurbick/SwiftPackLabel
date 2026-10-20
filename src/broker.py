@@ -19,6 +19,7 @@ class QueueName(str, Enum):
 class RoutingKey(str, Enum):
     DELIVERED_ORDERS = "orders.delivered.fbs.first.non-aggregated"
     MOCKED_ONEC_ORDERS = "orders.onec.mocked"
+    ONEC_SHIPMENTS = "order.kiz.delivered.fbs2"
 
 
 @dataclass

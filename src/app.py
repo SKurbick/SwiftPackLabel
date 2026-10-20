@@ -14,7 +14,7 @@ from src.broker import broker_manager, RoutingKey, ExchangeName
 from src.concurrency import shutdown_blocking_pool
 from src.response import close_http_sessions
 from src.logger import app_logger as logger
-from src.supplies import onec_delivery_consumer 
+# from src.supplies import onec_delivery_consumer
 
 def include_router(application: FastAPI) -> None:
     application.include_router(router)

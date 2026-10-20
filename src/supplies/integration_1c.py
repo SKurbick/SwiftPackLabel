@@ -313,6 +313,7 @@ class OneCIntegration:
                 message=message,
                 routing_key=routing_key.value,
                 exchange=ExchangeName.ORDERS.value,
+                persist=True,
             )
             return True
         except Exception as error:
@@ -344,7 +345,7 @@ class OneCIntegration:
 
             logger.info("Отправка данных в шину для обработки")
             await self._publish(RoutingKey.DELIVERED_ORDERS, formatted_data)
-            if not await self._publish(RoutingKey.MOCKED_ONEC_ORDERS, formatted_data):
+            if not await self._publish(RoutingKey.ONEC_SHIPMENTS, formatted_data):
                 return {"code": 502, "message": "Данные не поставлены в очередь на отправку в 1C"}
 
             response = {"code": 200}
