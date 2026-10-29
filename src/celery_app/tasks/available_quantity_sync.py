@@ -54,4 +54,5 @@ async def update():
         logger.error(f"Ошибка в выполнении автоматического пересчёта свободных остатков: {error}")
 
     finally:
-        await pool.close()
+        if pool:
+            await pool.close()

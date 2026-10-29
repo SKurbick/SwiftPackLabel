@@ -21,12 +21,12 @@ class DatabaseManager:
         self.password = password
         self.database = database
         self.pool = None
-        self.max_size = settings.async_pg_pool_size + 10
+        self.max_size = settings.DB_POOL_MAX_SIZE
 
     async def create_pool(
             self,
-            min_size: int = settings.async_pg_pool_size,
-            max_size: int = settings.async_pg_pool_size + 10
+            min_size: int = settings.DB_POOL_MIN_SIZE,
+            max_size: int = settings.DB_POOL_MAX_SIZE
     ):
         """Создание пула соединений"""
         self.max_size = max_size
@@ -37,7 +37,9 @@ class DatabaseManager:
             password=self.password,
             database=self.database,
             min_size=min_size,
-            max_size=max_size
+            max_size=max_size,
+            timeout=settings.connection_timeout,
+            max_inactive_connection_lifetime=settings.max_connection_idle_time,
         )
         return self.pool
 
@@ -124,6 +126,15 @@ class DatabaseManager:
             finally:
                 self._record_slow_query(query, started)
 
+    async def executemany(self, query, args):
+        """Выполнение запроса для набора параметров"""
+        async with self.connection() as conn:
+            started = time.monotonic()
+            try:
+                return await conn.executemany(query, args)
+            finally:
+                self._record_slow_query(query, started)
+
     def _record_slow_query(self, query, started: float) -> None:
         duration_ms = (time.monotonic() - started) * 1000
         if duration_ms >= settings.DIAGNOSTICS_DB_QUERY_SLOW_MS:
@@ -141,60 +152,23 @@ class DatabaseManager:
 # Основной пул для FastAPI приложения
 db = DatabaseManager()
 
-# Отдельные пулы для Celery задач
-celery_orders_db = DatabaseManager()
-celery_hanging_supplies_db = DatabaseManager()
 
-
-async def get_db_connection() -> AsyncGenerator:
-    """Генератор соединения с базой данных"""
-    async with db.connection() as connection:
-        yield connection
-
-
-async def get_celery_orders_db():
-    """Получение БД соединения для Celery задач синхронизации заказов"""
-    return celery_orders_db
-
-
-async def get_celery_hanging_supplies_db():
-    """Получение БД соединения для Celery задач синхронизации висячих поставок"""
-    return celery_hanging_supplies_db
+async def get_db_connection() -> AsyncGenerator[DatabaseManager, None]:
+    """
+    Соединение берётся из пула 
+    """
+    if not db.pool:
+        await db.create_pool()
+    yield db
 
 
 async def check_db_connected() -> None:
-    try:
-        # Создаем пулы для основного приложения
-        if not db.pool:
-            await db.create_pool()
-        await db.execute("SELECT 1")
-        
-        # Создаем пулы для Celery задач
-        if not celery_orders_db.pool:
-            await celery_orders_db.create_pool()
-            
-        if not celery_hanging_supplies_db.pool:
-            await celery_hanging_supplies_db.create_pool()
-            
-    except Exception as e:
-        raise e
+    if not db.pool:
+        await db.create_pool()
+    await db.execute("SELECT 1")
 
 
 async def check_db_disconnected() -> None:
-    try:
-        # Закрываем основной пул
-        if db.pool:
-            await db.pool.close()
-            db.pool = None
-            
-        # Закрываем Celery пулы
-        if celery_orders_db.pool:
-            await celery_orders_db.pool.close()
-            celery_orders_db.pool = None
-            
-        if celery_hanging_supplies_db.pool:
-            await celery_hanging_supplies_db.pool.close()
-            celery_hanging_supplies_db.pool = None
-            
-    except Exception as e:
-        raise e
+    if db.pool:
+        await db.pool.close()
+        db.pool = None

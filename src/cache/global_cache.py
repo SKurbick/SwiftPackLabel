@@ -9,6 +9,7 @@ import redis.asyncio as redis
 from redis.exceptions import LockError
 
 from src.concurrency import run_blocking
+from src.db import db as main_db
 from src.orders.schema import OrderDetail
 from src.settings import settings
 from src.logger import app_logger as logger
@@ -372,84 +373,80 @@ class GlobalCache:
             
             # Прогрев данных поставок для всех комбинаций hanging_only и is_delivery
             try:
-                from src.db import db as main_db
-                async with main_db.connection() as connection:
-                    supplies_service = SuppliesService(connection)
+                supplies_service = SuppliesService(main_db)
                     
-                    # Прогрев кэша для всех комбинаций параметров
-                    cache_combinations = [
-                        {"hanging_only": False, "is_delivery": False},  # Обычные поставки из WB API
-                        {"hanging_only": True, "is_delivery": False},   # Висячие поставки из WB API
-                        {"hanging_only": False, "is_delivery": True},   # Обычные поставки из доставки
-                        {"hanging_only": True, "is_delivery": True},    # Висячие поставки из доставки
-                    ]
+                # Прогрев кэша для всех комбинаций параметров
+                cache_combinations = [
+                    {"hanging_only": False, "is_delivery": False},  # Обычные поставки из WB API
+                    {"hanging_only": True, "is_delivery": False},   # Висячие поставки из WB API
+                    {"hanging_only": False, "is_delivery": True},   # Обычные поставки из доставки
+                    {"hanging_only": True, "is_delivery": True},    # Висячие поставки из доставки
+                ]
                     
-                    for combination in cache_combinations:
-                        hanging_only = combination["hanging_only"]
-                        is_delivery = combination["is_delivery"]
+                for combination in cache_combinations:
+                    hanging_only = combination["hanging_only"]
+                    is_delivery = combination["is_delivery"]
                         
-                        try:
-                            logger.info(f"Прогрев кэша для hanging_only={hanging_only}, is_delivery={is_delivery}")
-                            
-                            # Получаем данные для конкретной комбинации параметров
-                            supplies_response = await supplies_service.get_list_supplies(
-                                hanging_only=hanging_only, 
-                                is_delivery=is_delivery
-                            )
-                            
-                            # Формируем ключ кэша с параметрами
-                            cache_key = f"cache:supplies_all:hanging_only:{hanging_only}|is_delivery:{is_delivery}"
-                            
-                            # Сохраняем в кэш
-                            await self.set(cache_key, supplies_response)
-                            
-                            logger.info(f"Кэш прогрет для {cache_key}: {len(supplies_response.supplies)} поставок")
-                            
-                        except Exception as e:
-                            logger.error(f"Ошибка прогрева кэша для hanging_only={hanging_only}, is_delivery={is_delivery}: {str(e)}")
-                            continue
-                    
-                    # Запускаем очистку пустых поставок только для данных из WB API
                     try:
-                        from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
-                        cleaner = EmptySupplyCleaner(self.redis_client)
-                        await cleaner.auto_clean_empty_supplies()
-                        logger.info("Автоочистка пустых поставок завершена")
+                        logger.info(f"Прогрев кэша для hanging_only={hanging_only}, is_delivery={is_delivery}")
+                            
+                        # Получаем данные для конкретной комбинации параметров
+                        supplies_response = await supplies_service.get_list_supplies(
+                            hanging_only=hanging_only, 
+                            is_delivery=is_delivery
+                        )
+                            
+                        # Формируем ключ кэша с параметрами
+                        cache_key = f"cache:supplies_all:hanging_only:{hanging_only}|is_delivery:{is_delivery}"
+                            
+                        # Сохраняем в кэш
+                        await self.set(cache_key, supplies_response)
+                            
+                        logger.info(f"Кэш прогрет для {cache_key}: {len(supplies_response.supplies)} поставок")
+                            
                     except Exception as e:
-                        logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
+                        logger.error(f"Ошибка прогрева кэша для hanging_only={hanging_only}, is_delivery={is_delivery}: {str(e)}")
+                        continue
                     
-                    # Запускаем фоновую синхронизацию висячих поставок только для данных из WB API
-                    try:
-                        # Получаем данные из WB API для синхронизации
-                        supplies_ids = await supplies_service.get_information_to_supplies()
-                        supplies = supplies_service.group_result(await supplies_service.get_information_orders_to_supplies(supplies_ids))
+                # Запускаем очистку пустых поставок только для данных из WB API
+                try:
+                    from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
+                    cleaner = EmptySupplyCleaner(self.redis_client)
+                    await cleaner.auto_clean_empty_supplies()
+                    logger.info("Автоочистка пустых поставок завершена")
+                except Exception as e:
+                    logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
+                    
+                # Запускаем фоновую синхронизацию висячих поставок только для данных из WB API
+                try:
+                    # Получаем данные из WB API для синхронизации
+                    supplies_ids = await supplies_service.get_information_to_supplies()
+                    supplies = supplies_service.group_result(await supplies_service.get_information_orders_to_supplies(supplies_ids))
                         
-                        sync_hanging_supplies_with_data.delay(supplies)
-                        logger.info("Запущена фоновая синхронизация висячих поставок")
-                    except Exception as e:
-                        logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
+                    sync_hanging_supplies_with_data.delay(supplies)
+                    logger.info("Запущена фоновая синхронизация висячих поставок")
+                except Exception as e:
+                    logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
                         
             except Exception as e:
                 logger.error(f"Ошибка при прогреве кэша поставок: {str(e)}")
             
             # Прогрев данных заказов (с правильными ключами и полными объектами)
             try:
-                from src.db import db as main_db
-                async with main_db.connection() as connection:
-                    orders_service = OrdersService(connection)
+                orders_service = OrdersService(main_db)
                     
-                    # Базовый запрос: time_delta=1.0, wild=None
-                    orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
+                # Базовый запрос: time_delta=1.0, wild=None
+                orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
                     
-                    # Создаем полные объекты OrderDetail
-                    order_details = [OrderDetail(**order) for order in orders_data]
-                    grouped_orders = await orders_service.group_orders_by_wild(order_details)
+                # Создаем полные объекты OrderDetail
+                order_details = [OrderDetail(**order) for order in orders_data]
+                grouped_orders = await orders_service.group_orders_by_wild(order_details)
                     
-                    # Правильный ключ с параметрами - используем увеличенный TTL
-                    cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
-                    await self.set(cache_key_orders, grouped_orders)
+                # Правильный ключ с параметрами - используем увеличенный TTL
+                cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
+                await self.set(cache_key_orders, grouped_orders)
                     
-                    logger.info("Кэш заказов прогрет успешно")
+                logger.info("Кэш заказов прогрет успешно")
             except Exception as e:
                 logger.error(f"Ошибка при прогреве кэша заказов: {str(e)}")
                 
@@ -481,73 +478,69 @@ class GlobalCache:
             logger.warning(f"Не удалось очистить старые ключи: {str(e)}")
         
         try:
-            from src.db import db as main_db
-            async with main_db.connection() as connection:
-                supplies_service = SuppliesService(connection)
+            supplies_service = SuppliesService(main_db)
 
-                unified_data = await self._get_all_supplies_data_ultra_optimized(supplies_service)
+            unified_data = await self._get_all_supplies_data_ultra_optimized(supplies_service)
 
-                all_combinations = await self._generate_all_combinations_from_unified_data(
-                    unified_data, supplies_service
-                )
+            all_combinations = await self._generate_all_combinations_from_unified_data(
+                unified_data, supplies_service
+            )
                 
-                # 3. КЭШИРУЕМ ВСЕ 4 КОМБИНАЦИИ
-                cache_mappings = [
-                    {"key": "hanging_only:False|is_delivery:False", "data": all_combinations['wb_normal']},
-                    {"key": "hanging_only:True|is_delivery:False", "data": all_combinations['wb_hanging']},
-                    {"key": "hanging_only:False|is_delivery:True", "data": all_combinations['delivery_normal']},
-                    {"key": "hanging_only:True|is_delivery:True", "data": all_combinations['delivery_hanging']},
-                ]
+            # 3. КЭШИРУЕМ ВСЕ 4 КОМБИНАЦИИ
+            cache_mappings = [
+                {"key": "hanging_only:False|is_delivery:False", "data": all_combinations['wb_normal']},
+                {"key": "hanging_only:True|is_delivery:False", "data": all_combinations['wb_hanging']},
+                {"key": "hanging_only:False|is_delivery:True", "data": all_combinations['delivery_normal']},
+                {"key": "hanging_only:True|is_delivery:True", "data": all_combinations['delivery_hanging']},
+            ]
                 
-                for mapping in cache_mappings:
-                    try:
-                        cache_key = f"cache:supplies_all:{mapping['key']}"
-                        await self.set(cache_key, mapping['data'])
-                        
-                        logger.info(f"УЛЬТРА-ОПТИМИЗИРОВАННЫЙ кэш прогрет для {cache_key}: {len(mapping['data'].supplies)} поставок")
-                        
-                    except Exception as e:
-                        logger.error(f"Ошибка кэширования {mapping['key']}: {str(e)}")
-                        continue
-                
-                # 4. ОСТАЛЬНЫЕ ОПЕРАЦИИ (используем уже полученные данные)
+            for mapping in cache_mappings:
                 try:
-                    from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
-                    cleaner = EmptySupplyCleaner(self.redis_client)
-                    await cleaner.auto_clean_empty_supplies()
-                    logger.info("Автоочистка пустых поставок завершена")
+                    cache_key = f"cache:supplies_all:{mapping['key']}"
+                    await self.set(cache_key, mapping['data'])
+                        
+                    logger.info(f"УЛЬТРА-ОПТИМИЗИРОВАННЫЙ кэш прогрет для {cache_key}: {len(mapping['data'].supplies)} поставок")
+                        
                 except Exception as e:
-                    logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
+                    logger.error(f"Ошибка кэширования {mapping['key']}: {str(e)}")
+                    continue
                 
-                # 5. СИНХРОНИЗАЦИЯ ВИСЯЧИХ ПОСТАВОК (используем уже полученные WB данные)
-                try:
-                    # Используем уже полученные данные вместо повторного API вызова
-                    sync_hanging_supplies_with_data.delay(unified_data['wb_supplies_grouped'])
-                    logger.info("Запущена фоновая синхронизация висячих поставок (ультра-оптимизация)")
-                except Exception as e:
-                    logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
+            # 4. ОСТАЛЬНЫЕ ОПЕРАЦИИ (используем уже полученные данные)
+            try:
+                from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
+                cleaner = EmptySupplyCleaner(self.redis_client)
+                await cleaner.auto_clean_empty_supplies()
+                logger.info("Автоочистка пустых поставок завершена")
+            except Exception as e:
+                logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
+                
+            # 5. СИНХРОНИЗАЦИЯ ВИСЯЧИХ ПОСТАВОК (используем уже полученные WB данные)
+            try:
+                # Используем уже полученные данные вместо повторного API вызова
+                sync_hanging_supplies_with_data.delay(unified_data['wb_supplies_grouped'])
+                logger.info("Запущена фоновая синхронизация висячих поставок (ультра-оптимизация)")
+            except Exception as e:
+                logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
                         
         except Exception as e:
             logger.error(f"Ошибка при ультра-оптимизированном прогреве кэша поставок: {str(e)}")
         
         # 6. ПРОГРЕВ ДАННЫХ ЗАКАЗОВ (оставляем как есть)
         try:
-            from src.db import db as main_db
-            async with main_db.connection() as connection:
-                orders_service = OrdersService(connection)
+            orders_service = OrdersService(main_db)
                 
-                # Базовый запрос: time_delta=1.0, wild=None
-                orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
+            # Базовый запрос: time_delta=1.0, wild=None
+            orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
                 
-                # Создаем полные объекты OrderDetail
-                order_details = [OrderDetail(**order) for order in orders_data]
-                grouped_orders = await orders_service.group_orders_by_wild(order_details)
+            # Создаем полные объекты OrderDetail
+            order_details = [OrderDetail(**order) for order in orders_data]
+            grouped_orders = await orders_service.group_orders_by_wild(order_details)
                 
-                # Правильный ключ с параметрами - используем увеличенный TTL
-                cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
-                await self.set(cache_key_orders, grouped_orders)
+            # Правильный ключ с параметрами - используем увеличенный TTL
+            cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
+            await self.set(cache_key_orders, grouped_orders)
                 
-                logger.info("Кэш заказов прогрет успешно")
+            logger.info("Кэш заказов прогрет успешно")
         except Exception as e:
             logger.error(f"Ошибка при прогреве кэша заказов: {str(e)}")
         
@@ -936,7 +929,6 @@ class GlobalCache:
     async def _refresh_supplies_cache(self, hanging_only: bool = None, is_delivery: bool = None) -> bool:
         """Обновление кэша поставок с фильтрацией."""
         try:
-            from src.db import db as main_db
 
             # Определяем какие комбинации обновлять
             combinations_to_update = []
@@ -965,39 +957,38 @@ class GlobalCache:
                     "is_delivery": is_delivery
                 })
 
-            async with main_db.connection() as connection:
-                supplies_service = SuppliesService(connection)
+            supplies_service = SuppliesService(main_db)
 
-                success_count = 0
-                for combination in combinations_to_update:
-                    try:
-                        h_only = combination["hanging_only"]
-                        delivery = combination["is_delivery"]
+            success_count = 0
+            for combination in combinations_to_update:
+                try:
+                    h_only = combination["hanging_only"]
+                    delivery = combination["is_delivery"]
 
-                        logger.info(f"Обновление кэша поставок: hanging_only={h_only}, is_delivery={delivery}")
+                    logger.info(f"Обновление кэша поставок: hanging_only={h_only}, is_delivery={delivery}")
 
-                        # Получаем свежие данные
-                        supplies_response = await supplies_service.get_list_supplies(
-                            hanging_only=h_only,
-                            is_delivery=delivery
-                        )
+                    # Получаем свежие данные
+                    supplies_response = await supplies_service.get_list_supplies(
+                        hanging_only=h_only,
+                        is_delivery=delivery
+                    )
 
-                        # Формируем ключ кэша
-                        cache_key = f"cache:supplies_all:hanging_only:{h_only}|is_delivery:{delivery}"
+                    # Формируем ключ кэша
+                    cache_key = f"cache:supplies_all:hanging_only:{h_only}|is_delivery:{delivery}"
 
-                        # Удаляем старый ключ и сохраняем новые данные
-                        await self.delete(cache_key)
-                        await self.set(cache_key, supplies_response)
+                    # Удаляем старый ключ и сохраняем новые данные
+                    await self.delete(cache_key)
+                    await self.set(cache_key, supplies_response)
 
-                        logger.info(f"Кэш обновлен для {cache_key}: {len(supplies_response.supplies)} поставок")
-                        success_count += 1
+                    logger.info(f"Кэш обновлен для {cache_key}: {len(supplies_response.supplies)} поставок")
+                    success_count += 1
 
-                    except Exception as e:
-                        logger.error(f"Ошибка обновления кэша для {combination}: {str(e)}")
-                        continue
+                except Exception as e:
+                    logger.error(f"Ошибка обновления кэша для {combination}: {str(e)}")
+                    continue
 
-                logger.info(f"Обновление кэша поставок завершено: {success_count}/{len(combinations_to_update)} успешно")
-                return success_count == len(combinations_to_update)
+            logger.info(f"Обновление кэша поставок завершено: {success_count}/{len(combinations_to_update)} успешно")
+            return success_count == len(combinations_to_update)
 
         except Exception as e:
             logger.error(f"Критическая ошибка при обновлении кэша поставок: {str(e)}")
@@ -1058,7 +1049,6 @@ class GlobalCache:
         start_time = datetime.utcnow()
         
         try:
-            from src.db import db as main_db
             
             # Получаем кэшированные данные
             cached_delivery_normal = await self.get("cache:supplies_all:hanging_only:False|is_delivery:True")
@@ -1069,11 +1059,10 @@ class GlobalCache:
             cached_hanging_ids = self._extract_supply_ids_from_cache(cached_delivery_hanging)
             
             # Получаем текущие supply_id напрямую из БД (только номера)
-            async with main_db.connection() as connection:
-                supplies_service = SuppliesService(connection)
+            supplies_service = SuppliesService(main_db)
                 
-                current_normal_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=False)
-                current_hanging_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=True)
+            current_normal_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=False)
+            current_hanging_ids = await supplies_service.get_delivery_supplies_ids_only(hanging_only=True)
             
             # Вычисляем различия
             normal_diff = self._calculate_supply_differences(cached_normal_ids, current_normal_ids)

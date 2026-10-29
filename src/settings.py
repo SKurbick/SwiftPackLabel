@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     dp_app_name: str = os.environ.get("POSTGRES_DB")
 
     echo: bool = True
-    async_pg_pool_size: int = 5
-
+    DB_POOL_MIN_SIZE: int = int(os.getenv("DB_POOL_MIN_SIZE"))
+    DB_POOL_MAX_SIZE: int = int(os.getenv("DB_POOL_MAX_SIZE"))
     connection_timeout: float = 10.0  # seconds
     statement_timeout: float = 30.0  # seconds
 
