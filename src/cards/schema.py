@@ -1,6 +1,21 @@
-from typing import Optional
+from typing import Annotated, Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 import math
+
+
+class WildQrPrintRequest(BaseModel):
+    """Данные для печати этикеток с QR-кодом вилда."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    product_article: Annotated[
+        str,
+        Field(min_length=1, max_length=16, description="wild"),
+    ]
+    count: Annotated[
+        int,
+        Field(ge=1, le=1000, description="Кол-во этикеток"),
+    ]
 
 
 class DimensionsUpdateRequest(BaseModel):

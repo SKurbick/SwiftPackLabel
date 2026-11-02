@@ -2,11 +2,18 @@
 Сервис для работы с карточками товаров Wildberries.
 """
 import asyncio
+from io import BytesIO
 from typing import List, Dict, Any, Optional
 
+from fastapi import HTTPException, status
+
+from src.cards.schema import WildQrPrintRequest
+from src.cards.wild_qr import WildQrPdfGenerator
+from src.concurrency import run_blocking
 from src.logger import app_logger as logger
 from src.wildberries_api.cards import Cards
 from src.models.article import ArticleDB
+from src.models.card_data import CardData
 from src.utils import get_wb_tokens
 
 from src.response import AsyncHttpClient, parse_json
@@ -23,6 +30,21 @@ class CardsService:
         """
         self.db = db
         self.async_client = AsyncHttpClient(timeout=30, max_attempts=3)
+
+    async def print_wild_qr(self, data: WildQrPrintRequest) -> BytesIO:
+        card = await CardData(self.db).get_wild_qr_data(data.product_article)
+        if not card:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Вилд {data.product_article} не найден!",
+            )
+
+        return await run_blocking(
+            WildQrPdfGenerator().create_document,
+            card["product_article"],
+            card["subject_name"] or "",
+            data.count,
+        )
 
     async def get_vendor_codes_by_wild(self, wild: str) -> List[str]:
         """

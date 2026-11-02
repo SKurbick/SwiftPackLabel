@@ -1,15 +1,38 @@
 """
 Маршрутизатор API для работы с карточками товаров Wildberries.
 """
-from fastapi import APIRouter, Depends, Body, HTTPException, status
+from fastapi import APIRouter, Depends, Body, HTTPException, Response, status
 
 from src.logger import app_logger as logger
 from src.auth.dependencies import get_current_user
 from src.cards.cards import CardsService
-from src.cards.schema import DimensionsUpdateRequest
+from src.cards.schema import DimensionsUpdateRequest, WildQrPrintRequest
 from src.db import get_db_connection, AsyncGenerator
 
 cards = APIRouter(prefix='/cards', tags=['Cards'])
+
+
+@cards.post(
+    "/qr/print",
+    status_code=status.HTTP_200_OK,
+    summary="Печать этикеток с QR-кодом вилда",
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+async def print_wild_qr(
+        body: WildQrPrintRequest = Body(...),
+        db: AsyncGenerator = Depends(get_db_connection),
+        user: dict = Depends(get_current_user),
+) -> Response:
+    """qr этикетки вилда"""
+    logger.info(f"Пользователь {user.get('username', 'unknown')} запросил печать qr для {body.product_article}")
+    file = await CardsService(db).print_wild_qr(body)
+    return Response(
+        content=file.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={body.product_article}.pdf"
+        },
+    )
 
 
 @cards.post(

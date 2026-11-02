@@ -34,3 +34,14 @@ class CardData:
             JOIN article a ON cd.article_id = a.nm_id
             WHERE a.local_vendor_code = $1"""
         return await self.db.fetch(query, wild)
+
+    async def get_wild_qr_data(self, wild: str):
+        query = """
+        SELECT a.local_vendor_code AS product_article, cd.subject_name
+        FROM article a
+        JOIN card_data cd ON cd.article_id = a.nm_id
+        WHERE a.local_vendor_code = $1
+        ORDER BY cd.subject_name NULLS LAST
+        LIMIT 1
+        """
+        return await self.db.fetchrow(query, wild)
