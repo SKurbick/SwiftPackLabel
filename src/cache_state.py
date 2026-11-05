@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
 from src.concurrency import run_blocking
+from src.orders.constants_to_block import is_fbs2_supply
 
 
 TAKEN_ORDERS = "cache-state:taken-orders"
@@ -28,7 +29,10 @@ def exclude_completed(key: str, value: Any, taken: set[str], delivered: set[str]
                 result[wild] = info.model_copy(update={"orders": orders, "order_count": len(orders)})
         return result
     if key.startswith("cache:supplies_all:") and "is_delivery:False" in key:
-        supplies = [s for s in value.supplies if f"{s.account}:{s.supply_id}" not in delivered]
+        supplies = [
+            s for s in value.supplies
+            if f"{s.account}:{s.supply_id}" not in delivered and not is_fbs2_supply(s.name)
+        ]
         return value.model_copy(update={"supplies": supplies})
     return value
 

@@ -515,7 +515,10 @@ class GlobalCache:
 
         # 1. ЕДИНСТВЕННЫЙ вызов WB API для получения ВСЕХ WB поставок
         logger.info("1/5: Получение ВСЕХ WB поставок...")
-        wb_supplies_ids = await supplies_service.get_information_to_supplies(strict=True)  # ОДИН РАЗ!
+        all_active_supplies = await supplies_service.get_information_to_supplies(
+            strict=True, include_fbs2=True,
+        )
+        wb_supplies_ids = supplies_service.exclude_fbs2_assembly_supplies(all_active_supplies)
         logger.info("2/5: Получение ВСЕХ WB заказов...")
         wb_orders_data = await supplies_service.get_information_orders_to_supplies(wb_supplies_ids, strict=True)  # ОДИН РАЗ!
         wb_supplies_grouped = supplies_service.group_result(wb_orders_data)
@@ -530,7 +533,7 @@ class GlobalCache:
         logger.info("4/5: Обработка delivery поставок...")
         all_db_supplies_ids = supplies_service._merge_supplies_data(basic_supplies_ids, fictitious_supplies_ids)
         filtered_delivery_supplies_ids = supplies_service._exclude_wb_active_from_db_supplies(
-            all_db_supplies_ids, wb_supplies_ids  # ПЕРЕИСПОЛЬЗУЕМ!
+            all_db_supplies_ids, all_active_supplies
         )
 
         # 4. НОВОЕ: Используем трехуровневую систему кэширования для delivery поставок

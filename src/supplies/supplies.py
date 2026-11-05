@@ -21,7 +21,7 @@ from src.service.warehouses import (
 from src.service.service_pdf import collect_images_sticker_to_pdf
 from src.settings import settings
 from src.logger import app_logger as logger
-from src.orders.constants_to_block import BLOCKED_WILDS
+from src.orders.constants_to_block import BLOCKED_WILDS, is_fbs2_supply
 from src.supplies.integration_1c import OneCIntegration
 from src.utils import get_wb_tokens, process_local_vendor_code
 from src.wildberries_api.supplies import Supplies
@@ -361,13 +361,14 @@ class SuppliesService:
                                                         x[0])))
 
     @staticmethod
-    async def get_information_to_supplies(strict: bool = False) -> List[Dict]:
+    async def get_information_to_supplies(strict: bool = False, include_fbs2: bool = False) -> List[Dict]:
+        """Собирает активные поставки; для сверки доставки учитывает оба склада."""
         logger.info("Получение данных по всем кабинетам о поставках")
         accounts: List[str] = []
         tasks: List = []
         for account, token in get_wb_tokens().items():
             accounts.append(account)
-            tasks.append(Supplies(account, token).get_supplies_filter_done())
+            tasks.append(Supplies(account, token).get_supplies_filter_done(include_fbs2=include_fbs2))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         supplies: List[Dict] = []
@@ -380,6 +381,21 @@ class SuppliesService:
             else:
                 supplies.append(result)
         return supplies
+
+    @staticmethod
+    def exclude_fbs2_assembly_supplies(supplies: List[Dict]) -> List[Dict]:
+        """Убирает второй склад перед загрузкой состава поставок на сборке."""
+        result = []
+        for group in supplies:
+            selected = {}
+            for account, items in group.items():
+                selected[account] = [supply for supply in items if not is_fbs2_supply(supply.get('name'))]
+                logger.info(
+                    f"Отбор сборки ({account}): исключено ФБС 2: {len(items) - len(selected[account])}, "
+                    f"составов к загрузке: {len(selected[account])}"
+                )
+            result.append(selected)
+        return result
 
     async def get_information_to_supply_details(self, basic_supplies_ids: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -561,6 +577,15 @@ class SuppliesService:
             for order_ids in supply_order_ids.values():
                 all_order_ids.extend(order_ids)
                 order_ids_by_account[account].update(order_ids)
+
+        for group in supply_ids:
+            for account, items in group.items():
+                for supply in items:
+                    if all_supply_order_ids.get(account, {}).get(supply.get('id')) == []:
+                        logger.info(
+                            f"Пустой состав: {supply.get('id')} ({account}), "
+                            f"название={supply.get('name')!r}"
+                        )
 
         logger.info(f'Получено {len(all_order_ids)} order_ids из WB API (параллельно по {len(supplies_by_account)} аккаунтам)')
 
@@ -1146,7 +1171,7 @@ class SuppliesService:
             logger.info("Режим доставленных поставок: Redis → БД хранилище → WB API")
 
             # 1. Получаем номера доставленных поставок из источников
-            wb_active_supplies_ids = await self.get_information_to_supplies()
+            wb_active_supplies_ids = await self.get_information_to_supplies(include_fbs2=True)
             basic_supplies_ids = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
             fictitious_supplies_ids = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(
                 is_fictitious_delivered=True
@@ -1296,7 +1321,7 @@ class SuppliesService:
             logger.info(f"Получение только supply_id для delivery поставок, hanging_only={hanging_only}")
 
             # Получаем базовые данные как в get_list_supplies для is_delivery=True
-            wb_active_supplies_ids = await self.get_information_to_supplies()
+            wb_active_supplies_ids = await self.get_information_to_supplies(include_fbs2=True)
             basic_supplies_ids = await ShipmentOfGoods(self.db).get_weekly_supply_ids()
             fictitious_supplies_ids = await HangingSupplies(self.db).get_weekly_fictitious_supplies_ids(
                 is_fictitious_delivered=True)

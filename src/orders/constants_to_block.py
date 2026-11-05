@@ -1,9 +1,15 @@
 
 FBS2_SUPPLY_NAME_PREFIXES = (
-    "supply for [",
-    "КИЗ_ВЕКТОР",
-    "КИЗ_СТАРТ"
+    "supply",
+    "КИЗ",
 )
+
+
+def is_fbs2_supply(name: str | None) -> bool:
+    """Определяет поставку второго склада по началу названия."""
+    normalized = (name or "").strip().casefold()
+    return normalized.startswith(tuple(prefix.casefold() for prefix in FBS2_SUPPLY_NAME_PREFIXES))
+
 
 BLOCKED_WILDS = {
     "wild1981",

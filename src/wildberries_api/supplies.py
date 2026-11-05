@@ -5,7 +5,7 @@ from src.response import ExternalApiError, ensure_response, parse_json
 from src.users.account import Account
 from src.logger import app_logger as logger
 from src.wildberries_api.orders import Orders
-from src.orders.constants_to_block import FBS2_SUPPLY_NAME_PREFIXES
+from src.orders.constants_to_block import is_fbs2_supply
 
 from src.cache_state import operation_cache
 
@@ -18,12 +18,19 @@ class Supplies(Account):
         super().__init__(account, token)
         self.url: str = "https://marketplace-api.wildberries.ru/api/v3/supplies"
 
-    async def get_supplies_filter_done(self):
+    async def get_supplies_filter_done(self, include_fbs2: bool = False):
+        """Возвращает активные поставки, исключая второй склад для сборки."""
         supplies = await self.get_supplies()
-        return {self.account: [sup for sup in supplies if not sup.get('done')]}
+        active = [sup for sup in supplies if not sup.get('done')]
+        selected = active if include_fbs2 else [sup for sup in active if not is_fbs2_supply(sup.get('name'))]
+        logger.info(
+            f"Поставки на сборке ({self.account}): всего {len(active)}, "
+            f"исключено ФБС 2: {len(active) - len(selected)}, к загрузке: {len(selected)}"
+        )
+        return {self.account: selected}
 
     async def get_supplies(self):
-        """Постранично забирает поставки откидываю для фбс2."""
+        """Загружает страницы поставок без отбора по названию и статусу."""
         supplies = []
         next_value = 0
         seen_cursors = set()
@@ -32,10 +39,7 @@ class Supplies(Account):
             response = await self.async_client.get(self.url, params=params, headers=self.headers)
             data = parse_json(ensure_response(response, f"Список поставок кабинета {self.account}"))
 
-            for sup in data.get("supplies") or []:
-                sup_name: str = sup.get("name") or ""
-                if not sup_name.startswith(FBS2_SUPPLY_NAME_PREFIXES):
-                    supplies.append(sup)
+            supplies.extend(data.get("supplies") or [])
 
             next_value = data.get("next")
             logger.info(f"Получены {len(supplies)} поставок and next {next_value}, account {self.account}")
