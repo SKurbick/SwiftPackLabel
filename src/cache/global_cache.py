@@ -36,6 +36,7 @@ from redis.asyncio.lock import Lock
 from src.cache_state import (
     UPDATED_AT,
     OperationCache,
+    hide_empty_assembly_supplies,
     is_snapshot,
     operation_cache,
     publish_snapshots,
@@ -144,6 +145,7 @@ class GlobalCache:
                 data = await run_blocking(pickle.loads, cached_data)
                 if is_snapshot(key):
                     data = await read_snapshot(self.redis_client, key, data)
+                    data = hide_empty_assembly_supplies(key, data)
                 logger.debug(f"Кэш HIT для ключа: {key}")
                 return data
             else:

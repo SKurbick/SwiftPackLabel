@@ -19,6 +19,14 @@ def is_snapshot(key: str) -> bool:
     return key.startswith(("cache:orders_all:", "cache:supplies_all:"))
 
 
+def hide_empty_assembly_supplies(key: str, value: Any) -> Any:
+    """Скрывает пустые поставки в ответе сборки, сохраняя их для очистки."""
+    if key.startswith("cache:supplies_all:") and "is_delivery:False" in key:
+        supplies = [supply for supply in value.supplies if supply.orders or supply.count > 0]
+        return value.model_copy(update={"supplies": supplies})
+    return value
+
+
 def exclude_completed(key: str, value: Any, taken: set[str], delivered: set[str]) -> Any:
     """Исключает взятые СЗ и отправленные поставки из нужных списков."""
     if key.startswith("cache:orders_all:"):
