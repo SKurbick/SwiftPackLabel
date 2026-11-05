@@ -21,26 +21,12 @@ cache = APIRouter(prefix='/cache', tags=['Cache'])
 @cache.post("/refresh",
             status_code=status.HTTP_200_OK,
             summary="Обновление кэша",
-            description="Обновляет кэш системы - весь или конкретный тип")
+            description="Запускает фоновое обновление. Состояние доступно в GET /cache/status")
 async def refresh_cache(
         cache_type: CacheType = Query(CacheType.ALL, description="Тип кэша для обновления"),
         user: dict = Depends(get_current_user)
 ) -> dict:
-    """
-    Обновление кэша системы.
-    
-    Args:
-        cache_type: Тип кэша для обновления:
-            - all: весь кэш
-            - supplies-wb-normal: обычные поставки из WB (hanging_only=False, is_delivery=False)
-            - supplies-wb-hanging: висячие поставки из WB (hanging_only=True, is_delivery=False)
-            - supplies-delivery-normal: обычные поставки на доставке (hanging_only=False, is_delivery=True)
-            - supplies-delivery-hanging: висячие поставки на доставке (hanging_only=True, is_delivery=True)
-        user: Данные текущего пользователя (требуется авторизация)
-        
-    Returns:
-        dict: Результат обновления кэша
-    """
+    """Запускает обновление и сразу возвращает состояние задачи."""
     logger.info(f"Обновление кэша типа '{cache_type}' запущено пользователем {user.get('username', 'unknown')}")
     
     if not global_cache.is_connected:
@@ -49,53 +35,22 @@ async def refresh_cache(
             detail="Redis кэш недоступен. Проверьте подключение к Redis серверу."
         )
     
-    try:
-        # Определяем какой кэш обновлять
-        if cache_type == CacheType.ALL:
-            success = await global_cache.force_refresh_cache()
-            cache_key = "all"
-            message = "Весь кэш обновлен" if success else "Ошибка обновления всего кэша"
-            
-        elif cache_type == CacheType.SUPPLIES_WB_NORMAL:
-            success = await global_cache.refresh_specific_cache("supplies", hanging_only=False, is_delivery=False)
-            cache_key = "cache:supplies_all:hanging_only:False|is_delivery:False"
-            message = "Кэш WB обычных поставок обновлен" if success else "Ошибка обновления WB обычных поставок"
-            
-        elif cache_type == CacheType.SUPPLIES_WB_HANGING:
-            success = await global_cache.refresh_specific_cache("supplies", hanging_only=True, is_delivery=False)
-            cache_key = "cache:supplies_all:hanging_only:True|is_delivery:False"
-            message = "Кэш WB висячих поставок обновлен" if success else "Ошибка обновления WB висячих поставок"
-            
-        elif cache_type == CacheType.SUPPLIES_DELIVERY_NORMAL:
-            success = await global_cache.refresh_specific_cache("supplies", hanging_only=False, is_delivery=True)
-            cache_key = "cache:supplies_all:hanging_only:False|is_delivery:True"
-            message = "Кэш delivery обычных поставок обновлен" if success else "Ошибка обновления delivery обычных поставок"
-            
-        elif cache_type == CacheType.SUPPLIES_DELIVERY_HANGING:
-            success = await global_cache.refresh_specific_cache("supplies", hanging_only=True, is_delivery=True)
-            cache_key = "cache:supplies_all:hanging_only:True|is_delivery:True"
-            message = "Кэш delivery висячих поставок обновлен" if success else "Ошибка обновления delivery висячих поставок"
-            
-        else:
-            raise HTTPException(status_code=400, detail=f"Неизвестный тип кэша: {cache_type}")
-        
-        if success:
-            logger.info(f"Обновление кэша '{cache_type}' завершено успешно пользователем {user.get('username', 'unknown')}")
-        else:
-            logger.error(f"Обновление кэша '{cache_type}' завершилось с ошибкой")
-            
-        return {
-            "success": success,
-            "message": message,
-            "cache_type": cache_type,
-            "cache_key": cache_key
-        }
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Критическая ошибка при обновлении кэша '{cache_type}': {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Внутренняя ошибка при обновлении кэша: {str(e)}"
-        )
+    key = "all"
+    if cache_type != CacheType.ALL:
+        hanging = cache_type in (CacheType.SUPPLIES_WB_HANGING, CacheType.SUPPLIES_DELIVERY_HANGING)
+        delivery = cache_type in (CacheType.SUPPLIES_DELIVERY_NORMAL, CacheType.SUPPLIES_DELIVERY_HANGING)
+        key = f"cache:supplies_all:hanging_only:{hanging}|is_delivery:{delivery}"
+    result = await global_cache.request_refresh(key)
+    return {
+        "success": True,
+        "message": "Обновление запущено" if result["started"] else "Обновление уже выполняется",
+        "cache_type": cache_type,
+        "cache_key": key,
+        **result,
+    }
+
+
+@cache.get("/status", summary="Состояние фонового обновления кеша")
+async def cache_status(user: dict = Depends(get_current_user)) -> dict:
+    """Возвращает время обновления снимков и состояние фоновых задач."""
+    return await global_cache.get_cache_info()

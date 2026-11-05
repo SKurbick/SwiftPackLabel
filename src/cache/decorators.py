@@ -6,88 +6,68 @@ import inspect
 from .global_cache import global_cache
 from src.logger import app_logger as logger
 
+from fastapi import HTTPException
+
+from src.cache_state import is_snapshot
+from src.db import db as main_db
+
 
 def global_cached(key: str, ttl: Optional[int] = None, cache_only: bool = False):
-    """
-    Декоратор для кэширования результатов функций.
-    
-    Args:
-        key: Ключ для кэширования
-        ttl: Время жизни кэша в секундах (необязательно)
-        cache_only: Если True, данные берутся ТОЛЬКО из кэша (по умолчанию True)
-        
-    Usage:
-        @global_cached(key="my_function_cache", cache_only=True)
-        async def my_function():
-            return expensive_operation()
-    """
+    """Возвращает данные из кеша, а снимки СЗ и поставок обновляет в фоне."""
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        signature = inspect.signature(func)
+
         @functools.wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
-            # Генерируем ключ кэша
-            cache_key = f"cache:{key}"
-            
-            # Добавляем параметры к ключу если они есть
-            if args or kwargs:
-                params_str = _serialize_params(args, kwargs)
-                cache_key = f"{cache_key}:{params_str}"
-            
-            # Проверяем подключение к кэшу
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            params = dict(bound.arguments)
+            for name, parameter in signature.parameters.items():
+                if parameter.annotation is float and isinstance(params.get(name), (int, float)):
+                    params[name] = float(params[name])
+            cache_key = f"cache:{key}:{_serialize_params((), params)}"
             if not global_cache.is_connected:
                 if cache_only:
-                    logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Кэш недоступен для {func.__name__}, но cache_only=True")
-                    raise Exception(f"Cache unavailable for cache-only function {func.__name__}")
-                else:
-                    logger.warning(f"Кэш недоступен для функции {func.__name__}, выполняем без кэширования")
-                    return await func(*args, **kwargs)
-            
-            try:
-                # Пытаемся получить данные из кэша
-                cached_result = await global_cache.get(cache_key)
-                if cached_result is not None:
-                    logger.debug(f"Cache HIT для {func.__name__} с ключом {cache_key}")
-                    return cached_result
-                
-                # Если данных в кэше нет
-                if cache_only:
-                    logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Данные отсутствуют в кэше для {func.__name__} (cache_only=True)")
-                    logger.error(f"Ключ кэша: {cache_key}")
-                    
-                    # Попытаемся найти похожие ключи для диагностики
-                    try:
-                        if global_cache.redis_client:
-                            all_keys = await global_cache.redis_client.keys("cache:*")
-                            matching_keys = [k.decode('utf-8') if isinstance(k, bytes) else k for k in all_keys if key in str(k)]
-                            logger.error(f"Доступные ключи с '{key}': {matching_keys}")
-                    except Exception:
-                        pass
-                    
-                    # Вместо исключения попытаемся выполнить функцию как fallback
-                    logger.warning(f"Fallback: выполняем {func.__name__} без кэша из-за отсутствия данных")
-                    result = await func(*args, **kwargs)
-                    # Сохраняем результат в кэш для следующих запросов
-                    await global_cache.set(cache_key, result, ttl)
-                    return result
-                
-                # Если cache_only=False, выполняем функцию
-                logger.warning(f"Cache MISS для {func.__name__}, выполняем функцию")
-                result = await func(*args, **kwargs)
-                
-                # Сохраняем результат в кэш
-                await global_cache.set(cache_key, result, ttl)
-                logger.debug(f"Результат {func.__name__} сохранен в кэш с ключом {cache_key}")
-                
-                return result
-                
-            except Exception as e:
-                if cache_only:
-                    logger.error(f"КРИТИЧЕСКАЯ ОШИБКА в кэше для {func.__name__}: {str(e)}")
-                    raise
-                else:
-                    logger.error(f"Ошибка при работе с кэшем для функции {func.__name__}: {str(e)}")
-                    # В случае ошибки кэша, выполняем функцию без кэширования
-                    return await func(*args, **kwargs)
-        
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Кеш временно недоступен",
+                        headers={"Retry-After": "5"},
+                    )
+                return await func(*args, **kwargs)
+
+            cached = await global_cache.get(cache_key)
+            if is_snapshot(cache_key):
+                async def load():
+                    loader_params = dict(bound.arguments)
+                    if "db" in loader_params:
+                        loader_params["db"] = main_db
+                    return await func(**loader_params)
+
+                try:
+                    if cached is None or not await global_cache.is_fresh(cache_key):
+                        await global_cache.request_refresh(
+                            cache_key, loader=load if key == "orders_all" else None,
+                        )
+                except Exception:
+                    if cached is None:
+                        raise
+                    logger.exception(
+                        f"Не удалось запустить обновление {cache_key}; возвращаем прежний снимок"
+                    )
+                if cached is not None:
+                    return cached
+                raise HTTPException(
+                    status_code=503,
+                    detail="Первоначальная загрузка данных выполняется. Повторите запрос через несколько секунд",
+                    headers={"Retry-After": "5"},
+                )
+
+            if cached is not None:
+                return cached
+            result = await func(*args, **kwargs)
+            await global_cache.set(cache_key, result, ttl)
+            return result
+
         return wrapper
     return decorator
 

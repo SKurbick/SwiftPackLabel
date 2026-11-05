@@ -66,7 +66,7 @@ async def startup() -> None:
     if settings.CACHE_WARMUP_ON_STARTUP:
         source_token = current_refresh_source.set("startup")
         try:
-            await global_cache.warm_up_cache()
+            await global_cache.request_refresh()
         finally:
             current_refresh_source.reset(source_token)
     else:

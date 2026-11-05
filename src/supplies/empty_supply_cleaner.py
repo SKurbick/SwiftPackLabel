@@ -43,11 +43,11 @@ class EmptySupplyCleaner:
         
         try:
             # Получаем обычные поставки
-            cache_key_normal = "cache:supplies_all:hanging_only:False"
+            cache_key_normal = "cache:supplies_all:hanging_only:False|is_delivery:False"
             cached_normal = await self.redis.get(cache_key_normal)
             
             # Получаем висячие поставки  
-            cache_key_hanging = "cache:supplies_all:hanging_only:True"
+            cache_key_hanging = "cache:supplies_all:hanging_only:True|is_delivery:False"
             cached_hanging = await self.redis.get(cache_key_hanging)
             
             if not cached_normal and not cached_hanging:

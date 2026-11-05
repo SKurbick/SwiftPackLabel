@@ -690,7 +690,7 @@ async def clean_empty_supplies(
 
     try:
 
-        cleaner = EmptySupplyCleaner(global_cache.redis)
+        cleaner = EmptySupplyCleaner(global_cache.redis_client)
         result = await cleaner.process_empty_supplies()
 
         return JSONResponse(content=result, status_code=status.HTTP_200_OK)

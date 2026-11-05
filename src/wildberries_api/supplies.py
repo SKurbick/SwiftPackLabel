@@ -7,6 +7,8 @@ from src.logger import app_logger as logger
 from src.wildberries_api.orders import Orders
 from src.orders.constants_to_block import FBS2_SUPPLY_NAME_PREFIXES
 
+from src.cache_state import operation_cache
+
 WB_SUPPLY_ORDERS_BATCH_SIZE = 100
 
 
@@ -177,6 +179,7 @@ class Supplies(Account):
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
         response = await self.async_client.patch(url, json={"orders": [order_id]}, headers=self.headers)
         ensure_response(response, f"Добавление заказа {order_id} в поставку {supply_id} ({self.account})")
+        await self._record_taken_orders([order_id])
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return response
 
@@ -236,7 +239,16 @@ class Supplies(Account):
         logger.info(
             f"Добавлено {len(order_ids)} заданий в поставку {supply_id} для аккаунта {self.account}"
         )
+        await self._record_taken_orders(order_ids)
         return set(order_ids)
+
+    @staticmethod
+    async def _record_taken_orders(order_ids: List[int]) -> None:
+        """Отмечает СЗ, добавление которых уже подтвердил WB."""
+        try:
+            await operation_cache.record_taken_orders(order_ids)
+        except Exception:
+            logger.exception("WB принял задания, не удалось обновить кеш взятых в круг")
 
     async def delete_supply(self, supply_id: str) -> dict:
         """
@@ -263,6 +275,10 @@ class Supplies(Account):
         """
         response = await self.async_client.patch(f"{self.url}/{supply_id}/deliver", headers=self.headers)
         ensure_response(response, f"Перевод поставки {supply_id} в доставку ({self.account})")
+        try:
+            await operation_cache.mark_supply_delivered(self.account, supply_id)
+        except Exception as exc:
+            logger.error(f"Доставка подтверждена WB, не удалось обновить кеш {supply_id}: {exc}")
         logger.info(
             f"Перевод поставки {supply_id} в статус доставки для аккаунта {self.account}. Код ответа: {response}")
         return response

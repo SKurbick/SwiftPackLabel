@@ -3,7 +3,7 @@ import json
 import pickle
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional, Dict, Iterable, List
+from typing import Any, AsyncIterator, Optional, Dict, Iterable, List, Awaitable, Callable
 from datetime import datetime, timedelta
 import redis.asyncio as redis
 from redis.exceptions import LockError
@@ -30,6 +30,19 @@ from src.models.delivered_supplies import DeliveredSupplies
 
 from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
 
+from functools import partial
+from redis.asyncio.lock import Lock
+
+from src.cache_state import (
+    UPDATED_AT,
+    OperationCache,
+    is_snapshot,
+    operation_cache,
+    publish_snapshots,
+    read_snapshot,
+)
+from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
+
 ORDERS_CACHE_PATTERN = "cache:orders_all:*"
 
 
@@ -54,6 +67,7 @@ class GlobalCache:
         self.is_connected = False
         # Флаг для тестирования оптимизированного метода кэширования
         self.use_optimized_cache = True  # Изменить на True для тестирования нового метода
+        self.refresh_tasks: Dict[str, asyncio.Task] = {}
         
     async def connect(self) -> None:
         """Подключение к Redis серверу."""
@@ -74,7 +88,11 @@ class GlobalCache:
             
             # Проверка подключения
             await self.redis_client.ping()
+            for pattern in ("cache:orders_all:*", "cache:supplies_all:*"):
+                async for key in self.redis_client.scan_iter(match=pattern):
+                    await self.redis_client.persist(key)
             self.is_connected = True
+            operation_cache.client = self.redis_client
             logger.info(f"Успешное подключение к Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
             
         except Exception as e:
@@ -98,6 +116,8 @@ class GlobalCache:
                 await self.redis_client.close()
                 
             self.is_connected = False
+            if operation_cache.client is self.redis_client:
+                operation_cache.client = None
             logger.info("Отключение от Redis выполнено успешно")
             
         except Exception as e:
@@ -122,6 +142,8 @@ class GlobalCache:
             if cached_data:
                 # Десериализация данных
                 data = await run_blocking(pickle.loads, cached_data)
+                if is_snapshot(key):
+                    data = await read_snapshot(self.redis_client, key, data)
                 logger.debug(f"Кэш HIT для ключа: {key}")
                 return data
             else:
@@ -149,8 +171,9 @@ class GlobalCache:
             return False
             
         try:
-            # Удаляем старый ключ перед записью нового для экономии памяти
-            await self.redis_client.delete(key)
+            if is_snapshot(key):
+                await publish_snapshots(self.redis_client, {key: value})
+                return True
             
             # Сериализация данных
             serialized_data = await run_blocking(pickle.dumps, value)
@@ -210,37 +233,102 @@ class GlobalCache:
                 logger.warning(f"лок «{name}» истёк раньше, чем закончилась операция")
 
     async def remove_orders_from_orders_cache(self, order_ids: Iterable[int]) -> None:
-        """Убирает взятые в круг задания из закешированного списка «Создать поставку»"""
-        taken = set(order_ids)
-        if not taken or not self.is_connected or not self.redis_client:
+        """Убирает взятые СЗ из всех списков создания круга."""
+        if self.is_connected and self.redis_client:
+            try:
+                await OperationCache(self.redis_client).record_taken_orders(order_ids)
+            except Exception:
+                logger.exception("Не удалось убрать взятые в круг задания из кеша")
+
+    async def mark_supply_delivered(self, account: str, supply_id: str) -> None:
+        """Убирает отправленную поставку из кеша сборки."""
+        if self.is_connected and self.redis_client:
+            await OperationCache(self.redis_client).mark_supply_delivered(account, supply_id)
+
+    async def is_fresh(self, key: str) -> bool:
+        """Проверяет, пора ли обновить снимок."""
+        stamp = await self.redis_client.hget(UPDATED_AT, key)
+        return bool(stamp and time.time() - float(stamp) < settings.CACHE_TTL)
+
+    async def request_refresh(
+        self, key: str = "all", loader: Callable[[], Awaitable[Any]] | None = None,
+    ) -> dict[str, bool]:
+        """Запускает одно фоновое обновление для всех пользователей."""
+        scope = "all" if key == "all" or key.startswith("cache:supplies_all:") else key
+        if scope != "all" and "time_delta:1.0|wild:None" in key:
+            if await self.redis_client.exists("lock:cache-refresh:all"):
+                return {"refreshing": True, "started": False}
+        lock = self.redis_client.lock(f"lock:cache-refresh:{scope}", timeout=90, blocking_timeout=0)
+        if not await lock.acquire(blocking=False):
+            return {"refreshing": True, "started": False}
+
+        task = asyncio.create_task(self._run_refresh(scope, key, loader, lock))
+        self.refresh_tasks[scope] = task
+        self.background_tasks.append(task)
+        task.add_done_callback(partial(self._forget_refresh, scope))
+        return {"refreshing": True, "started": True}
+
+    def _forget_refresh(self, scope: str, task: asyncio.Task) -> None:
+        """Убирает завершённую задачу из списка активных."""
+        if self.refresh_tasks.get(scope) is task:
+            self.refresh_tasks.pop(scope)
+        if task in self.background_tasks:
+            self.background_tasks.remove(task)
+
+    @staticmethod
+    async def _renew_refresh_lock(lock: Lock) -> None:
+        """Продлевает блокировку, пока идёт обновление."""
+        while True:
+            await asyncio.sleep(30)
+            await lock.extend(90, replace_ttl=True)
+
+    async def _build_refresh(self, key: str, loader: Callable[[], Awaitable[Any]] | None) -> None:
+        """Получает данные и сохраняет готовый снимок."""
+        if loader is None:
+            await self._warm_up_cache()
             return
+        result = await loader()
+        if not await self.set(key, result):
+            raise RuntimeError(f"Не удалось опубликовать {key}")
 
+    async def _save_refresh_status(self, scope: str, status: str, error: Exception | None = None) -> None:
+        """Сохраняет результат обновления для проверки состояния."""
+        result = {"status": status, "at": time.time()}
+        if error is not None:
+            result["error"] = safe_error(error)
+        await self.redis_client.hset("cache-state:refresh-status", scope, json.dumps(result))
+
+    async def _run_refresh(
+        self, scope: str, key: str, loader: Callable[[], Awaitable[Any]] | None, lock: Lock,
+    ) -> bool:
+        """Выполняет обновление и освобождает блокировку после завершения."""
+        source_token = current_refresh_source.set("background")
+        heartbeat = asyncio.create_task(self._renew_refresh_lock(lock))
+        builder = asyncio.create_task(self._build_refresh(key, loader))
         try:
-            async for raw_key in self.redis_client.scan_iter(match=ORDERS_CACHE_PATTERN):
-                key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
-                grouped = await self.get(key)
-                if not isinstance(grouped, dict):
-                    continue
-
-                pruned = {}
-                for wild, info in grouped.items():
-                    orders = [order for order in info.orders if order.id not in taken]
-                    if orders:
-                        pruned[wild] = info.model_copy(update={"orders": orders, "order_count": len(orders)})
-
-                removed = (sum(len(info.orders) for info in grouped.values())
-                           - sum(len(info.orders) for info in pruned.values()))
-                if not removed:
-                    continue
-
-                ttl = await self.redis_client.ttl(key)
-                if ttl == -2:  
-                    continue
-                await self.set(key, pruned, ttl if ttl > 0 else None)
-                logger.info(f"Из кеша {key} убрано взятых в круг заданий: {removed}")
-
-        except Exception as e:
-            logger.error(f"Не удалось убрать взятые в круг задания из кеша заказов: {e}")
+            done, _ = await asyncio.wait({builder, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
+            if heartbeat in done:
+                builder.cancel()
+                await asyncio.gather(builder, return_exceptions=True)
+                await heartbeat
+            await builder
+            await self._save_refresh_status(scope, "success")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"Ошибка обновления {scope}; сохранён предыдущий снимок")
+            await self._save_refresh_status(scope, "error", exc)
+            return False
+        finally:
+            current_refresh_source.reset(source_token)
+            builder.cancel()
+            heartbeat.cancel()
+            await asyncio.gather(builder, heartbeat, return_exceptions=True)
+            try:
+                await lock.release()
+            except LockError:
+                logger.warning(f"Истёк замок обновления {scope}")
 
     async def clear_all(self) -> bool:
         """
@@ -312,24 +400,43 @@ class GlobalCache:
         try:
             info = await self.redis_client.info()
             keys_count = await self.redis_client.dbsize()
+            refresh_status = await self.redis_client.hgetall("cache-state:refresh-status")
+            updated_at = await self.redis_client.hgetall(UPDATED_AT)
+            active_refreshes = [
+                key.decode().removeprefix("lock:cache-refresh:")
+                async for key in self.redis_client.scan_iter(match="lock:cache-refresh:*")
+            ]
             
             return {
                 "connected": True,
                 "keys_count": keys_count,
                 "used_memory": info.get("used_memory_human", "Unknown"),
                 "connected_clients": info.get("connected_clients", 0),
-                "uptime": info.get("uptime_in_seconds", 0)
+                "uptime": info.get("uptime_in_seconds", 0),
+                "snapshots_updated_at": {
+                    key.decode(): float(value) for key, value in updated_at.items()
+                },
+                "refresh_status": {
+                    key.decode(): json.loads(value) for key, value in refresh_status.items()
+                },
+                "refreshing": bool(active_refreshes),
+                "active_refreshes": active_refreshes,
             }
             
         except Exception as e:
             logger.error(f"Ошибка при получении информации о кэше: {str(e)}")
             return {"connected": False, "error": str(e)}
     
-    async def warm_up_cache(self) -> None:
-        """
-        Прогрев кэша при запуске приложения.
-        Автоматически выбирает оптимизированный или legacy метод.
-        """
+    async def warm_up_cache(self) -> bool:
+        """Запускает общее обновление и ждёт его результата."""
+        await self.request_refresh()
+        task = self.refresh_tasks.get("all")
+        if task:
+            return await asyncio.shield(task)
+        return False
+
+    async def _warm_up_cache(self) -> None:
+        """Обновляет кеш и записывает результат в диагностику."""
         refresh_id = new_refresh_id()
         source = current_refresh_source.get() or "unknown"
         refresh_token = current_refresh_id.set(refresh_id)
@@ -350,202 +457,51 @@ class GlobalCache:
             current_refresh_id.reset(refresh_token)
 
     async def warm_up_cache_legacy(self) -> None:
-        """
-        LEGACY: Прогрев кэша при запуске приложения (старый метод).
-        Заполняет кэш наиболее часто используемыми данными.
-        """
-        if not self.is_connected:
-            logger.warning("Redis не подключен, пропускаем прогрев кэша")
-            return
-            
-        logger.info("Начинаем прогрев кэша...")
-        
-        # Очищаем старые ключи перед прогревом для экономии памяти
-        try:
-            old_keys = await self.redis_client.keys("cache:*")
-            if old_keys:
-                await self.redis_client.delete(*old_keys)
-                logger.info(f"Удалено {len(old_keys)} старых ключей кэша")
-        except Exception as e:
-            logger.warning(f"Не удалось очистить старые ключи: {str(e)}")
-        
-        try:
-            
-            # Прогрев данных поставок для всех комбинаций hanging_only и is_delivery
-            try:
-                supplies_service = SuppliesService(main_db)
-                    
-                # Прогрев кэша для всех комбинаций параметров
-                cache_combinations = [
-                    {"hanging_only": False, "is_delivery": False},  # Обычные поставки из WB API
-                    {"hanging_only": True, "is_delivery": False},   # Висячие поставки из WB API
-                    {"hanging_only": False, "is_delivery": True},   # Обычные поставки из доставки
-                    {"hanging_only": True, "is_delivery": True},    # Висячие поставки из доставки
-                ]
-                    
-                for combination in cache_combinations:
-                    hanging_only = combination["hanging_only"]
-                    is_delivery = combination["is_delivery"]
-                        
-                    try:
-                        logger.info(f"Прогрев кэша для hanging_only={hanging_only}, is_delivery={is_delivery}")
-                            
-                        # Получаем данные для конкретной комбинации параметров
-                        supplies_response = await supplies_service.get_list_supplies(
-                            hanging_only=hanging_only, 
-                            is_delivery=is_delivery
-                        )
-                            
-                        # Формируем ключ кэша с параметрами
-                        cache_key = f"cache:supplies_all:hanging_only:{hanging_only}|is_delivery:{is_delivery}"
-                            
-                        # Сохраняем в кэш
-                        await self.set(cache_key, supplies_response)
-                            
-                        logger.info(f"Кэш прогрет для {cache_key}: {len(supplies_response.supplies)} поставок")
-                            
-                    except Exception as e:
-                        logger.error(f"Ошибка прогрева кэша для hanging_only={hanging_only}, is_delivery={is_delivery}: {str(e)}")
-                        continue
-                    
-                # Запускаем очистку пустых поставок только для данных из WB API
-                try:
-                    from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
-                    cleaner = EmptySupplyCleaner(self.redis_client)
-                    await cleaner.auto_clean_empty_supplies()
-                    logger.info("Автоочистка пустых поставок завершена")
-                except Exception as e:
-                    logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
-                    
-                # Запускаем фоновую синхронизацию висячих поставок только для данных из WB API
-                try:
-                    # Получаем данные из WB API для синхронизации
-                    supplies_ids = await supplies_service.get_information_to_supplies()
-                    supplies = supplies_service.group_result(await supplies_service.get_information_orders_to_supplies(supplies_ids))
-                        
-                    sync_hanging_supplies_with_data.delay(supplies)
-                    logger.info("Запущена фоновая синхронизация висячих поставок")
-                except Exception as e:
-                    logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
-                        
-            except Exception as e:
-                logger.error(f"Ошибка при прогреве кэша поставок: {str(e)}")
-            
-            # Прогрев данных заказов (с правильными ключами и полными объектами)
-            try:
-                orders_service = OrdersService(main_db)
-                    
-                # Базовый запрос: time_delta=1.0, wild=None
-                orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
-                    
-                # Создаем полные объекты OrderDetail
-                order_details = [OrderDetail(**order) for order in orders_data]
-                grouped_orders = await orders_service.group_orders_by_wild(order_details)
-                    
-                # Правильный ключ с параметрами - используем увеличенный TTL
-                cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
-                await self.set(cache_key_orders, grouped_orders)
-                    
-                logger.info("Кэш заказов прогрет успешно")
-            except Exception as e:
-                logger.error(f"Ошибка при прогреве кэша заказов: {str(e)}")
-                
-            logger.info("Прогрев кэша завершен")
-            
-        except Exception as e:
-            logger.error(f"Общая ошибка при прогреве кэша: {str(e)}")
+        # Старый способ запуска тоже сохраняет кеш до готовности нового.
+        """Запускает безопасное обновление через прежний метод."""
+        await self.warm_up_cache_optimized()
 
     async def warm_up_cache_optimized(self) -> None:
-        """
-        УЛЬТРА-ОПТИМИЗИРОВАННЫЙ: Прогрев кэша при запуске приложения.
-        Получает ВСЕ данные WB API и delivery ОДИН РАЗ, затем генерирует все 4 комбинации.
-        Сокращает количество API запросов в ~10 раз!
-        """
+        """Обновляет списки СЗ и поставок независимо друг от друга."""
         if not self.is_connected:
-            logger.warning("Redis не подключен, пропускаем прогрев кэша")
-            return
-            
-        logger.info("Начинаем УЛЬТРА-ОПТИМИЗИРОВАННЫЙ прогрев кэша...")
-        start_time = time.time()
-        
-        # Очищаем старые ключи перед прогревом для экономии памяти
-        try:
-            old_keys = await self.redis_client.keys("cache:*")
-            if old_keys:
-                await self.redis_client.delete(*old_keys)
-                logger.info(f"Удалено {len(old_keys)} старых ключей кэша")
-        except Exception as e:
-            logger.warning(f"Не удалось очистить старые ключи: {str(e)}")
-        
-        try:
-            supplies_service = SuppliesService(main_db)
+            raise RuntimeError("Redis недоступен")
 
-            unified_data = await self._get_all_supplies_data_ultra_optimized(supplies_service)
+        results = await asyncio.gather(
+            self._refresh_supplies_snapshot(), self._refresh_orders_snapshot(),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise RuntimeError("; ".join(str(error) for error in errors))
 
-            all_combinations = await self._generate_all_combinations_from_unified_data(
-                unified_data, supplies_service
-            )
-                
-            # 3. КЭШИРУЕМ ВСЕ 4 КОМБИНАЦИИ
-            cache_mappings = [
-                {"key": "hanging_only:False|is_delivery:False", "data": all_combinations['wb_normal']},
-                {"key": "hanging_only:True|is_delivery:False", "data": all_combinations['wb_hanging']},
-                {"key": "hanging_only:False|is_delivery:True", "data": all_combinations['delivery_normal']},
-                {"key": "hanging_only:True|is_delivery:True", "data": all_combinations['delivery_hanging']},
-            ]
-                
-            for mapping in cache_mappings:
-                try:
-                    cache_key = f"cache:supplies_all:{mapping['key']}"
-                    await self.set(cache_key, mapping['data'])
-                        
-                    logger.info(f"УЛЬТРА-ОПТИМИЗИРОВАННЫЙ кэш прогрет для {cache_key}: {len(mapping['data'].supplies)} поставок")
-                        
-                except Exception as e:
-                    logger.error(f"Ошибка кэширования {mapping['key']}: {str(e)}")
-                    continue
-                
-            # 4. ОСТАЛЬНЫЕ ОПЕРАЦИИ (используем уже полученные данные)
-            try:
-                from src.supplies.empty_supply_cleaner import EmptySupplyCleaner
-                cleaner = EmptySupplyCleaner(self.redis_client)
-                await cleaner.auto_clean_empty_supplies()
-                logger.info("Автоочистка пустых поставок завершена")
-            except Exception as e:
-                logger.error(f"Ошибка автоочистки пустых поставок: {str(e)}")
-                
-            # 5. СИНХРОНИЗАЦИЯ ВИСЯЧИХ ПОСТАВОК (используем уже полученные WB данные)
-            try:
-                # Используем уже полученные данные вместо повторного API вызова
-                sync_hanging_supplies_with_data.delay(unified_data['wb_supplies_grouped'])
-                logger.info("Запущена фоновая синхронизация висячих поставок (ультра-оптимизация)")
-            except Exception as e:
-                logger.error(f"Ошибка запуска фоновой синхронизации висячих поставок: {str(e)}")
-                        
-        except Exception as e:
-            logger.error(f"Ошибка при ультра-оптимизированном прогреве кэша поставок: {str(e)}")
-        
-        # 6. ПРОГРЕВ ДАННЫХ ЗАКАЗОВ (оставляем как есть)
+    async def _refresh_supplies_snapshot(self) -> None:
+        """Получает поставки и сохраняет четыре списка одной транзакцией."""
+        service = SuppliesService(main_db)
+        unified = await self._get_all_supplies_data_ultra_optimized(service)
+        combinations = await self._generate_all_combinations_from_unified_data(unified, service)
+        values = {
+            "cache:supplies_all:hanging_only:False|is_delivery:False": combinations["wb_normal"],
+            "cache:supplies_all:hanging_only:True|is_delivery:False": combinations["wb_hanging"],
+            "cache:supplies_all:hanging_only:False|is_delivery:True": combinations["delivery_normal"],
+            "cache:supplies_all:hanging_only:True|is_delivery:True": combinations["delivery_hanging"],
+        }
+        await publish_snapshots(self.redis_client, values)
         try:
-            orders_service = OrdersService(main_db)
-                
-            # Базовый запрос: time_delta=1.0, wild=None
-            orders_data = await orders_service.get_filtered_orders(time_delta=1.0, article=None)
-                
-            # Создаем полные объекты OrderDetail
-            order_details = [OrderDetail(**order) for order in orders_data]
-            grouped_orders = await orders_service.group_orders_by_wild(order_details)
-                
-            # Правильный ключ с параметрами - используем увеличенный TTL
-            cache_key_orders = "cache:orders_all:time_delta:1.0|wild:None"
-            await self.set(cache_key_orders, grouped_orders)
-                
-            logger.info("Кэш заказов прогрет успешно")
-        except Exception as e:
-            logger.error(f"Ошибка при прогреве кэша заказов: {str(e)}")
-        
-        elapsed_time = time.time() - start_time
-        logger.info(f"УЛЬТРА-ОПТИМИЗИРОВАННЫЙ прогрев кэша завершен за {elapsed_time:.2f} секунд")
+            await EmptySupplyCleaner(self.redis_client).auto_clean_empty_supplies()
+            sync_hanging_supplies_with_data.delay(unified["wb_supplies_grouped"])
+        except Exception:
+            logger.exception("Ошибка обслуживания поставок после публикации кеша")
+
+    async def _refresh_orders_snapshot(self) -> None:
+        """Обновляет списки СЗ с учётом фильтра по остаткам."""
+        service = OrdersService(main_db)
+        data = await service.get_filtered_orders(time_delta=1.0, article=None)
+        grouped = await service.group_orders_by_wild([OrderDetail(**order) for order in data])
+        values = {"cache:orders_all:time_delta:1.0|wild:None": grouped}
+        for positive_stock in (False, True):
+            key = f"cache:orders_all:positive_stock:{positive_stock}|time_delta:1.0|wild:None"
+            values[key] = service.filter_orders_by_stock(grouped, positive_stock)
+        await publish_snapshots(self.redis_client, values)
 
     async def _get_all_supplies_data_ultra_optimized(self, supplies_service) -> Dict[str, Any]:
         """
@@ -559,9 +515,9 @@ class GlobalCache:
 
         # 1. ЕДИНСТВЕННЫЙ вызов WB API для получения ВСЕХ WB поставок
         logger.info("1/5: Получение ВСЕХ WB поставок...")
-        wb_supplies_ids = await supplies_service.get_information_to_supplies()  # ОДИН РАЗ!
+        wb_supplies_ids = await supplies_service.get_information_to_supplies(strict=True)  # ОДИН РАЗ!
         logger.info("2/5: Получение ВСЕХ WB заказов...")
-        wb_orders_data = await supplies_service.get_information_orders_to_supplies(wb_supplies_ids)  # ОДИН РАЗ!
+        wb_orders_data = await supplies_service.get_information_orders_to_supplies(wb_supplies_ids, strict=True)  # ОДИН РАЗ!
         wb_supplies_grouped = supplies_service.group_result(wb_orders_data)
 
         # 2. ЕДИНСТВЕННЫЕ запросы к БД для delivery данных
@@ -621,7 +577,7 @@ class GlobalCache:
 
             # Получаем данные из WB API
             enriched_supplies = await supplies_service.get_information_to_supply_details(missing_formatted)
-            missing_orders = await supplies_service.get_information_orders_to_supplies(enriched_supplies)
+            missing_orders = await supplies_service.get_information_orders_to_supplies(enriched_supplies, strict=True)
 
             # Формируем result для недостающих
             missing_result = []
@@ -793,7 +749,7 @@ class GlobalCache:
         while True:
             try:
                 # Обновляем каждые 8 минут вместо 10, чтобы данные не успевали истечь
-                refresh_interval = min(int(settings.CACHE_REFRESH_INTERVAL * 0.8), settings.CACHE_TTL - 120)  # На 2 минуты раньше истечения TTL
+                refresh_interval = max(1, int(settings.CACHE_REFRESH_INTERVAL * 0.8))
                 await asyncio.sleep(refresh_interval)
                 refresh_count += 1
                 
@@ -817,13 +773,13 @@ class GlobalCache:
                 # Обновляем кэш
                 source_token = current_refresh_source.set("background")
                 try:
-                    await self.warm_up_cache()
+                    success = await self.warm_up_cache()
                 finally:
                     current_refresh_source.reset(source_token)
                 
                 # Логируем состояние после обновления
                 cache_info_after = await self.get_cache_info()
-                logger.info(f"[Refresh #{refresh_count}] Фоновое обновление кэша завершено")
+                logger.info(f"[Refresh #{refresh_count}] Обновление завершено, success={success}")
                 logger.info(f"Состояние кэша после обновления: {cache_info_after}")
                 
             except asyncio.CancelledError:
@@ -888,11 +844,11 @@ class GlobalCache:
         try:
             source_token = current_refresh_source.set("manual")
             try:
-                await self.warm_up_cache()
+                success = await self.warm_up_cache()
             finally:
                 current_refresh_source.reset(source_token)
             logger.info("Принудительное обновление кэша завершено успешно")
-            return True
+            return success
         except Exception as e:
             logger.error(f"Ошибка при принудительном обновлении кэша: {str(e)}")
             return False
@@ -926,74 +882,10 @@ class GlobalCache:
             logger.error(f"Ошибка при селективном обновлении кэша {cache_type}: {str(e)}")
             return False
     
-    async def _refresh_supplies_cache(self, hanging_only: bool = None, is_delivery: bool = None) -> bool:
-        """Обновление кэша поставок с фильтрацией."""
-        try:
-
-            # Определяем какие комбинации обновлять
-            combinations_to_update = []
-
-            if hanging_only is None and is_delivery is None:
-                # Обновляем все комбинации
-                combinations_to_update = [
-                    {"hanging_only": False, "is_delivery": False},
-                    {"hanging_only": True, "is_delivery": False},
-                    {"hanging_only": False, "is_delivery": True},
-                    {"hanging_only": True, "is_delivery": True},
-                ]
-            elif hanging_only is None:
-                combinations_to_update.extend([
-                    {"hanging_only": False, "is_delivery": is_delivery},
-                    {"hanging_only": True, "is_delivery": is_delivery},
-                ])
-            elif is_delivery is None:
-                combinations_to_update.extend([
-                    {"hanging_only": hanging_only, "is_delivery": False},
-                    {"hanging_only": hanging_only, "is_delivery": True},
-                ])
-            else:
-                combinations_to_update.append({
-                    "hanging_only": hanging_only, 
-                    "is_delivery": is_delivery
-                })
-
-            supplies_service = SuppliesService(main_db)
-
-            success_count = 0
-            for combination in combinations_to_update:
-                try:
-                    h_only = combination["hanging_only"]
-                    delivery = combination["is_delivery"]
-
-                    logger.info(f"Обновление кэша поставок: hanging_only={h_only}, is_delivery={delivery}")
-
-                    # Получаем свежие данные
-                    supplies_response = await supplies_service.get_list_supplies(
-                        hanging_only=h_only,
-                        is_delivery=delivery
-                    )
-
-                    # Формируем ключ кэша
-                    cache_key = f"cache:supplies_all:hanging_only:{h_only}|is_delivery:{delivery}"
-
-                    # Удаляем старый ключ и сохраняем новые данные
-                    await self.delete(cache_key)
-                    await self.set(cache_key, supplies_response)
-
-                    logger.info(f"Кэш обновлен для {cache_key}: {len(supplies_response.supplies)} поставок")
-                    success_count += 1
-
-                except Exception as e:
-                    logger.error(f"Ошибка обновления кэша для {combination}: {str(e)}")
-                    continue
-
-            logger.info(f"Обновление кэша поставок завершено: {success_count}/{len(combinations_to_update)} успешно")
-            return success_count == len(combinations_to_update)
-
-        except Exception as e:
-            logger.error(f"Критическая ошибка при обновлении кэша поставок: {str(e)}")
-            return False
-    
+    async def _refresh_supplies_cache(self, hanging_only=None, is_delivery=None) -> bool:
+        # Связанные списки поставок обновляем вместе.
+        """Обновляет связанные списки поставок под общей блокировкой."""
+        return await self.warm_up_cache()
 
     def _extract_supply_ids_from_cache(self, cached_data) -> set:
         """

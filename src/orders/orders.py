@@ -34,6 +34,8 @@ from src.orders.schema import GroupedOrderInfo, OrdersWithSupplyNameIn, SupplyAc
     OrderDetail, WildInfo, SupplyInfo
 from src.orders.constants_to_block import BLOCKED_WILDS
 
+from src.cache_state import operation_cache
+
 
 class OrdersService:
     """Сервис для работы с заказами Wildberries."""
@@ -147,7 +149,7 @@ class OrdersService:
             return {account: supplies_data or []}
         except Exception as e:
             logger.error(f"Ошибка при получении заказов для кабинета {account}: {str(e)}")
-            return {account: []}
+            raise
 
     async def _get_photos_info(self, nm_ids: List[int]) -> Dict[int, str]:
         """
@@ -509,6 +511,9 @@ class OrdersService:
         allowed: Set[int] = set()
 
         for account, order_ids in orders_by_account.items():
+            order_ids = await operation_cache.available_order_ids(order_ids)
+            if not order_ids:
+                continue
             orders_api = Orders(account, tokens.get(account))
             try:
                 statuses: Dict[int, Dict[str, Any]] = {}

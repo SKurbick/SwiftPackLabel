@@ -361,7 +361,7 @@ class SuppliesService:
                                                         x[0])))
 
     @staticmethod
-    async def get_information_to_supplies() -> List[Dict]:
+    async def get_information_to_supplies(strict: bool = False) -> List[Dict]:
         logger.info("Получение данных по всем кабинетам о поставках")
         accounts: List[str] = []
         tasks: List = []
@@ -373,6 +373,8 @@ class SuppliesService:
         supplies: List[Dict] = []
         for account, result in zip(accounts, results):
             if isinstance(result, BaseException):
+                if strict:
+                    raise RuntimeError(f"Не удалось получить поставки кабинета {account}") from result
                 logger.error(f"Кабинет {account} пропущен, поставки вб не удалось получить: {result}")
                 supplies.append({account: []})
             else:
@@ -507,7 +509,7 @@ class SuppliesService:
 
         return filtered_supplies
 
-    async def get_information_orders_to_supplies(self, supply_ids: List[dict]) -> List[Dict[str, Dict]]:
+    async def get_information_orders_to_supplies(self, supply_ids: List[dict], strict: bool = False) -> List[Dict[str, Dict]]:
         """
         Получает информацию о заказах по конкретным поставкам.
 
@@ -651,6 +653,8 @@ class SuppliesService:
                 results.append({account: {supply_id: {"orders": orders_list}}})
 
         if still_missing > 0:
+            if strict:
+                raise RuntimeError(f"Не удалось получить детали {still_missing} заказов; прежний кеш сохранён")
             logger.error(f'ВНИМАНИЕ: {still_missing} заказов не найдено ни в БД ни в WB API!')
 
         logger.info(f'Возвращено {len(results)} элементов в старом формате')
@@ -1548,6 +1552,9 @@ class SuppliesService:
             logger.error(f"Не удалось перевести поставку {supply_id} ({account}) в доставку: {error}")
         if failed:
             logger.error(f"Не переведены в доставку {len(failed)} из {len(supply_ids)} поставок")
+            raise RuntimeError(
+                "WB не подтвердил доставку поставок: " + ", ".join(supply_id for supply_id, _, _ in failed)
+            )
 
     def _create_fictitious_delivery_response(self, success: bool, message: str, supply_id: str, account: str,
                                              delivery_response=None, marked_as_fictitious: bool = False,
