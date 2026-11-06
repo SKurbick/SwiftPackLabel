@@ -10,7 +10,7 @@ from PIL import Image
 
 from io import BytesIO
 
-from src.concurrency import run_blocking
+from src.concurrency import map_limited, run_blocking
 from src.service.warehouses import (
     group_by_account_and_warehouse,
     load_warehouse_names,
@@ -558,27 +558,23 @@ class SuppliesService:
         all_order_ids: List[int] = []
         order_ids_by_account: Dict[str, Set[int]] = {}
 
-        async def fetch_order_ids_for_account(account: str, supply_ids_list: List[str]):
-            """Получает order_ids для всех поставок одного аккаунта параллельно."""
-            supplies_api = Supplies(account, wb_tokens[account])
-            tasks = [
-                supplies_api.get_supply_order_ids(sid, use_empty_cache=True) if cache_empty
-                else supplies_api.get_supply_order_ids(sid)
-                for sid in supply_ids_list
-            ]
-            results = await asyncio.gather(*tasks)
-            return account, dict(zip(supply_ids_list, results))
+        clients = {account: Supplies(account, wb_tokens[account]) for account in supplies_by_account}
+        requests = [(account, sid) for account, ids in supplies_by_account.items() for sid in ids]
 
-        # Параллельный запрос по всем аккаунтам
-        account_tasks = [
-            fetch_order_ids_for_account(account, supply_ids_list)
-            for account, supply_ids_list in supplies_by_account.items()
-        ]
-        account_results = await asyncio.gather(*account_tasks)
+        async def fetch_order_ids(item):
+            account, supply_id = item
+            client = clients[account]
+            if cache_empty:
+                return await client.get_supply_order_ids(supply_id, use_empty_cache=True)
+            return await client.get_supply_order_ids(supply_id)
+
+        # Лимит общий на весь обход, а не отдельный для каждого кабинета.
+        results = await map_limited(fetch_order_ids, requests, settings.SUPPLY_FETCH_CONCURRENCY)
+        for (account, supply_id), order_ids in zip(requests, results):
+            all_supply_order_ids.setdefault(account, {})[supply_id] = order_ids
 
         # Собираем результаты
-        for account, supply_order_ids in account_results:
-            all_supply_order_ids[account] = supply_order_ids
+        for account, supply_order_ids in all_supply_order_ids.items():
             order_ids_by_account[account] = set()
             for order_ids in supply_order_ids.values():
                 all_order_ids.extend(order_ids)

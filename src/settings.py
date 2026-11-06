@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
+    REDIS_MAX_CONNECTIONS: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 64))
+    REDIS_POOL_WAIT_SEC: float = float(os.getenv("REDIS_POOL_WAIT_SEC", 5))
+    SUPPLY_FETCH_CONCURRENCY: int = int(os.getenv("SUPPLY_FETCH_CONCURRENCY", 16))
     CACHE_TTL: int = int(os.getenv("CACHE_TTL", 2400))  # 10 минут по умолчанию
     EMPTY_SUPPLY_RECHECK_SEC: int = int(os.getenv("EMPTY_SUPPLY_RECHECK_SEC", 3600))
     

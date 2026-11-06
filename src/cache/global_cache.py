@@ -78,14 +78,17 @@ class GlobalCache:
                 redis_url += f":{settings.REDIS_PASSWORD}@"
             redis_url += f"{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
             
-            self.redis_client = redis.from_url(
+            pool = redis.BlockingConnectionPool.from_url(
                 redis_url,
+                max_connections=max(2, settings.REDIS_MAX_CONNECTIONS),
+                timeout=settings.REDIS_POOL_WAIT_SEC,
                 encoding="utf-8",
                 decode_responses=False,  # Работаем с bytes для pickle
                 socket_connect_timeout=5,
                 socket_timeout=5,
                 retry_on_timeout=True
             )
+            self.redis_client = redis.Redis(connection_pool=pool)
             
             # Проверка подключения
             await self.redis_client.ping()
@@ -115,6 +118,7 @@ class GlobalCache:
             # Закрываем соединение с Redis
             if self.redis_client:
                 await self.redis_client.close()
+                await self.redis_client.connection_pool.disconnect()
                 
             self.is_connected = False
             if operation_cache.client is self.redis_client:

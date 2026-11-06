@@ -9,6 +9,7 @@ from src.orders.constants_to_block import is_fbs2_supply
 
 from src.cache_state import operation_cache
 from src.settings import settings
+from src.concurrency import map_limited
 
 WB_SUPPLY_ORDERS_BATCH_SIZE = 100
 
@@ -67,8 +68,10 @@ class Supplies(Account):
                 if empty:
                     logger.debug(f"Пропуск недавно проверенной пустой поставки {supply_id} ({self.account})")
                     return []
-            except Exception:
-                logger.exception(f"Не удалось проверить отметку пустоты {supply_id}; запрашиваем WB")
+            except Exception as exc:
+                raise ExternalApiError(
+                    f"Кеш пустых составов недоступен для {supply_id}; обновление остановлено"
+                ) from exc
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/order-ids"
         response = await self.async_client.get(url, headers=self.headers)
         response_json = parse_json(ensure_response(response, f"Состав поставки {supply_id} ({self.account})"))
@@ -361,8 +364,9 @@ class Supplies(Account):
 
         logger.info(f"Пакетное получение заказов для {len(supply_ids)} поставок, account {self.account}")
 
-        tasks = [self.get_supply_order_ids(supply_id) for supply_id in supply_ids]
-        order_ids_results = await asyncio.gather(*tasks)
+        order_ids_results = await map_limited(
+            self.get_supply_order_ids, supply_ids, settings.SUPPLY_FETCH_CONCURRENCY,
+        )
 
         supply_order_ids_map = {}
         all_order_ids = set()
