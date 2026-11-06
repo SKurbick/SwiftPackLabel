@@ -8,6 +8,7 @@ from src.wildberries_api.orders import Orders
 from src.orders.constants_to_block import is_fbs2_supply
 
 from src.cache_state import operation_cache
+from src.settings import settings
 
 WB_SUPPLY_ORDERS_BATCH_SIZE = 100
 
@@ -55,13 +56,43 @@ class Supplies(Account):
 
         return supplies
 
-    async def get_supply_order_ids(self, supply_id: str) -> list[int]:
+    async def get_supply_order_ids(self, supply_id: str, use_empty_cache: bool = False) -> list[int]:
+        """Получает состав; при обновлении кеша реже проверяет пустые поставки."""
+        version = None
+        cache_available = False
+        if use_empty_cache and settings.EMPTY_SUPPLY_RECHECK_SEC > 0:
+            try:
+                empty, version = await operation_cache.empty_supply_state(self.account, supply_id)
+                cache_available = operation_cache.client is not None
+                if empty:
+                    logger.debug(f"Пропуск недавно проверенной пустой поставки {supply_id} ({self.account})")
+                    return []
+            except Exception:
+                logger.exception(f"Не удалось проверить отметку пустоты {supply_id}; запрашиваем WB")
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/order-ids"
         response = await self.async_client.get(url, headers=self.headers)
         response_json = parse_json(ensure_response(response, f"Состав поставки {supply_id} ({self.account})"))
-        order_ids = response_json.get('orderIds', response_json.get('orders', []))
+        order_ids = response_json.get('orderIds', response_json.get('orders'))
+        if not isinstance(order_ids, list) or any(type(order_id) is not int for order_id in order_ids):
+            raise ExternalApiError(f"Некорректный состав поставки {supply_id} ({self.account})")
+        if order_ids:
+            await self._invalidate_supply_contents(supply_id)
+        if not order_ids and cache_available:
+            try:
+                await operation_cache.remember_empty_supply(
+                    self.account, supply_id, version, settings.EMPTY_SUPPLY_RECHECK_SEC,
+                )
+            except Exception:
+                logger.exception(f"Не удалось сохранить отметку пустоты {supply_id}")
         logger.info(f"Получены {len(order_ids)} order-ids для поставки {supply_id}, account {self.account}")
         return order_ids
+
+    async def _invalidate_supply_contents(self, supply_id: str) -> None:
+        """Сбрасывает отметку пустоты перед изменением состава и после него."""
+        try:
+            await operation_cache.invalidate_supply_contents(self.account, supply_id)
+        except Exception:
+            logger.exception(f"Не удалось сбросить отметку пустоты {supply_id}")
 
     def _log_resolved_orders(self, supply_id: str, resolved: int, expected: int, source: str) -> None:
         """Сообщает, сколько заказов поставки удалось раскрыть в детали."""
@@ -181,8 +212,10 @@ class Supplies(Account):
         
         # Добавляем заказ в поставку
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
+        await self._invalidate_supply_contents(supply_id)
         response = await self.async_client.patch(url, json={"orders": [order_id]}, headers=self.headers)
         ensure_response(response, f"Добавление заказа {order_id} в поставку {supply_id} ({self.account})")
+        await self._invalidate_supply_contents(supply_id)
         await self._record_taken_orders([order_id])
         logger.info(f"Добавлен заказ {order_id} в поставку {supply_id} для аккаунта {self.account}. Ответ: {response}")
         return response
@@ -216,6 +249,7 @@ class Supplies(Account):
         Отправляет один пакет заданий.
         """
         url = f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders"
+        await self._invalidate_supply_contents(supply_id)
         try:
             response = await self.async_client.patch(url, json={"orders": order_ids}, headers=self.headers)
             ensure_response(
@@ -243,6 +277,7 @@ class Supplies(Account):
         logger.info(
             f"Добавлено {len(order_ids)} заданий в поставку {supply_id} для аккаунта {self.account}"
         )
+        await self._invalidate_supply_contents(supply_id)
         await self._record_taken_orders(order_ids)
         return set(order_ids)
 

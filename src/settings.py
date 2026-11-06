@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     REDIS_DB: int = int(os.getenv("REDIS_DB", 0))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
     CACHE_TTL: int = int(os.getenv("CACHE_TTL", 2400))  # 10 минут по умолчанию
+    EMPTY_SUPPLY_RECHECK_SEC: int = int(os.getenv("EMPTY_SUPPLY_RECHECK_SEC", 3600))
     
     # Настройки глобального кэша
     CACHE_REFRESH_INTERVAL: int = int(os.getenv("CACHE_REFRESH_INTERVAL", 1800))  # 30 минут по умолчанию

@@ -525,7 +525,9 @@ class SuppliesService:
 
         return filtered_supplies
 
-    async def get_information_orders_to_supplies(self, supply_ids: List[dict], strict: bool = False) -> List[Dict[str, Dict]]:
+    async def get_information_orders_to_supplies(
+        self, supply_ids: List[dict], strict: bool = False, cache_empty: bool = False,
+    ) -> List[Dict[str, Dict]]:
         """
         Получает информацию о заказах по конкретным поставкам.
 
@@ -559,7 +561,11 @@ class SuppliesService:
         async def fetch_order_ids_for_account(account: str, supply_ids_list: List[str]):
             """Получает order_ids для всех поставок одного аккаунта параллельно."""
             supplies_api = Supplies(account, wb_tokens[account])
-            tasks = [supplies_api.get_supply_order_ids(sid) for sid in supply_ids_list]
+            tasks = [
+                supplies_api.get_supply_order_ids(sid, use_empty_cache=True) if cache_empty
+                else supplies_api.get_supply_order_ids(sid)
+                for sid in supply_ids_list
+            ]
             results = await asyncio.gather(*tasks)
             return account, dict(zip(supply_ids_list, results))
 

@@ -115,6 +115,50 @@ class OperationCache:
     def __init__(self, client: Redis | None = None) -> None:
         self.client = client
 
+    @staticmethod
+    def _supply_content_keys(account: str, supply_id: str) -> tuple[str, str]:
+        """Возвращает ключи отметки пустоты и версии состава."""
+        return (
+            f"cache-state:empty-supply:{account}:{supply_id}",
+            f"cache-state:supply-version:{account}:{supply_id}",
+        )
+
+    async def empty_supply_state(self, account: str, supply_id: str) -> tuple[bool, bytes | None]:
+        """Проверяет, подтверждалась ли пустота поставки недавно."""
+        if self.client is None:
+            return False, None
+        empty_key, version_key = self._supply_content_keys(account, supply_id)
+        empty, version = await self.client.mget(empty_key, version_key)
+        return empty is not None, version
+
+    async def remember_empty_supply(
+        self, account: str, supply_id: str, version: bytes | None, ttl: int,
+    ) -> None:
+        """Запоминает пустоту, если состав не меняли во время запроса WB."""
+        if self.client is None or ttl <= 0:
+            return
+        empty_key, version_key = self._supply_content_keys(account, supply_id)
+        async with self.client.pipeline(transaction=True) as pipe:
+            try:
+                await pipe.watch(version_key)
+                if await pipe.get(version_key) != version:
+                    return
+                pipe.multi()
+                pipe.set(empty_key, b"1", ex=ttl)
+                await pipe.execute()
+            except WatchError:
+                return
+
+    async def invalidate_supply_contents(self, account: str, supply_id: str) -> None:
+        """Сбрасывает пустоту и отклоняет запоздавшие ответы о старом составе."""
+        if self.client is None:
+            return
+        empty_key, version_key = self._supply_content_keys(account, supply_id)
+        async with self.client.pipeline(transaction=True) as pipe:
+            pipe.incr(version_key)
+            pipe.delete(empty_key)
+            await pipe.execute()
+
     async def record_taken_orders(self, order_ids: Iterable[int]) -> None:
         """Запоминает взятые СЗ и убирает их из кеша."""
         taken = {str(order_id) for order_id in order_ids}

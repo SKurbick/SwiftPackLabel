@@ -308,6 +308,7 @@ class GlobalCache:
         heartbeat = asyncio.create_task(self._renew_refresh_lock(lock))
         builder = asyncio.create_task(self._build_refresh(key, loader))
         try:
+            await self._save_refresh_status(scope, "running")
             done, _ = await asyncio.wait({builder, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
             if heartbeat in done:
                 builder.cancel()
@@ -477,20 +478,34 @@ class GlobalCache:
             raise RuntimeError("; ".join(str(error) for error in errors))
 
     async def _refresh_supplies_snapshot(self) -> None:
-        """Получает поставки и сохраняет четыре списка одной транзакцией."""
+        """Сохраняет сборку сразу после WB, не дожидаясь данных доставки."""
         service = SuppliesService(main_db)
-        unified = await self._get_all_supplies_data_ultra_optimized(service)
-        combinations = await self._generate_all_combinations_from_unified_data(unified, service)
-        values = {
-            "cache:supplies_all:hanging_only:False|is_delivery:False": combinations["wb_normal"],
-            "cache:supplies_all:hanging_only:True|is_delivery:False": combinations["wb_hanging"],
-            "cache:supplies_all:hanging_only:False|is_delivery:True": combinations["delivery_normal"],
-            "cache:supplies_all:hanging_only:True|is_delivery:True": combinations["delivery_hanging"],
-        }
-        await publish_snapshots(self.redis_client, values)
+        wb_data = await self._get_wb_supplies_data(service)
+        assembly = {}
+        for hanging in (False, True):
+            key = f"cache:supplies_all:hanging_only:{hanging}|is_delivery:False"
+            assembly[key] = await self._filter_wb_supplies_ultra_optimized(
+                wb_data['wb_supplies_grouped'], wb_data['wb_supplies_ids'], hanging, service,
+            )
+        await publish_snapshots(self.redis_client, assembly)
+        logger.info("Кеш «На сборке» опубликован: обычные и висячие поставки")
+        try:
+            delivery_data = await self._get_delivery_supplies_data(service, wb_data['all_active_supplies'])
+            delivery = {}
+            for hanging in (False, True):
+                key = f"cache:supplies_all:hanging_only:{hanging}|is_delivery:True"
+                delivery[key] = await self._filter_delivery_supplies_ultra_optimized(
+                    delivery_data['delivery_supplies_data'], delivery_data['delivery_supplies_ids'],
+                    hanging, service,
+                )
+            await publish_snapshots(self.redis_client, delivery)
+            logger.info("Кеш доставки опубликован: обычные и висячие поставки")
+        except Exception:
+            logger.exception("Доставка не обновлена; готовый кеш сборки уже сохранён")
+            raise
         try:
             await EmptySupplyCleaner(self.redis_client).auto_clean_empty_supplies()
-            sync_hanging_supplies_with_data.delay(unified["wb_supplies_grouped"])
+            sync_hanging_supplies_with_data.delay(wb_data['wb_supplies_grouped'])
         except Exception:
             logger.exception("Ошибка обслуживания поставок после публикации кеша")
 
@@ -506,25 +521,33 @@ class GlobalCache:
         await publish_snapshots(self.redis_client, values)
 
     async def _get_all_supplies_data_ultra_optimized(self, supplies_service) -> Dict[str, Any]:
-        """
-        УЛЬТРА-ОПТИМИЗИРОВАННОЕ получение ВСЕХ данных единым блоком:
-        1. WB API вызывается ОДИН РАЗ для всех случаев
-        2. БД запросы делаются ОДИН РАЗ
-        3. Для delivery используется трехуровневая система: Redis → PostgreSQL (delivered_supplies) → WB API
-        4. Все 4 комбинации генерируются из одних данных
-        """
-        logger.info("Получение ВСЕХ данных поставок ультра-оптимизированным способом...")
+        """Получает сборку и доставку, используя один список активных поставок."""
+        wb_data = await self._get_wb_supplies_data(supplies_service)
+        delivery_data = await self._get_delivery_supplies_data(
+            supplies_service, wb_data['all_active_supplies'],
+        )
+        return {**wb_data, **delivery_data}
 
-        # 1. ЕДИНСТВЕННЫЙ вызов WB API для получения ВСЕХ WB поставок
-        logger.info("1/5: Получение ВСЕХ WB поставок...")
+    async def _get_wb_supplies_data(self, supplies_service) -> Dict[str, Any]:
+        """Загружает активные поставки и составы, нужные для сборки."""
         all_active_supplies = await supplies_service.get_information_to_supplies(
             strict=True, include_fbs2=True,
         )
         wb_supplies_ids = supplies_service.exclude_fbs2_assembly_supplies(all_active_supplies)
         logger.info("2/5: Получение ВСЕХ WB заказов...")
-        wb_orders_data = await supplies_service.get_information_orders_to_supplies(wb_supplies_ids, strict=True)  # ОДИН РАЗ!
+        wb_orders_data = await supplies_service.get_information_orders_to_supplies(
+            wb_supplies_ids, strict=True, cache_empty=True,
+        )
         wb_supplies_grouped = supplies_service.group_result(wb_orders_data)
 
+        return {
+            'all_active_supplies': all_active_supplies,
+            'wb_supplies_ids': wb_supplies_ids,
+            'wb_supplies_grouped': wb_supplies_grouped,
+        }
+
+    async def _get_delivery_supplies_data(self, supplies_service, all_active_supplies) -> Dict[str, Any]:
+        """Загружает доставку отдельно от уже готовых данных сборки."""
         # 2. ЕДИНСТВЕННЫЕ запросы к БД для delivery данных
         logger.info("3/5: Получение delivery данных из БД...")
         basic_supplies_ids = await ShipmentOfGoods(supplies_service.db).get_weekly_supply_ids()  # ОДИН РАЗ!
@@ -618,8 +641,6 @@ class GlobalCache:
         logger.info("ВСЕ данные поставок получены ультра-оптимизированным способом с БД кэшированием!")
 
         return {
-            'wb_supplies_ids': wb_supplies_ids,
-            'wb_supplies_grouped': wb_supplies_grouped,
             'delivery_supplies_data': stored_supplies,  # Данные из БД (Tier 2) + недостающие из API (Tier 3)
             'delivery_supplies_ids': filtered_delivery_supplies_ids
         }
