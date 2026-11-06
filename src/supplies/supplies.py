@@ -569,7 +569,10 @@ class SuppliesService:
             return await client.get_supply_order_ids(supply_id)
 
         # Лимит общий на весь обход, а не отдельный для каждого кабинета.
-        results = await map_limited(fetch_order_ids, requests, settings.SUPPLY_FETCH_CONCURRENCY)
+        results = await map_limited(
+            fetch_order_ids, requests, settings.SUPPLY_FETCH_CONCURRENCY,
+            group=lambda item: item[0], per_group_limit=settings.SUPPLY_FETCH_PER_ACCOUNT,
+        )
         for (account, supply_id), order_ids in zip(requests, results):
             all_supply_order_ids.setdefault(account, {})[supply_id] = order_ids
 

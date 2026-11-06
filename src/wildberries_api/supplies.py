@@ -365,7 +365,8 @@ class Supplies(Account):
         logger.info(f"Пакетное получение заказов для {len(supply_ids)} поставок, account {self.account}")
 
         order_ids_results = await map_limited(
-            self.get_supply_order_ids, supply_ids, settings.SUPPLY_FETCH_CONCURRENCY,
+            self.get_supply_order_ids, supply_ids,
+            min(settings.SUPPLY_FETCH_CONCURRENCY, settings.SUPPLY_FETCH_PER_ACCOUNT),
         )
 
         supply_order_ids_map = {}

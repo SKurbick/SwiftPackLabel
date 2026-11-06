@@ -128,13 +128,17 @@ class _LoopLocal(Generic[T]):
 class HostThrottle:
     """Ограничитель нагрузки на одного получателя запросов."""
 
-    __slots__ = ("key", "_semaphore", "_resume_at", "_max_wait")
+    __slots__ = ("key", "_semaphore", "_resume_at", "_max_wait", "_interval", "_next_start")
 
-    def __init__(self, key: str, limit: int, max_wait: Optional[float] = None) -> None:
+    def __init__(
+        self, key: str, limit: int, max_wait: Optional[float] = None, interval: float = 0,
+    ) -> None:
         self.key = key
         self._semaphore = asyncio.Semaphore(max(1, limit))
         self._resume_at: float = 0.0
         self._max_wait = max_wait or settings.HTTP_THROTTLE_MAX_WAIT_SEC
+        self._interval = max(0, interval)
+        self._next_start = 0.0
 
     def pause(self, seconds: float) -> None:
         """Останавливает все запросы этого получателя на `seconds` (паузы не суммируются)."""
@@ -169,6 +173,13 @@ class HostThrottle:
                 self._semaphore.release()
                 continue
 
+            start_delay = self._next_start - loop.time()
+            if start_delay > 0:
+                self._semaphore.release()
+                await asyncio.sleep(min(start_delay, max(0, deadline - loop.time())))
+                continue
+
+            self._next_start = loop.time() + self._interval
             return self
 
     async def __aexit__(self, *exc_info) -> None:
@@ -202,7 +213,8 @@ def _throttle_for(url: str, limit: int, scope: Optional[str] = None) -> HostThro
     registry = _throttles.get()
     throttle = registry.get(key)
     if throttle is None:
-        throttle = HostThrottle(key, limit)
+        interval = settings.WB_REQUEST_INTERVAL_SEC if scope and host == "marketplace-api.wildberries.ru" else 0
+        throttle = HostThrottle(key, limit, interval=interval)
         registry[key] = throttle
     return throttle
 
