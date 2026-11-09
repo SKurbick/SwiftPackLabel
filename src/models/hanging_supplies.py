@@ -263,7 +263,7 @@ class HangingSupplies:
             WHERE jsonb_array_length(changes_log) > 0
             """
             
-            await self.db.execute(query, cutoff_timestamp)
+            await self.db.execute(query, cutoff_date)
             
             # Получаем статистику после очистки
             stats_query = """

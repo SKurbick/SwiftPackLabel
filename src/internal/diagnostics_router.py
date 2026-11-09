@@ -22,7 +22,7 @@ INTERNAL_ACCESS_DESCRIPTION = (
 
 LIVE_DESCRIPTION = (
     "Проверяет, что FastAPI-процесс жив и может отвечать на HTTP-запросы. "
-    "Endpoint не выполняет проверку PostgreSQL, Redis, Celery, RabbitMQ или Wildberries."
+    "Endpoint не выполняет проверку PostgreSQL, Redis, фоновых задач, RabbitMQ или Wildberries."
 )
 
 READY_DESCRIPTION = (
@@ -33,7 +33,7 @@ READY_DESCRIPTION = (
 
 STATUS_DESCRIPTION = (
     "Общий диагностический снимок процесса: память, file descriptors, количество asyncio tasks, "
-    "event loop lag, состояние PostgreSQL pool, Redis, Celery, текущий/последний WB refresh "
+    "event loop lag, состояние PostgreSQL pool, Redis, фоновых задач, текущий/последний WB refresh "
     "и счетчики in-memory ring buffers. Используется как первая точка входа при инциденте."
 )
 
@@ -64,9 +64,9 @@ REDIS_DESCRIPTION = (
     "used_memory_human, rejected_connections и instantaneous_ops_per_sec. Не возвращает пароль или URL подключения."
 )
 
-CELERY_DESCRIPTION = (
-    "Минимальная диагностика Celery через Redis: длина основной очереди `celery`, если Redis доступен. "
-    "Если проверить безопасно нельзя, возвращает `skipped` или `unavailable`."
+BACKGROUND_DESCRIPTION = (
+    "Показывает общее расписание, состояние и блокировки фоновых задач Swift. "
+    "Не запускает задачи и не возвращает данные заказов."
 )
 
 
@@ -142,25 +142,22 @@ async def _redis_snapshot(timeout: float = 1.5) -> dict:
         return {"status": "unavailable", "message": "Redis недоступен или не ответил за отведенное время", "error": safe_error(exc)}
 
 
-async def _celery_snapshot(timeout: float = 1.5) -> dict:
+async def _background_snapshot(request: Request) -> dict:
+    """Читает состояние планировщика текущего приложения."""
     if settings.DIAGNOSTICS_NO_EXTERNAL_CHECKS:
-        return {"status": "skipped", "message": "Проверка Celery пропущена: включен DIAGNOSTICS_NO_EXTERNAL_CHECKS"}
+        return {"status": "skipped", "message": "Проверка фоновых задач отключена"}
+    scheduler = getattr(request.app.state, "background_scheduler", None)
+    if scheduler is None:
+        return {"status": "disabled", "message": "Фоновые задачи отключены"}
     try:
-        global_cache, import_error = _get_global_cache()
-        if not global_cache:
-            return {
-                "status": "skipped",
-                "message": "Проверка Celery пропущена: Redis-клиент не загружен в диагностическом процессе",
-                "reason": import_error,
-            }
-        if not global_cache.redis_client:
-            return {"status": "skipped", "message": "Проверка Celery пропущена: Redis-клиент недоступен", "reason": "redis_unavailable"}
-        length = await asyncio.wait_for(global_cache.redis_client.llen("celery"), timeout=timeout)
-        return {"status": "ok", "message": "Очередь Celery прочитана из Redis", "queues": {"celery": length}}
-    except AuthenticationError:
-        return {"status": "auth_required", "message": "Redis для проверки Celery требует авторизацию"}
+        return await asyncio.wait_for(scheduler.snapshot(), timeout=1.5)
     except Exception as exc:
-        return {"status": "unavailable", "message": "Не удалось получить состояние Celery через Redis", "error": safe_error(exc)}
+        return {"status": "unavailable", "error": safe_error(exc)}
+
+
+def _legacy_celery_status() -> dict:
+    """Сохраняет старый формат диагностики без обращения к очереди Celery."""
+    return {"status": "disabled", "message": "Задачи перенесены в Swift; см. /internal/diagnostics/background", "queues": {}}
 
 
 @internal_diagnostics.get(
@@ -202,15 +199,17 @@ async def ready() -> dict:
     summary="Общий диагностический снимок",
     description=STATUS_DESCRIPTION + "\n\n" + INTERNAL_ACCESS_DESCRIPTION,
 )
-async def diagnostics_status() -> dict:
+async def diagnostics_status(request: Request) -> dict:
     from src.db import db
 
     redis_status = await _redis_snapshot()
-    celery_status = await _celery_snapshot()
+    background_status = await _background_snapshot(request)
     snapshot = diagnostics.snapshot()
     db_pool = db.get_pool_stats()
     status_value = "ok"
     if redis_status.get("status") not in {"ok", "not_configured"}:
+        status_value = "degraded"
+    if background_status.get("status") not in {"ok", "disabled", "skipped"}:
         status_value = "degraded"
     return {
         "status": status_value,
@@ -220,7 +219,8 @@ async def diagnostics_status() -> dict:
         "db_pool": db_pool,
         "wb_refresh": snapshot.get("wb_refresh"),
         "redis": redis_status,
-        "celery": celery_status,
+        "background_jobs": background_status,
+        "celery": _legacy_celery_status(),
         "recent_counts": snapshot.get("recent_counts"),
     }
 
@@ -306,10 +306,20 @@ async def diagnostics_redis() -> dict:
 
 
 @internal_diagnostics.get(
+    "/diagnostics/background",
+    dependencies=[Depends(check_internal_access)],
+    summary="Диагностика фоновых задач",
+    description=BACKGROUND_DESCRIPTION + "\n\n" + INTERNAL_ACCESS_DESCRIPTION,
+)
+async def diagnostics_background(request: Request) -> dict:
+    return await _background_snapshot(request)
+
+
+@internal_diagnostics.get(
     "/diagnostics/celery",
     dependencies=[Depends(check_internal_access)],
-    summary="Диагностика Celery",
-    description=CELERY_DESCRIPTION + "\n\n" + INTERNAL_ACCESS_DESCRIPTION,
+    summary="Прежняя диагностика Celery",
+    deprecated=True,
 )
 async def diagnostics_celery() -> dict:
-    return await _celery_snapshot()
+    return _legacy_celery_status()

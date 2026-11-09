@@ -28,7 +28,7 @@ from src.models.shipment_of_goods import ShipmentOfGoods
 from src.models.hanging_supplies import HangingSupplies
 from src.models.delivered_supplies import DeliveredSupplies
 
-from src.celery_app.tasks.hanging_supplies_sync import sync_hanging_supplies_with_data
+from src.background.jobs import sync_hanging_supplies
 
 from functools import partial
 from redis.asyncio.lock import Lock
@@ -509,7 +509,8 @@ class GlobalCache:
             raise
         try:
             await EmptySupplyCleaner(self.redis_client).auto_clean_empty_supplies()
-            sync_hanging_supplies_with_data.delay(wb_data['wb_supplies_grouped'])
+            async with asyncio.timeout(600):
+                await sync_hanging_supplies(wb_data['wb_supplies_grouped'])
         except Exception:
             logger.exception("Ошибка обслуживания поставок после публикации кеша")
 

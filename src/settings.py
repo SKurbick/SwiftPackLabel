@@ -73,15 +73,11 @@ class Settings(BaseSettings):
     CIRCLE_LOCK_TIMEOUT_SEC: int = int(os.getenv("CIRCLE_LOCK_TIMEOUT_SEC", 600))
     CIRCLE_LOCK_WAIT_SEC: int = int(os.getenv("CIRCLE_LOCK_WAIT_SEC", 30))
     
-    # Настройки Celery
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1")
-    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/2")
-    CELERY_TIMEZONE: str = os.getenv("CELERY_TIMEZONE", "UTC")
-    CELERY_RESULT_EXPIRES: int = int(os.getenv("CELERY_RESULT_EXPIRES", 3600))  # 1 час
-    CELERY_WORKER_PREFETCH_MULTIPLIER: int = int(os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", 1))
-    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", 1000))
-    CELERY_TASK_SOFT_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", 600))  # 10 минут
-    CELERY_TASK_TIME_LIMIT: int = int(os.getenv("CELERY_TASK_TIME_LIMIT", 600))  # 10 минут
+    # Периодические задачи внутри Swift
+    BACKGROUND_JOBS_ENABLED: bool = os.getenv("BACKGROUND_JOBS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    BACKGROUND_JOBS_TIMEZONE: str = os.getenv("BACKGROUND_JOBS_TIMEZONE", os.getenv("CELERY_TIMEZONE", "UTC"))
+    BACKGROUND_REDIS_DB: int = int(os.getenv("BACKGROUND_REDIS_DB", 1 if REDIS_DB != 1 else 0))
+    BACKGROUND_DB_POOL_MAX_SIZE: int = int(os.getenv("BACKGROUND_DB_POOL_MAX_SIZE", 2))
     
     # Настройки API отгрузки
     SHIPMENT_API_URL: str = os.getenv("SHIPMENT_API_URL", "http://1c_routing_api:8002/api/shipment_of_goods/update")

@@ -1,4 +1,5 @@
 import asyncio
+import redis.asyncio as redis
 
 from starlette.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, status, Body
@@ -13,6 +14,9 @@ from src.middleware import DuplicateRequestMiddleware, RequestIdMiddleware
 from src.broker import broker_manager, RoutingKey, ExchangeName
 from src.concurrency import shutdown_blocking_pool
 from src.response import close_http_sessions
+from src.background.database import connect_background_db, close_background_db
+from src.background.jobs import periodic_jobs
+from src.background.scheduler import BackgroundScheduler
 from src.logger import app_logger as logger
 # from src.supplies import onec_delivery_consumer
 
@@ -56,6 +60,20 @@ async def startup() -> None:
     await check_db_connected()
     await global_cache.connect()
     await create_initial_superuser()
+    await connect_background_db()
+    app.state.background_scheduler = None
+    if settings.BACKGROUND_JOBS_ENABLED:
+        if settings.BACKGROUND_REDIS_DB == settings.REDIS_DB:
+            raise ValueError("Для фоновых задач нужна отдельная БД Redis, чтобы очистка кеша не сбивала расписание")
+        pool = redis.BlockingConnectionPool(
+            host=settings.REDIS_HOST, port=settings.REDIS_PORT,
+            password=settings.REDIS_PASSWORD or None, db=settings.BACKGROUND_REDIS_DB,
+            max_connections=8, timeout=settings.REDIS_POOL_WAIT_SEC,
+            socket_connect_timeout=5, socket_timeout=5,
+        )
+        scheduler = BackgroundScheduler(redis.Redis(connection_pool=pool), periodic_jobs(), close_redis=True)
+        app.state.background_scheduler = scheduler
+        scheduler.start()
     app.state.diagnostics_tasks = []
     if settings.DIAGNOSTICS_ENABLED:
         from src.db import db
@@ -89,16 +107,20 @@ async def startup() -> None:
 
 @app.on_event('shutdown')
 async def shutdown() -> None:
+    scheduler = getattr(app.state, "background_scheduler", None)
+    if scheduler is not None:
+        await scheduler.stop()
     for task in getattr(app.state, "diagnostics_tasks", []):
         if not task.done():
             task.cancel()
     if getattr(app.state, "diagnostics_tasks", []):
         await asyncio.gather(*app.state.diagnostics_tasks, return_exceptions=True)
-    await check_db_disconnected()
     await global_cache.disconnect()
     if settings.RABBITMQ_ENABLED:
         await broker_manager.get_broker().stop()
     await close_http_sessions()
+    await close_background_db()
+    await check_db_disconnected()
     shutdown_blocking_pool()
 
 
