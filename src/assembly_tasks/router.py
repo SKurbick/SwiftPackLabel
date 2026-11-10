@@ -1,8 +1,8 @@
 from asyncpg import InterfaceError, PostgresError
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.assembly_tasks.dependencies import authorize_assembly_tasks
 from src.assembly_tasks.schema import AssemblyTasksLookupRequest, AssemblyTasksLookupResponse
-from src.auth.dependencies import get_current_user
 from src.db import DatabaseManager, get_db_connection
 from src.diagnostics import safe_error
 from src.logger import app_logger as logger
@@ -15,7 +15,7 @@ assembly_tasks = APIRouter(prefix="/assembly-tasks", tags=["Assembly Tasks"])
 @assembly_tasks.post(
     "/by-rids",
     response_model=AssemblyTasksLookupResponse,
-    dependencies=[Depends(get_current_user)],
+    dependencies=[Depends(authorize_assembly_tasks)],
 )
 async def lookup_assembly_tasks(
     payload: AssemblyTasksLookupRequest,
