@@ -12,6 +12,7 @@ from src.pdf_parser.router import document_parser_router
 from src.cache.router import cache
 from src.canceled_orders.router import canceled_orders
 from src.available_quantity.router import available_quantity
+from src.assembly_tasks.router import assembly_tasks
 
 router = APIRouter(prefix='/api/v1')
 router.include_router(supply)
@@ -27,3 +28,4 @@ router.include_router(document_parser_router)
 router.include_router(cache)
 router.include_router(canceled_orders)
 router.include_router(available_quantity)
+router.include_router(assembly_tasks)
