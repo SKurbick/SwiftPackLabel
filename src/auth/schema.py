@@ -15,6 +15,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str | None = None
     is_superuser: bool = False
+    fbs_stock_zero_approve: bool
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -22,3 +23,4 @@ class TokenResponse(BaseModel):
     user_id: int
     username: str
     is_superuser: bool = False
+    fbs_stock_zero_approve: bool

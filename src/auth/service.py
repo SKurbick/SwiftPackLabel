@@ -23,18 +23,14 @@ class AuthService:
         if user:
             raise ValueError("Username already exists")
 
-        user_id = await db.fetchrow(
+        user = await db.fetchrow(
             """
             INSERT INTO users (username, hashed_password, email, is_superuser) 
             VALUES ($1, $2, $3, $4) 
-            RETURNING id
+            RETURNING id, username, email, full_name, is_superuser, fbs_stock_zero_approve
             """,
             username, hashed_password, email, is_superuser
         )
-        user_id = user_id["id"]
-        user = await db.fetchrow("SELECT id, username, email, full_name, is_superuser FROM users WHERE id = $1",
-                                 user_id)
-
         return dict(user)
 
     async def authenticate_user(self, username: str, password: str) -> Optional[Dict]:
@@ -42,7 +38,11 @@ class AuthService:
         request_id = get_request_id()
         diagnostics.record_event("AUTH_DB_FETCH_START", request_id=request_id, username_masked=mask_username(username))
         db_started = time.monotonic()
-        user = await db.fetchrow("SELECT * FROM users WHERE username = $1", username)
+        user = await db.fetchrow(
+            "SELECT id, username, email, full_name, is_superuser, fbs_stock_zero_approve, hashed_password "
+            "FROM users WHERE username = $1",
+            username,
+        )
         diagnostics.record_event(
             "AUTH_DB_FETCH_END",
             request_id=request_id,
@@ -70,7 +70,8 @@ class AuthService:
             "username": user["username"],
             "email": user["email"],
             "full_name": user["full_name"],
-            "is_superuser": user["is_superuser"]
+            "is_superuser": user["is_superuser"],
+            "fbs_stock_zero_approve": user["fbs_stock_zero_approve"],
         }
 
     # async def update_user(self, user_id: int, update_data: Dict) -> Dict:
@@ -89,13 +90,17 @@ class AuthService:
 
     async def get_user_by_id(self, user_id: int) -> Dict:
         """Get user by ID"""
-        user = await db.fetchrow("SELECT id, username, email, full_name, is_superuser FROM users WHERE id = $1",
-                                 user_id)
+        user = await db.fetchrow(
+            "SELECT id, username, email, full_name, is_superuser, fbs_stock_zero_approve FROM users WHERE id = $1",
+            user_id,
+        )
         return dict(user) if user else None
 
     async def get_all_users(self) -> List[Dict]:
         """Get all users"""
-        users = await db.fetch("SELECT id, username, email, full_name, is_superuser FROM users ORDER BY id")
+        users = await db.fetch(
+            "SELECT id, username, email, full_name, is_superuser, fbs_stock_zero_approve FROM users ORDER BY id"
+        )
         return [dict(user) for user in users]
 
     async def delete_user_by_username(self, id_user: int) -> bool:
@@ -142,6 +147,8 @@ class AuthService:
         except jwt.JWTError:
             return None
 
-        user = await db.fetchrow("SELECT id, username, email, full_name, is_superuser FROM users WHERE username = $1",
-                                 username)
+        user = await db.fetchrow(
+            "SELECT id, username, email, full_name, is_superuser, fbs_stock_zero_approve FROM users WHERE username = $1",
+            username,
+        )
         return None if user is None else dict(user)

@@ -87,7 +87,8 @@ async def login(
             "token_type": "bearer",
             "user_id": user["id"],
             "username": user["username"],
-            "is_superuser": user["is_superuser"]
+            "is_superuser": user["is_superuser"],
+            "fbs_stock_zero_approve": user["fbs_stock_zero_approve"],
         }
     except HTTPException:
         raise
