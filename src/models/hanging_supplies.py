@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Optional, Set, Tuple, Iterable
 from datetime import datetime, timedelta
 
 from numpy import record
@@ -563,40 +563,20 @@ class HangingSupplies:
             logger.error(f"Ошибка при получении висячих поставок с is_fictitious_delivered={is_fictitious_delivered}: {str(e)}")
             return []
 
-    async def get_fictitious_shipped_order_ids(self, supply_id: str, account: str) -> List[int]:
-        """
-        Получает список фиктивно отгруженных order_id для поставки.
-        
-        Args:
-            supply_id: ID поставки
-            account: Аккаунт Wildberries
-            
-        Returns:
-            List[int]: Список фиктивно отгруженных order_id
-        """
-        try:
-            query = """
-            SELECT fictitious_shipped_order_ids 
-            FROM public.hanging_supplies 
-            WHERE supply_id = $1 AND account = $2
-            """
-            result = await self.db.fetchrow(query, supply_id, account)
-            
-            if result:
-                shipped_data = json.loads(result['fictitious_shipped_order_ids'])
-                
-                if shipped_data:
-                    try:
-                        order_ids = [item['order_id'] for item in shipped_data]
-                        return order_ids
-                    except (KeyError, TypeError) as parse_error:
-                        logger.error(f"Ошибка парсинга fictitious_shipped_order_ids: {parse_error}, данные: {shipped_data}")
-                        return []
-            
-            return []
-        except Exception as e:
-            logger.error(f"Ошибка получения фиктивно отгруженных order_id для поставки {supply_id} ({account}): {str(e)}")
-            return []
+    @staticmethod
+    def parse_fictitious_shipped_order_ids(data: str | list | None) -> set[int]:
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                logger.error("Не удалось прочитать JSON в fictitious_shipped_order_ids")
+                return set()
+        if not isinstance(data, list):
+            return set()
+        return {
+            item['order_id'] for item in data
+            if isinstance(item, dict) and type(item.get('order_id')) is int
+        }
 
     async def add_fictitious_shipped_order_ids(self, supply_id: str, account: str,
                                               order_ids: List[int], operator: Optional[str] = None) -> bool:
@@ -634,21 +614,29 @@ class HangingSupplies:
             logger.error(f"Ошибка добавления фиктивно отгруженных order_id для поставки {supply_id} ({account}): {str(e)}")
             return False
 
-    async def get_fictitious_shipped_order_ids_batch(self, supplies: Dict[str, str]) -> Dict[Tuple[str, str], List[int]]:
-        """
-        Получает фиктивно отгруженные order_id для группы поставок.
-        
-        Args:
-            supplies: Словарь поставок {supply_id: account}
-            
-        Returns:
-            Dict[Tuple[str, str], List[int]]: Словарь {(supply_id, account): [order_id1, order_id2, ...]}
-        """
-        result = {}
-        for supply_id, account in supplies.items():
-            shipped_ids = await self.get_fictitious_shipped_order_ids(supply_id, account)
-            result[(supply_id, account)] = shipped_ids
-        return result
+    async def get_fictitious_shipped_order_ids_batch(
+            self, supplies: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], set[int]]:
+        """Получает отметки об отгрузке для пар (supply_id, account)."""
+        supply_keys = list(supplies)
+        if not supply_keys:
+            return {}
+        supply_ids, accounts = zip(*supply_keys)
+        rows = await self.db.fetch(
+            """
+            SELECT hs.supply_id, hs.account, hs.fictitious_shipped_order_ids
+            FROM public.hanging_supplies AS hs
+            JOIN unnest($1::text[], $2::text[]) AS requested(supply_id, account)
+                ON hs.supply_id = requested.supply_id AND hs.account = requested.account
+            """,
+            list(supply_ids), list(accounts),
+        )
+        return {
+            (row['supply_id'], row['account']): self.parse_fictitious_shipped_order_ids(
+                row['fictitious_shipped_order_ids']
+            )
+            for row in rows
+        }
 
     async def _sync_get_hanging_supplies_by_status(self) -> list[HangingSuppliesWithOverdueOrders]:
         """

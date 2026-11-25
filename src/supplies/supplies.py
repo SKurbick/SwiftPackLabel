@@ -830,25 +830,10 @@ class SuppliesService:
 
                     # Добавляем количество отгруженных товаров
                     hanging_supply_data = hanging_supplies_map[key]
-                    fictitious_shipped_order_ids = hanging_supply_data.get('fictitious_shipped_order_ids', [])
-
-                    # Десериализуем fictitious_shipped_order_ids если это строка JSON
-                    if isinstance(fictitious_shipped_order_ids, str):
-                        try:
-                            fictitious_shipped_order_ids = json.loads(fictitious_shipped_order_ids)
-                        except json.JSONDecodeError:
-                            fictitious_shipped_order_ids = []
-
-                    if fictitious_shipped_order_ids and isinstance(fictitious_shipped_order_ids, list):
-                        # Подсчитываем уникальные ID заказов
-                        unique_shipped_ids = set(
-                            order.get('order_id') for order in fictitious_shipped_order_ids
-                            if isinstance(order, dict) and order.get('order_id')
-                        )
-                        supply["shipped_count"] = len(unique_shipped_ids)
-                    else:
-                        unique_shipped_ids = set()
-                        supply["shipped_count"] = 0
+                    unique_shipped_ids = HangingSupplies.parse_fictitious_shipped_order_ids(
+                        hanging_supply_data.get('fictitious_shipped_order_ids')
+                    )
+                    supply["shipped_count"] = len(unique_shipped_ids)
 
                     # Добавляем информацию о фиктивной доставке
                     is_fictitious_delivered = hanging_supply_data.get('is_fictitious_delivered', False)
@@ -956,6 +941,23 @@ class SuppliesService:
                     filtered_supplies.append(supply)
 
         return filtered_supplies
+
+    async def with_current_fictitious_shipments(self, snapshot: SupplyIdResponseSchema) -> SupplyIdResponseSchema:
+        """Применяет отметки об отгрузке, сохранённые после сборки снимка доставки."""
+        shipped_by_supply = await HangingSupplies(self.db).get_fictitious_shipped_order_ids_batch(
+            (supply.supply_id, supply.account) for supply in snapshot.supplies
+        )
+        supplies = []
+        for supply in snapshot.supplies:
+            shipped_ids = shipped_by_supply.get((supply.supply_id, supply.account), set())
+            canceled_ids = [order_id for order_id in supply.canceled_order_ids or [] if order_id not in shipped_ids]
+            unavailable_ids = shipped_ids.union(canceled_ids)
+            if any(order.order_id not in unavailable_ids for order in supply.orders):
+                supplies.append(supply.model_copy(update={
+                    "shipped_count": len(shipped_ids),
+                    "canceled_order_ids": canceled_ids,
+                }))
+        return snapshot.model_copy(update={"supplies": supplies})
 
     async def enrich_orders_with_qr_codes(self, supplies_data: List[Dict]) -> List[Dict]:
         """
@@ -4656,7 +4658,6 @@ class SuppliesService:
         Returns:
             Dict[str, Any]: Результат операции
         """
-        start_time = time.time()
         logger.info(f"Начало фиктивной отгрузки {len(supplies)} поставок с количеством {shipped_quantity}")
 
         # 1. Получаем заказы напрямую из WB API (без метаданных поставок)
@@ -4664,37 +4665,35 @@ class SuppliesService:
 
         # 2. Получаем уже фиктивно отгруженные order_id из БД
         hanging_supplies = HangingSupplies(self.db)
-        fictitious_shipped_ids = await hanging_supplies.get_fictitious_shipped_order_ids_batch(supplies)
+        fictitious_shipped_ids = await hanging_supplies.get_fictitious_shipped_order_ids_batch(supplies.items())
 
         # 3. Фильтруем доступные заказы (упрощенная логика)
         available_orders = await self._filter_and_sort_orders(all_orders, fictitious_shipped_ids)
 
-        # 4. Валидация и автокоррекция количества
-        if len(available_orders) == 0:
-            # Критическая ошибка - нет доступных заказов для отгрузки
-            canceled_count = len(all_orders) - len(available_orders)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Нет доступных заказов для отгрузки. "
-                       f"Всего заказов: {len(all_orders)}, "
-                       f"отменено/уже отгружено: {canceled_count}"
-            )
-
-        if len(available_orders) < shipped_quantity:
-            # Автокоррекция: отгружаем максимум доступных заказов
-            shipped_quantity = len(available_orders)
-            canceled_count = len(all_orders) - len(available_orders)
-
-            original_quantity = shipped_quantity
-            logger.warning(
-                f"⚠️ АВТОКОРРЕКЦИЯ КОЛИЧЕСТВА: запрошено отгрузить {original_quantity} заказов, "
-                f"но доступно только {shipped_quantity}. "
-                f"Причина: {canceled_count} заказов отменены или уже отгружены. "
-                f"Будет отгружено {shipped_quantity} заказов."
-            )
-
-        # 5. Выбираем заказы по количеству (старые сначала)
-        selected_orders = await self._select_orders_by_quantity(available_orders, shipped_quantity)
+        reprinting = not available_orders
+        if reprinting:
+            current_order_keys = {(order['supply_id'], order['account'], order['id']) for order in all_orders}
+            shipped_order_keys = {
+                (supply_id, account, order_id)
+                for (supply_id, account), order_ids in fictitious_shipped_ids.items()
+                for order_id in order_ids
+            }
+            if (
+                len(all_orders) != shipped_quantity
+                or len(current_order_keys) != shipped_quantity
+                or current_order_keys != shipped_order_keys
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Нет доступных заказов для отгрузки. Всего заказов: {len(all_orders)}, "
+                           f"отменено/уже отгружено: {len(all_orders)}",
+                )
+            selected_orders = all_orders
+            logger.info(f"Повторная печать стикеров для {len(selected_orders)} отгруженных заказов")
+        else:
+            if len(available_orders) < shipped_quantity:
+                logger.warning(f"Запрошено отгрузить {shipped_quantity} заказов, доступно {len(available_orders)}")
+            selected_orders = await self._select_orders_by_quantity(available_orders, shipped_quantity)
 
         # 5.5. Генерируем стикеры для выбранных заказов
         logger.info(f"Запрос стикеров для {len(selected_orders)} выбранных заказов")
@@ -4703,11 +4702,13 @@ class SuppliesService:
         stickers_grouped = self.group_result(stickers_raw)
 
         # 5.6. Извлекаем список order_ids которые РЕАЛЬНО получили стикеры от WB API
-        received_order_ids = set()
-        for account_data in stickers_grouped.values():
-            for supply_data in account_data.values():
-                received_ids = supply_data.get('_received_order_ids', [])
-                received_order_ids.update(received_ids)
+        received_order_ids = {
+            sticker['orderId']
+            for account_data in stickers_grouped.values()
+            for supply_data in account_data.values()
+            for sticker in supply_data.get('stickers', [])
+            if sticker.get('orderId') is not None and sticker.get('file')
+        }
 
         logger.info(
             f"Стикеры получены: {len(received_order_ids)} из {len(selected_orders)} заказов"
@@ -4724,6 +4725,10 @@ class SuppliesService:
             order for order in selected_orders
             if order['id'] not in received_order_ids
         ]
+
+        if reprinting and orders_without_stickers:
+            missing_ids = [order['id'] for order in orders_without_stickers]
+            raise HTTPException(status_code=502, detail=f"wb не вернул стикеры для заказов: {missing_ids}")
 
         # 5.8. Обработка случаев когда стикеры не получены
         if not orders_with_stickers:
@@ -4763,6 +4768,9 @@ class SuppliesService:
                     f"Невозможно выполнить фиктивную отгрузку: не сгенерирован pdf файл"
                 )
             )
+
+        if reprinting:
+            return {"stickers_pdf": stickers_pdf}
 
         # 6. Отправка данных в shipment_of_goods и 1C - ТОЛЬКО заказы со стикерами
         # author для 1C берется из user (JWT), operator для БД из запроса
@@ -4827,7 +4835,7 @@ class SuppliesService:
         return all_orders
 
     async def _filter_and_sort_orders(self, all_orders: List[Dict],
-                                      fictitious_shipped_ids: Dict[Tuple[str, str], List[int]]) -> List[Dict]:
+                                      fictitious_shipped_ids: Dict[Tuple[str, str], Set[int]]) -> List[Dict]:
         """
         Фильтрует и сортирует заказы.
 
@@ -4872,7 +4880,7 @@ class SuppliesService:
             account = order['account']
             order_id = order['id']
             shipped_key = (supply_id, account)
-            shipped_ids = set(fictitious_shipped_ids.get(shipped_key, []))
+            shipped_ids = fictitious_shipped_ids.get(shipped_key, set())
 
             # Проверка 1: Заказ уже был фиктивно отгружен?
             if order_id in shipped_ids:
@@ -5105,35 +5113,6 @@ class SuppliesService:
                     supply_id, account, order_ids, operator
                 )
                 logger.info(f"Сохранено {len(order_ids)} фиктивно отгруженных заказов для поставки {supply_id} ({account})")
-
-    async def generate_stickers_for_selected_orders(self, selected_orders: List[Dict], 
-                                                   supplies: Dict[str, str]) -> BytesIO:
-        """
-        Генерирует PDF стикеры для выбранных заказов фиктивной отгрузки.
-        
-        Args:
-            selected_orders: Заказы из shipment_fictitious_supplies_with_quantity
-            supplies: Словарь {supply_id: account}
-            
-        Returns:
-            BytesIO: PDF файл со стикерами
-        """
-        logger.info(f"Генерация стикеров для {len(selected_orders)} фиктивно отгружаемых заказов")
-        
-        # 1. Преобразуем selected_orders в формат SupplyIdBodySchema
-        supply_ids = self._convert_selected_orders_to_supply_schema(selected_orders, supplies)
-        
-        # 2. Используем СУЩЕСТВУЮЩУЮ цепочку методов
-        stickers: Dict[str, Dict] = self.group_result(await self.get_stickers(supply_ids))
-        self.union_results_stickers(supply_ids, stickers) 
-        grouped_stickers = await self.group_orders_to_wild(supply_ids)
-        
-        # 3. Генерируем PDF через существующий метод
-        from src.service.service_pdf import collect_images_sticker_to_pdf
-        pdf_buffer = await collect_images_sticker_to_pdf(grouped_stickers)
-        
-        logger.info(f"PDF стикеры сгенерированы для {len(grouped_stickers)} wild-кодов")
-        return pdf_buffer
 
     def _convert_selected_orders_to_supply_schema(self, selected_orders: List[Dict], 
                                                  supplies: Dict[str, str]) -> SupplyIdBodySchema:

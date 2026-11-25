@@ -1,4 +1,5 @@
 from typing import List, Dict
+from urllib.parse import quote
 
 from starlette.responses import StreamingResponse, JSONResponse
 from fastapi import APIRouter, Depends, Body, status, HTTPException, Path, Query
@@ -10,7 +11,7 @@ from src.supplies.schema import SupplyIdResponseSchema, SupplyIdBodySchema, Wild
     FictitiousDeliveryRequest, FictitiousDeliveryResponse, FictitiousShipmentRequest, \
     MoveOrdersByQRRequest, MoveOrdersByQRResponse
 from src.supplies.supplies import SuppliesService
-from src.db import get_db_connection, AsyncGenerator
+from src.db import get_db_connection, AsyncGenerator, DatabaseManager
 from src.service.service_pdf import collect_images_sticker_to_pdf, create_table_pdf
 from src.models.supply_operations import SupplyOperationsDB
 from src.service.zip_service import create_zip_archive
@@ -24,31 +25,23 @@ from src.cache.global_cache import global_cache
 supply = APIRouter(prefix='/supplies', tags=['Supplies'])
 
 
-@supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
 @global_cached(key="supplies_all", cache_only=True)
+async def _get_cached_supplies(hanging_only: bool, is_delivery: bool, db: DatabaseManager) -> SupplyIdResponseSchema:
+    return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only, is_delivery=is_delivery)
+
+
+@supply.get("/", response_model=SupplyIdResponseSchema, status_code=status.HTTP_200_OK)
 async def get_supplies(
         hanging_only: bool = False,
         is_delivery: bool = False,
-        db: AsyncGenerator = Depends(get_db_connection),
+        db: DatabaseManager = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> SupplyIdResponseSchema:
-    """
-    Получить список поставок с фильтрацией по висячим и доставке.
-    
-    Примечание: Cache middleware проверяет глобальный кэш ПЕРЕД авторизацией.
-    Эта функция вызывается только если нет кэша или нужно обновление.
-    
-    Args:
-        hanging_only: Если True - вернуть только висячие поставки, если False - только обычные (не висячие)
-        is_delivery: Если True - получать поставки из отгрузок за неделю (таблица shipment_of_goods), 
-                    если False - получать из WB API
-        db: Соединение с базой данных
-        user: Текущий пользователь
-    Returns:
-        SupplyIdResponseSchema: Список поставок с их деталями
-    """
-    logger.info("get_supplies function called (no cache available)")
-    return await SuppliesService(db).get_list_supplies(hanging_only=hanging_only, is_delivery=is_delivery)
+    """Получить список поставок с фильтрацией по висячим и доставке."""
+    snapshot = await _get_cached_supplies(hanging_only, is_delivery, db)
+    if hanging_only and is_delivery:
+        return await SuppliesService(db).with_current_fictitious_shipments(snapshot)
+    return snapshot
 
 
 @supply.post("/upload_stickers",
@@ -265,39 +258,18 @@ async def deliver_fictitious_supply(
 
 
 @supply.post("/shipment_of_fictions",
-             status_code=status.HTTP_201_CREATED,
+             status_code=status.HTTP_200_OK,
              summary="Фиктивная отгрузка поставок с указанным количеством",
-             description="Выполняет фиктивную отгрузку указанного количества заказов из поставок",
+             description="Отгружает заказы или возвращает стикеры при повторе запроса для уже отгруженных заказов",
+             response_class=StreamingResponse,
              response_description="PDF файл с QR-стикерами отгруженных заказов",
-             responses={201: {"content": {"application/pdf": {}},
-                              "description": "PDF файл с QR-стикерами для фиктивно отгруженных заказов"}})
+             responses={200: {"content": {"application/pdf": {}}}})
 async def shipment_of_fictions_supply(
         request: FictitiousShipmentRequest = Body(..., description="Данные для фиктивной отгрузки"),
         db: AsyncGenerator = Depends(get_db_connection),
         user: dict = Depends(get_current_user)
 ) -> StreamingResponse:
-    """
-    Выполняет фиктивную отгрузку заказов из поставок.
-    
-    Алгоритм:
-    1. Получает актуальные данные о заказах через get_information_to_supply_details
-    2. Фильтрует уже фиктивно отгруженные заказы из БД (поле fictitious_shipped_order_ids)
-    3. Сортирует по времени создания (старые сначала)
-    4. Выбирает указанное количество заказов
-    5. Имитирует отгрузку (заглушка)
-    6. Сохраняет отгруженные order_id в fictitious_shipped_order_ids
-    
-    Args:
-        request: Данные запроса с поставками и количеством для отгрузки
-        db: Соединение с базой данных
-        user: Данные текущего пользователя
-        
-    Returns:
-        FictitiousDeliveryResponse: Результат операции с подробной информацией
-        
-    Raises:
-        HTTPException: В случае ошибки обработки запроса или недостатка заказов
-    """
+    """Отгружает товар из фиктивной поставки и возвращает PDF со стикерами."""
     logger.info(f"Запрос на фиктивную отгрузку {request.shipped_quantity} заказов "
                 f"из {len(request.supplies)} поставок от {user.get('username', 'unknown')}")
 
@@ -314,11 +286,18 @@ async def shipment_of_fictions_supply(
         
         # Всегда возвращаем PDF стикеры
         if result.get("stickers_pdf"):
-            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{request.operator or user.get('username', 'unknown')}.pdf"
+            operator_name = request.operator or user.get('username', 'unknown')
+            filename = f"fictitious_shipment_stickers_{request.shipped_quantity}_{operator_name}.pdf"
+            encoded_filename = quote(filename, safe="")
+            content_disposition = (
+                f"attachment; filename={filename}"
+                if encoded_filename == filename
+                else f"attachment; filename*=UTF-8''{encoded_filename}"
+            )
             return StreamingResponse(
                 result["stickers_pdf"],
                 media_type="application/pdf", 
-                headers={'Content-Disposition': f'attachment; filename={filename}'}
+                headers={"Content-Disposition": content_disposition}
             )
         else:
             # Если стикеры не удалось сгенерировать, возвращаем ошибку
